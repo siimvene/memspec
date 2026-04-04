@@ -1,8 +1,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { defaultConfigYaml } from './config.js';
+import { defaultConfigYaml, type ConfigGenerationOptions } from './config.js';
+import { FtsIndex } from './fts.js';
 import { parseMemoryFile, serializeMemoryFile } from './frontmatter.js';
+import { validateFrontmatter } from './schema.js';
 import type { MemoryFrontmatter, MemoryItem, MemoryType } from './types.js';
+import matter from 'gray-matter';
 
 function walkMarkdownFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
@@ -22,8 +25,25 @@ function walkMarkdownFiles(dir: string): string[] {
   return results;
 }
 
+export interface StoreSearchOptions {
+  limit?: number;
+  types?: MemoryType[];
+  minConfidence?: number;
+  ranking?: {
+    relevance?: number;
+    confidence?: number;
+    recency?: number;
+  };
+}
+
+export interface LoadWarning {
+  file: string;
+  reason: string;
+}
+
 export class MemspecStore {
   readonly root: string;
+  readonly warnings: LoadWarning[] = [];
 
   constructor(root?: string) {
     this.root = root ? resolve(root, '.memspec') : this.findRoot();
@@ -47,7 +67,7 @@ export class MemspecStore {
     return join(this.root, 'config.yaml');
   }
 
-  init(): void {
+  init(configOptions?: ConfigGenerationOptions): void {
     const dirs = [
       this.root,
       join(this.root, 'observations'),
@@ -62,7 +82,7 @@ export class MemspecStore {
     }
 
     if (!existsSync(this.configPath)) {
-      writeFileSync(this.configPath, defaultConfigYaml());
+      writeFileSync(this.configPath, defaultConfigYaml(configOptions));
     }
   }
 
@@ -70,10 +90,21 @@ export class MemspecStore {
     return join(this.root, 'memory', `${type}s`);
   }
 
+  observationDir(): string {
+    return join(this.root, 'observations');
+  }
+
+  private pathForItem(item: MemoryFrontmatter): string {
+    if (item.state === 'captured') {
+      return join(this.observationDir(), `${item.id}.md`);
+    }
+    return join(this.typeDir(item.type), `${item.id}.md`);
+  }
+
   writeItem(item: MemoryFrontmatter & { title: string; body: string }): string {
-    const dir = this.typeDir(item.type);
+    const filePath = this.pathForItem(item);
+    const dir = resolve(filePath, '..');
     mkdirSync(dir, { recursive: true });
-    const filePath = join(dir, `${item.id}.md`);
     writeFileSync(filePath, serializeMemoryFile(item));
     return filePath;
   }
@@ -81,10 +112,39 @@ export class MemspecStore {
   loadAll(): MemoryItem[] {
     const files = [
       ...walkMarkdownFiles(join(this.root, 'memory')),
+      ...walkMarkdownFiles(join(this.root, 'observations')),
       ...walkMarkdownFiles(join(this.root, 'archive')),
     ];
 
-    return files.map((file) => parseMemoryFile(readFileSync(file, 'utf8'), file));
+    this.warnings.length = 0;
+    const items: MemoryItem[] = [];
+
+    for (const file of files) {
+      try {
+        const raw = readFileSync(file, 'utf8');
+        const parsed = matter(raw);
+        const data = parsed.data as Record<string, unknown>;
+
+        // Coerce dates before validation
+        for (const key of ['created', 'decay_after']) {
+          if (data[key] instanceof Date) {
+            data[key] = (data[key] as Date).toISOString();
+          }
+        }
+
+        const result = validateFrontmatter(data);
+        if (!result.success) {
+          this.warnings.push({ file, reason: `Invalid frontmatter: ${result.errors.join('; ')}` });
+          continue;
+        }
+
+        items.push(parseMemoryFile(raw, file));
+      } catch (err) {
+        this.warnings.push({ file, reason: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    return items;
   }
 
   loadActive(): MemoryItem[] {
@@ -113,26 +173,69 @@ export class MemspecStore {
     writeFileSync(item.filePath, serializeMemoryFile(item));
   }
 
-  search(query: string, limit: number = 10, type?: MemoryType): MemoryItem[] {
+  search(query: string, options: StoreSearchOptions = {}): MemoryItem[] {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];
 
-    const scored = this.loadActive()
-      .filter((item) => !type || item.type === type)
-      .map((item) => {
-        const searchable = [item.title, item.body, item.tags.join(' ')].join(' ').toLowerCase();
-        let score = 0;
-        for (const term of terms) {
-          if (item.title.toLowerCase().includes(term)) score += 3;
-          else if (item.tags.join(' ').toLowerCase().includes(term)) score += 2;
-          else if (searchable.includes(term)) score += 1;
-        }
-        return { item, score };
-      })
-      .filter(({ score }) => score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
+    const {
+      limit = 10,
+      types,
+      minConfidence = 0,
+      ranking,
+    } = options;
 
-    return scored.map(({ item }) => item);
+    const activeItems = this.loadActive();
+
+    // Build FTS5 index and search
+    const fts = new FtsIndex();
+    try {
+      fts.populate(activeItems);
+      const matches = fts.search(query, { limit: limit * 2, types, minConfidence });
+
+      if (matches.length === 0) return [];
+
+      const itemMap = new Map(activeItems.map((item) => [item.id, item]));
+      const relevanceWeight = ranking?.relevance ?? 1;
+      const confidenceWeight = ranking?.confidence ?? 0;
+      const recencyWeight = ranking?.recency ?? 0;
+      const now = Date.now();
+      const phrase = terms.join(' ');
+
+      const scored = matches.map(({ id, bm25Score }) => {
+        const item = itemMap.get(id);
+        if (!item) return null;
+
+        // FTS5 rank: bm25() returns negative values, so invert it.
+        const ftsScore = -bm25Score;
+
+        const titleLower = item.title.toLowerCase();
+        const tagsLower = item.tags.join(' ').toLowerCase();
+        const bodyLower = item.body.toLowerCase();
+        let phraseBonus = 0;
+        if (terms.length > 1) {
+          if (titleLower.includes(phrase)) phraseBonus = 5;
+          else if (tagsLower.includes(phrase)) phraseBonus = 4;
+          else if (bodyLower.includes(phrase)) phraseBonus = 3;
+        }
+
+        const ageMs = Math.max(0, now - Date.parse(item.created));
+        const ageDays = ageMs / (24 * 60 * 60 * 1000);
+        const recency = 1 / (1 + ageDays);
+
+        const score =
+          ((ftsScore + phraseBonus) * relevanceWeight) +
+          (item.confidence * confidenceWeight) +
+          (recency * recencyWeight);
+
+        return { item, score };
+      }).filter((entry): entry is { item: MemoryItem; score: number } => entry !== null);
+
+      return scored
+        .sort((a, b) => b.score - a.score || b.item.confidence - a.item.confidence)
+        .slice(0, limit)
+        .map(({ item }) => item);
+    } finally {
+      fts.close();
+    }
   }
 }

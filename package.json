@@ -4,7 +4,8 @@
   "description": "Structured memory for AI agents - spec plus CLI",
   "type": "module",
   "bin": {
-    "memspec": "./dist/cli.js"
+    "memspec": "./dist/cli.js",
+    "memspec-mcp": "./dist/mcp.js"
   },
   "files": [
     "dist",
@@ -18,7 +19,14 @@
     "check": "npm run build && npm test",
     "prepublishOnly": "npm run check"
   },
-  "keywords": ["ai", "agent", "memory", "specification", "cli"],
+  "keywords": [
+    "ai",
+    "agent",
+    "memory",
+    "specification",
+    "cli",
+    "mcp"
+  ],
   "author": "Siim Vene",
   "license": "MIT",
   "repository": {
@@ -29,12 +37,15 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.8.0",
     "commander": "^14.0.0",
     "gray-matter": "^4.0.3",
     "ulid": "^3.0.1",
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"

@@ -59,5 +59,15 @@ export function runStatus(options: StatusOptions): string {
     }
   }
 
+  if (store.warnings.length > 0) {
+    lines.push('', `Skipped ${store.warnings.length} non-memspec file(s):`);
+    for (const w of store.warnings.slice(0, 5)) {
+      lines.push(`  ${w.file}`);
+    }
+    if (store.warnings.length > 5) {
+      lines.push(`  ... and ${store.warnings.length - 5} more`);
+    }
+  }
+
   return lines.join('\n');
 }

@@ -1,24 +1,46 @@
+import { getProfile, loadConfig } from '../lib/config.js';
 import { MemspecStore } from '../lib/store.js';
+import { MEMORY_TYPES, type MemoryType } from '../lib/types.js';
 
 export interface SearchOptions {
   cwd?: string;
   type?: string;
   limit?: string;
   json?: boolean;
+  profile?: string;
+}
+
+function assertMemoryType(input: string): MemoryType {
+  if ((MEMORY_TYPES as readonly string[]).includes(input)) {
+    return input as MemoryType;
+  }
+  throw new Error(`Unsupported memory type: ${input}`);
+}
+
+function parseProfileTypes(types?: string[]): MemoryType[] | undefined {
+  if (!types || types.length === 0) return undefined;
+  return types.filter((type): type is MemoryType => (MEMORY_TYPES as readonly string[]).includes(type));
 }
 
 export function runSearch(query: string, options: SearchOptions): string {
   const store = new MemspecStore(options.cwd);
+  const config = loadConfig(store.root);
+  const profileName = options.profile ?? 'default';
+  const profile = getProfile(config, profileName);
+
   const limit = parseInt(options.limit ?? '10', 10);
   if (Number.isNaN(limit) || limit < 1) {
     throw new Error(`Invalid limit: ${options.limit}`);
   }
 
-  if (options.type && !['fact', 'decision', 'procedure'].includes(options.type)) {
-    throw new Error(`Unsupported memory type: ${options.type}`);
-  }
-
-  const results = store.search(query, limit, options.type as 'fact' | 'decision' | 'procedure' | undefined);
+  const explicitType = options.type ? assertMemoryType(options.type) : undefined;
+  const types = explicitType ? [explicitType] : parseProfileTypes(profile.types);
+  const results = store.search(query, {
+    limit,
+    types,
+    minConfidence: profile.min_confidence ?? 0,
+    ranking: profile.ranking,
+  });
 
   if (results.length === 0) {
     return `No results for "${query}"`;

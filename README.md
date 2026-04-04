@@ -1,8 +1,8 @@
 # Memspec
 
-Structured memory for AI agents: a portable markdown spec plus a small TypeScript CLI.
+Structured memory for AI agents: a portable markdown spec plus a small TypeScript CLI and MCP wrapper.
 
-Memspec keeps markdown files under `.memspec/` as the canonical source of truth. The CLI is a thin local tool for creating, validating, searching, and maintaining that memory. No daemon. No server. No database-owned state.
+Memspec keeps markdown files under `.memspec/` as the canonical source of truth. The CLI and MCP server are thin local tools for creating, validating, searching, and maintaining that memory. No daemon. No database-owned state.
 
 ## Install
 
@@ -61,6 +61,24 @@ memspec correct ms_01HXK... --reason "Migrated to OAuth" --replace "Now uses OAu
 
 Active memories live under `memory/`. Corrected, decayed, and archived items live under `archive/`.
 
+## MCP Wrapper
+
+```bash
+# Start a stdio MCP server in the current project
+memspec-mcp
+
+# Or pin it to a project root
+memspec-mcp --cwd /path/to/project
+```
+
+Exposed MCP tools:
+
+- `memspec_init`
+- `memspec_add`
+- `memspec_search`
+- `memspec_status`
+- `memspec_validate`
+
 ## CLI Commands
 
 | Command | Description |
@@ -76,13 +94,14 @@ Active memories live under `memory/`. Corrected, decayed, and archived items liv
 ## Package Shape
 
 - **`docs/`** — the spec (v0.2), research, reality check, AGENTS.md addon
-- **`src/`** — TypeScript CLI
+- **`src/`** — TypeScript CLI and MCP server
 - **`.memspec/`** (in your project) — the memory store itself
 
 ## What's Included
 
 - File-canonical store layout (markdown + YAML frontmatter)
 - All 7 CLI commands: init, add, search, correct, status, decay, validate
+- Stdio MCP wrapper for agent/tool integrations
 - Zod schema validation and lifecycle state transitions
 - File-backed keyword search with title/tag/body scoring
 - Correction protocol with replacement linking and archival
@@ -107,6 +126,7 @@ Copy the [AGENTS.md addon](docs/AGENTS-ADDON.md) into your agent's system prompt
 - [Research](docs/RESEARCH.md) — prior art analysis
 - [Reality Check](docs/REALITY-CHECK.md) — fit test against a real memory system
 - [AGENTS.md Addon](docs/AGENTS-ADDON.md) — copy-paste usage contract for agents
+- [MCP Wrapper](docs/MCP.md) — stdio server usage and tool surface
 
 ## License
 

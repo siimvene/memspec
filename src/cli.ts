@@ -5,6 +5,7 @@ import { runAdd } from './commands/add.js';
 import { runCorrect } from './commands/correct.js';
 import { runDecay } from './commands/decay.js';
 import { runInit } from './commands/init.js';
+import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
 import { runValidate } from './commands/validate.js';
@@ -21,8 +22,22 @@ program
   .command('init')
   .description('Initialize a memspec store')
   .option('--cwd <path>', 'project root')
-  .action((options: { cwd?: string }) => {
-    console.log(runInit(options));
+  .option('--search-engine <engine>', 'fts5 | hybrid')
+  .option('--embeddings-provider <provider>', 'openai | ollama')
+  .option('--embeddings-endpoint <url>', 'embedding endpoint URL')
+  .option('--embeddings-model <model>', 'embedding model name')
+  .option('--embeddings-api-key <key>', 'embedding API key')
+  .option('--no-interactive', 'disable setup prompts')
+  .action(async (options: {
+    cwd?: string;
+    searchEngine?: 'fts5' | 'hybrid';
+    embeddingsProvider?: string;
+    embeddingsEndpoint?: string;
+    embeddingsModel?: string;
+    embeddingsApiKey?: string;
+    interactive?: boolean;
+  }) => {
+    console.log(await runInit(options));
   });
 
 program
@@ -42,15 +57,25 @@ program
   });
 
 program
+  .command('import-openclaw')
+  .description('Import an OpenClaw memory workspace into memspec')
+  .requiredOption('--source <path>', 'OpenClaw workspace root')
+  .option('--cwd <path>', 'project root')
+  .action((options: { cwd?: string; source: string }) => {
+    console.log(runImportOpenClaw(options));
+  });
+
+program
   .command('search')
   .description('Search active memories')
   .argument('<query>', 'search terms')
   .option('--cwd <path>', 'project root')
   .option('--type <type>', 'filter by type')
+  .option('--profile <name>', 'retrieval profile', 'default')
   .option('--limit <n>', 'max results', '10')
   .option('--json', 'output as JSON')
   .action((query: string, options: {
-    cwd?: string; type?: string; limit?: string; json?: boolean;
+    cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean;
   }) => {
     console.log(runSearch(query, options));
   });

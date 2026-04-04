@@ -2,9 +2,19 @@ import matter from 'gray-matter';
 import type { MemoryFrontmatter, MemoryItem } from './types.js';
 import { assertValidFrontmatter } from './schema.js';
 
+function coerceDates(data: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...data };
+  for (const key of ['created', 'decay_after']) {
+    if (result[key] instanceof Date) {
+      result[key] = (result[key] as Date).toISOString();
+    }
+  }
+  return result;
+}
+
 export function parseMemoryFile(content: string, filePath: string): MemoryItem {
   const parsed = matter(content);
-  const data = assertValidFrontmatter(parsed.data);
+  const data = assertValidFrontmatter(coerceDates(parsed.data as Record<string, unknown>));
   const body = parsed.content.trim();
 
   // Extract title from first heading

@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
+import { getDecayDays, loadConfig } from '../lib/config.js';
 import { MemspecStore } from '../lib/store.js';
-import { DEFAULT_DECAY_DAYS, MEMORY_TYPES, type MemoryType } from '../lib/types.js';
+import { MEMORY_TYPES, type MemoryType } from '../lib/types.js';
 
 export interface AddOptions {
   cwd?: string;
@@ -17,12 +18,12 @@ function assertMemoryType(input: string): MemoryType {
   throw new Error(`Unsupported memory type: ${input}`);
 }
 
-function toDecayAfter(type: MemoryType, override?: string, now: Date = new Date()): string {
+function toDecayAfter(type: MemoryType, decayDays: number, override?: string, now: Date = new Date()): string {
   if (override === 'never') return 'never';
   if (override) return override;
 
   const expires = new Date(now);
-  expires.setUTCDate(expires.getUTCDate() + DEFAULT_DECAY_DAYS[type]);
+  expires.setUTCDate(expires.getUTCDate() + decayDays);
   return expires.toISOString();
 }
 
@@ -39,6 +40,9 @@ export function runAdd(typeInput: string, title: string, options: AddOptions): s
   const store = new MemspecStore(options.cwd);
   store.init();
 
+  const config = loadConfig(store.root);
+  const decayDays = getDecayDays(config, type);
+
   const created = new Date().toISOString();
   const id = `ms_${ulid()}`;
   const filePath = store.writeItem({
@@ -49,7 +53,7 @@ export function runAdd(typeInput: string, title: string, options: AddOptions): s
     created,
     source: options.source ?? 'unknown',
     tags: parseTags(options.tags),
-    decay_after: toDecayAfter(type, options.decayAfter),
+    decay_after: toDecayAfter(type, decayDays, options.decayAfter),
     title,
     body: options.body ?? '',
   });
