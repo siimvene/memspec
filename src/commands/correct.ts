@@ -42,13 +42,13 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
 
     target.state = 'corrected';
     target.corrected_by = newId;
-    store.updateItem(target);
+    store.moveToArchive(target, 'corrected');
 
     return `Corrected ${targetId} → ${newId}\nReason: ${options.reason}`;
   }
 
   target.state = 'corrected';
-  store.updateItem(target);
+  store.moveToArchive(target, 'corrected');
 
   return `Invalidated ${targetId}\nReason: ${options.reason}`;
 }

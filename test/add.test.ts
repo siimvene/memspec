@@ -6,10 +6,9 @@ import matter from 'gray-matter';
 import { makeTempProject, readText, runCli } from './helpers.js';
 
 test('add creates a fact file with required frontmatter fields', async () => {
-  const repoRoot = '/tmp/memspec-12872';
   const target = await makeTempProject();
 
-  await runCli(['init', '--cwd', target], repoRoot);
+  await runCli(['init', '--cwd', target]);
   await runCli([
     'add',
     'fact',
@@ -22,7 +21,7 @@ test('add creates a fact file with required frontmatter fields', async () => {
     'test',
     '--tags',
     'auth,api',
-  ], repoRoot);
+  ]);
 
   const factsDir = join(target, '.memspec', 'memory', 'facts');
   const entries = await readdir(factsDir);
@@ -41,10 +40,9 @@ test('add creates a fact file with required frontmatter fields', async () => {
 });
 
 test('add accepts never as an explicit decay override', async () => {
-  const repoRoot = '/tmp/memspec-12872';
   const target = await makeTempProject();
 
-  await runCli(['init', '--cwd', target], repoRoot);
+  await runCli(['init', '--cwd', target]);
   await runCli([
     'add',
     'decision',
@@ -57,7 +55,7 @@ test('add accepts never as an explicit decay override', async () => {
     'test',
     '--decay-after',
     'never',
-  ], repoRoot);
+  ]);
 
   const decisionsDir = join(target, '.memspec', 'memory', 'decisions');
   const entries = await readdir(decisionsDir);
@@ -66,4 +64,18 @@ test('add accepts never as an explicit decay override', async () => {
   const content = await readText(join(decisionsDir, entries[0]));
   const parsed = matter(content);
   assert.equal(parsed.data.decay_after, 'never');
+});
+
+test('add rejects unsupported memory type', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  await assert.rejects(
+    () => runCli(['add', 'rule', 'No secrets', '--cwd', target]),
+    (error: Error & { stderr?: string }) => {
+      const output = `${error.message}\n${error.stderr ?? ''}`;
+      assert.match(output, /Unsupported memory type/);
+      return true;
+    },
+  );
 });

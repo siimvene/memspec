@@ -95,27 +95,30 @@ export class MemspecStore {
     return this.loadAll().find((item) => item.id === id) ?? null;
   }
 
-  moveToArchive(item: MemoryItem): void {
+  moveToArchive(item: MemoryItem, state: MemoryItem['state'] = 'archived'): void {
     const archivePath = join(this.root, 'archive', `${item.id}.md`);
     writeFileSync(
       archivePath,
       serializeMemoryFile({
         ...item,
-        state: 'archived',
+        state,
       }),
     );
-    unlinkSync(item.filePath);
+    if (item.filePath !== archivePath && existsSync(item.filePath)) {
+      unlinkSync(item.filePath);
+    }
   }
 
   updateItem(item: MemoryItem): void {
     writeFileSync(item.filePath, serializeMemoryFile(item));
   }
 
-  search(query: string, limit: number = 10): MemoryItem[] {
+  search(query: string, limit: number = 10, type?: MemoryType): MemoryItem[] {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];
 
     const scored = this.loadActive()
+      .filter((item) => !type || item.type === type)
       .map((item) => {
         const searchable = [item.title, item.body, item.tags.join(' ')].join(' ').toLowerCase();
         let score = 0;

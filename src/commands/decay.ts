@@ -33,11 +33,10 @@ export function runDecay(options: DecayOptions): string {
 
   for (const c of candidates) {
     if (options.archive) {
-      store.moveToArchive(c.item);
+      store.moveToArchive(c.item, 'archived');
       archived++;
     } else {
-      c.item.state = 'decayed';
-      store.updateItem(c.item);
+      store.moveToArchive(c.item, 'decayed');
       decayed++;
     }
   }

@@ -5,10 +5,9 @@ import { join } from 'node:path';
 import { makeTempProject, readText, runCli } from './helpers.js';
 
 test('init creates the memspec directory tree and default config', async () => {
-  const repoRoot = '/tmp/memspec-12872';
   const target = await makeTempProject();
 
-  await runCli(['init', '--cwd', target], repoRoot);
+  await runCli(['init', '--cwd', target]);
 
   await access(join(target, '.memspec', 'observations'));
   await access(join(target, '.memspec', 'memory', 'facts'));

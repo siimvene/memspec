@@ -5,10 +5,9 @@ import { join } from 'node:path';
 import { makeTempProject, runCli } from './helpers.js';
 
 test('validate succeeds on a valid initialized store with one memory item', async () => {
-  const repoRoot = '/tmp/memspec-12872';
   const target = await makeTempProject();
 
-  await runCli(['init', '--cwd', target], repoRoot);
+  await runCli(['init', '--cwd', target]);
   await runCli([
     'add',
     'procedure',
@@ -19,17 +18,16 @@ test('validate succeeds on a valid initialized store with one memory item', asyn
     'Run tests, build, deploy, verify health',
     '--source',
     'test',
-  ], repoRoot);
+  ]);
 
-  const result = await runCli(['validate', '--cwd', target], repoRoot);
+  const result = await runCli(['validate', '--cwd', target]);
   assert.match(result.stdout, /Validation passed/);
 });
 
 test('validate fails on malformed frontmatter and reports the file', async () => {
-  const repoRoot = '/tmp/memspec-12872';
   const target = await makeTempProject();
 
-  await runCli(['init', '--cwd', target], repoRoot);
+  await runCli(['init', '--cwd', target]);
   const badPath = join(target, '.memspec', 'memory', 'facts', 'broken.md');
   await writeFile(
     badPath,
@@ -51,7 +49,7 @@ This file should fail validation.
   );
 
   await assert.rejects(
-    () => runCli(['validate', '--cwd', target], repoRoot),
+    () => runCli(['validate', '--cwd', target]),
     (error: Error & { stdout?: string; stderr?: string }) => {
       const output = `${error.stdout ?? ''}\n${error.stderr ?? ''}`;
       assert.match(output, /broken\.md/);

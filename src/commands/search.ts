@@ -10,12 +10,15 @@ export interface SearchOptions {
 export function runSearch(query: string, options: SearchOptions): string {
   const store = new MemspecStore(options.cwd);
   const limit = parseInt(options.limit ?? '10', 10);
-
-  let results = store.search(query, limit);
-
-  if (options.type) {
-    results = results.filter((r) => r.type === options.type);
+  if (Number.isNaN(limit) || limit < 1) {
+    throw new Error(`Invalid limit: ${options.limit}`);
   }
+
+  if (options.type && !['fact', 'decision', 'procedure'].includes(options.type)) {
+    throw new Error(`Unsupported memory type: ${options.type}`);
+  }
+
+  const results = store.search(query, limit, options.type as 'fact' | 'decision' | 'procedure' | undefined);
 
   if (results.length === 0) {
     return `No results for "${query}"`;

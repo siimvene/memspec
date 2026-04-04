@@ -16,7 +16,7 @@ profiles:
   default:
     max_tokens: 2000
     types: [fact, decision, procedure]
-    min_confidence: 0.3
+    min_confidence: 0.7
     ranking:
       relevance: 0.4
       confidence: 0.3

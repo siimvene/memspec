@@ -45,6 +45,11 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   if (item.corrected_by) frontmatter.corrected_by = item.corrected_by;
   if (item.ext && Object.keys(item.ext).length > 0) frontmatter.ext = item.ext;
 
-  const body = [`# ${item.title}`, '', item.body.trim()].join('\n').trimEnd() + '\n';
+  // Strip leading heading if it matches the title to avoid duplication
+  let content = item.body.trim();
+  const headingPattern = new RegExp(`^#\\s+${item.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\n?`);
+  content = content.replace(headingPattern, '').trim();
+
+  const body = [`# ${item.title}`, '', content].join('\n').trimEnd() + '\n';
   return matter.stringify(body, frontmatter);
 }
