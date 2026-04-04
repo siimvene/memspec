@@ -1,8 +1,18 @@
 # Memspec
 
-Structured memory for AI agents: a portable markdown spec plus a small TypeScript CLI and MCP wrapper.
+Portable memory for AI agents.
 
-Memspec keeps markdown files under `.memspec/` as the canonical source of truth. The CLI and MCP server are thin local tools for creating, validating, searching, and maintaining that memory. No daemon. No database-owned state.
+Memspec keeps markdown files under `.memspec/` as the canonical source of truth, then layers a small CLI and stdio MCP server on top. The goal is boring, inspectable, local-first memory that works across Claude, Cursor, Codex, OpenClaw, or any other tool that can call a CLI or MCP server.
+
+No daemon. No backend service. No database-owned state.
+
+## Why Memspec
+
+- Markdown files are the source of truth.
+- Works locally with zero infrastructure.
+- Search is useful out of the box: SQLite FTS5, BM25 ranking, stemming, phrase bonus.
+- Embeddings are optional and configured at `memspec init` time.
+- The same store can be accessed through the CLI or over MCP.
 
 ## Install
 
@@ -22,7 +32,11 @@ npm link
 ## Quickstart
 
 ```bash
-# Initialize a memory store in your project
+# Initialize a memory store in your project.
+# Interactive mode lets you choose:
+# - FTS5 only
+# - Hybrid search with OpenAI-compatible embeddings
+# - Hybrid search with Ollama embeddings
 memspec init
 
 # Add memories
@@ -46,6 +60,16 @@ memspec decay
 memspec correct ms_01HXK... --reason "Migrated to OAuth" --replace "Now uses OAuth2 with PKCE"
 ```
 
+## What You Get
+
+- File-canonical store layout using markdown plus YAML frontmatter
+- Seven CLI commands: `init`, `add`, `search`, `correct`, `status`, `decay`, `validate`
+- Stdio MCP server: `memspec-mcp`
+- FTS5/BM25 search by default
+- Optional hybrid search with embeddings from an OpenAI-compatible endpoint or Ollama
+- Schema validation and lifecycle transitions
+- Correction, decay, archival, and extension metadata support
+
 ## Store Layout
 
 ```text
@@ -60,6 +84,18 @@ memspec correct ms_01HXK... --reason "Migrated to OAuth" --replace "Now uses OAu
 ```
 
 Active memories live under `memory/`. Corrected, decayed, and archived items live under `archive/`.
+
+## Search Modes
+
+`memspec init` supports two search modes:
+
+- `fts5` - the default, zero-setup mode
+- `hybrid` - FTS5 candidate retrieval plus embeddings reranking
+
+Hybrid mode currently supports:
+
+- OpenAI-compatible embeddings endpoints
+- Ollama local embeddings endpoints
 
 ## MCP Wrapper
 
@@ -93,24 +129,13 @@ Exposed MCP tools:
 
 ## Package Shape
 
-- **`docs/`** — the spec (v0.2), research, reality check, AGENTS.md addon
-- **`src/`** — TypeScript CLI and MCP server
-- **`.memspec/`** (in your project) — the memory store itself
-
-## What's Included
-
-- File-canonical store layout (markdown + YAML frontmatter)
-- All 7 CLI commands: init, add, search, correct, status, decay, validate
-- Stdio MCP wrapper for agent/tool integrations
-- Zod schema validation and lifecycle state transitions
-- File-backed keyword search with title/tag/body scoring
-- Correction protocol with replacement linking and archival
-- TTL-based decay with dry-run preview
-- Extension model for richer metadata (ext namespace in frontmatter)
+- **`docs/`** - spec, design notes, research, AGENTS addon, MCP usage
+- **`src/`** - TypeScript CLI, search/index logic, MCP server
+- **`.memspec/`** - the memory store inside each project
 
 ## What's Planned
 
-- Derived SQLite index for faster search on large stores
+- Faster derived index management for larger stores
 - Optional vector search for semantic retrieval
 - Automatic observation classification (rule-based + LLM-enhanced)
 - Retrieval profiles with token budgeting
