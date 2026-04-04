@@ -45,7 +45,7 @@ function resolveSearchType(type?: string): MemoryType[] | undefined {
 
 server.tool(
   'memspec_search',
-  'Search active project memory before answering questions, planning work, or editing code. Returns ranked active facts, decisions, and procedures.',
+  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query.',
   {
     query: z.string().describe('Search terms'),
     type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
@@ -102,7 +102,7 @@ server.tool(
 
 server.tool(
   'memspec_get',
-  'Get a specific memory item by ID. Returns full content including body.',
+  'Retrieve the full content of a specific memory by ID. Use after memspec_search when you need the complete body of a result.',
   {
     id: z.string().describe('Memory item ID (e.g. ms_01JR...)'),
   },
@@ -150,7 +150,7 @@ server.tool(
 
 server.tool(
   'memspec_add',
-  'Add a new memory item. Types: fact (knowledge), decision (choices made), procedure (how-to steps).',
+  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. Search first to avoid duplicates.',
   {
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
@@ -186,7 +186,7 @@ server.tool(
 
 server.tool(
   'memspec_correct',
-  'Correct or invalidate an existing memory. Marks the original as corrected and optionally creates a replacement.',
+  'Fix wrong or stale knowledge. When you discover an existing memory is outdated or incorrect, correct it rather than adding a conflicting duplicate. Optionally provide replacement content.',
   {
     id: z.string().describe('Memory ID to correct'),
     reason: z.string().describe('Why this memory is wrong or stale'),
@@ -213,7 +213,7 @@ server.tool(
 
 server.tool(
   'memspec_status',
-  'Show store summary: item counts by type and state, decay candidates, recent items.',
+  'Check memory store health. Shows counts by type/state, decay candidates, and recent items. Use when unsure if the store is populated or healthy.',
   {},
   async () => {
     try {
@@ -248,7 +248,7 @@ server.tool(
 
 server.tool(
   'memspec_validate',
-  'Check all memory files against the memspec schema. Reports invalid frontmatter.',
+  'Validate all memory files against the memspec schema. Run before committing to catch broken frontmatter or malformed files.',
   {},
   async () => {
     try {
@@ -268,7 +268,7 @@ server.tool(
 
 server.tool(
   'memspec_decay',
-  'Apply TTL decay to expired items. Can preview (dry-run) or archive.',
+  'Clean up expired memories. Facts decay after 90 days, decisions after 180. Use dry_run to preview, or archive to move expired items out of the active set.',
   {
     dry_run: z.boolean().optional().describe('Preview without changes'),
     archive: z.boolean().optional().describe('Move to archive instead of marking decayed'),
@@ -292,7 +292,7 @@ server.tool(
 
 server.tool(
   'memspec_init',
-  'Initialize Memspec in a repo: create .memspec/, import brownfield memory sources when present, and patch AGENTS.md or CLAUDE.md so agents know to use the store.',
+  'Initialize a memspec store in a project. Creates .memspec/, detects and imports existing memory files (MEMORY.md, memory/, .claude/memory/), and patches AGENTS.md/CLAUDE.md with agent instructions.',
   {
     search_engine: z.enum(['fts5', 'hybrid']).optional().describe('Search engine (default fts5)'),
     embeddings_provider: z.string().optional().describe('openai or ollama'),

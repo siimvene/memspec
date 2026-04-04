@@ -6,9 +6,10 @@ const ADDON_MARKER_END = '<!-- memspec:init:end -->';
 
 export const AGENT_ADDON_BLOCK = [
   ADDON_MARKER_START,
-  '## Memspec',
+  '## Memory (Memspec)',
   '',
-  'This repository uses Memspec for project memory. `.memspec/` is the canonical store for durable project knowledge.',
+  'This project uses Memspec for structured memory. `.memspec/` is the canonical store for durable project knowledge.',
+  'Memspec is agent-operated, not human-curated with agent access.',
   '',
   'Before answering questions, planning work, or editing code:',
   '1. Search Memspec for relevant facts, decisions, and procedures.',
@@ -19,7 +20,7 @@ export const AGENT_ADDON_BLOCK = [
   '   - `fact` for current state or constraints',
   '   - `decision` for choices and rationale',
   '   - `procedure` for repeatable workflows',
-  '2. If something is useful but still unclear, record it as an observation instead of forcing a type.',
+  '2. If the store is thin and you are scanning the repo anyway, persist stable facts, decisions, and procedures you discover.',
   '3. If you discover memory drift, correct the stale memory instead of leaving both versions active.',
   '',
   'Do not treat Memspec as a chat transcript dump or private scratchpad. It is for durable repo knowledge that should survive agent resets.',

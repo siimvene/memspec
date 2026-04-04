@@ -1,15 +1,16 @@
-import { existsSync } from 'node:fs';
-import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
+import { resolve } from 'node:path';
 import { MemspecStore } from '../lib/store.js';
 import type { ConfigGenerationOptions } from '../lib/config.js';
-import { runImportOpenClaw } from '../lib/import-openclaw.js';
+import { detectBrownfieldSources, importBrownfield } from '../lib/brownfield.js';
 import { patchAgentInstructions } from '../lib/agent-addon.js';
 
 export interface InitOptions extends ConfigGenerationOptions {
   cwd?: string;
   interactive?: boolean;
+  skipImport?: boolean;
+  skipPatch?: boolean;
 }
 
 interface PromptIo {
@@ -163,19 +164,9 @@ function shouldPromptInteractively(options: InitOptions, io: PromptIo): boolean 
   return io.isTty ?? (inputIsTty && outputIsTty);
 }
 
-function hasOpenClawBrownfieldMemory(projectRoot: string): boolean {
-  const candidates = [
-    join(projectRoot, 'MEMORY.md'),
-    join(projectRoot, 'memory', 'observations.md'),
-    join(projectRoot, 'memory', 'procedures'),
-  ];
-
-  return candidates.some((path) => existsSync(path));
-}
-
 export async function runInit(options: InitOptions, io: PromptIo = {}): Promise<string> {
-  const projectRoot = options.cwd ?? process.cwd();
-  const store = new MemspecStore(projectRoot);
+  const store = new MemspecStore(options.cwd);
+  const projectRoot = resolve(options.cwd ?? process.cwd());
 
   const config = shouldPromptInteractively(options, io)
     ? await resolveInteractiveConfig(options, io)
@@ -189,20 +180,38 @@ export async function runInit(options: InitOptions, io: PromptIo = {}): Promise<
 
   store.init(config);
 
-  const messages = [`Initialized Memspec store at ${store.root}`];
+  const lines = [`Initialized Memspec store at ${store.root}`];
 
-  if (store.loadAll().length === 0 && hasOpenClawBrownfieldMemory(projectRoot)) {
-    messages.push(runImportOpenClaw({ cwd: projectRoot, source: projectRoot }));
-    messages.push('Imported brownfield memory into .memspec/');
+  if (!options.skipImport) {
+    const sources = detectBrownfieldSources(projectRoot);
+    const existingItems = store.loadAll().length;
+    if (sources.length > 0 && existingItems === 0) {
+      const result = importBrownfield(projectRoot, store);
+      const total = result.imported.facts +
+        result.imported.decisions +
+        result.imported.procedures +
+        result.imported.observations;
+      if (total > 0) {
+        lines.push(`Detected existing memory: ${sources.join(', ')}`);
+        lines.push(
+          `Imported: ${result.imported.facts} facts, ${result.imported.decisions} decisions, ` +
+          `${result.imported.procedures} procedures, ${result.imported.observations} observations`,
+        );
+      }
+    } else if (sources.length > 0 && existingItems > 0) {
+      lines.push(`Detected existing memory: ${sources.join(', ')}`);
+      lines.push('Skipped brownfield import because the memspec store already contains items');
+    }
   }
 
-  const patch = patchAgentInstructions(projectRoot);
-  const patchedFile = basename(patch.path);
-  if (patch.changed) {
-    messages.push(`Patched ${patchedFile} with Memspec agent instructions`);
-  } else {
-    messages.push(`${patchedFile} already contains Memspec agent instructions`);
+  if (!options.skipPatch) {
+    const patch = patchAgentInstructions(projectRoot);
+    if (patch.changed) {
+      lines.push(`${patch.created ? 'Created' : 'Patched'} ${patch.path} with memspec instructions`);
+    } else {
+      lines.push(`Agent instructions already configured at ${patch.path}`);
+    }
   }
 
-  return messages.join('\n');
+  return lines.join('\n');
 }

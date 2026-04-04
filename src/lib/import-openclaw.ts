@@ -22,6 +22,14 @@ export interface ImportSummary {
   observations: number;
 }
 
+export function looksLikeOpenClawWorkspace(sourceRoot: string): boolean {
+  return (
+    existsSync(join(sourceRoot, 'MEMORY.md')) ||
+    existsSync(join(sourceRoot, 'memory', 'observations.md')) ||
+    existsSync(join(sourceRoot, 'memory', 'procedures'))
+  );
+}
+
 const OBSERVATION_TYPE_MAP: Record<string, MemoryType> = {
   decision: 'decision',
   fact: 'fact',
@@ -205,6 +213,25 @@ function importObservations(sourceRoot: string): DraftMemoryItem[] {
   return items;
 }
 
+export function importOpenClawWorkspace(store: MemspecStore, sourceRoot: string): ImportSummary {
+  const imported = [
+    ...importMemoryMd(sourceRoot, store),
+    ...importProcedures(sourceRoot, store),
+    ...importObservations(sourceRoot),
+  ];
+
+  for (const item of imported) {
+    store.writeItem(item);
+  }
+
+  return {
+    facts: imported.filter((item) => item.state === 'active' && item.type === 'fact').length,
+    decisions: imported.filter((item) => item.state === 'active' && item.type === 'decision').length,
+    procedures: imported.filter((item) => item.state === 'active' && item.type === 'procedure').length,
+    observations: imported.filter((item) => item.state === 'captured').length,
+  };
+}
+
 export function runImportOpenClaw(options: ImportOpenClawOptions): string {
   if (!options.source) {
     throw new Error('Missing required --source <path>');
@@ -213,22 +240,7 @@ export function runImportOpenClaw(options: ImportOpenClawOptions): string {
   const store = new MemspecStore(options.cwd);
   store.init();
 
-  const imported = [
-    ...importMemoryMd(options.source, store),
-    ...importProcedures(options.source, store),
-    ...importObservations(options.source),
-  ];
-
-  for (const item of imported) {
-    store.writeItem(item);
-  }
-
-  const summary: ImportSummary = {
-    facts: imported.filter((item) => item.state === 'active' && item.type === 'fact').length,
-    decisions: imported.filter((item) => item.state === 'active' && item.type === 'decision').length,
-    procedures: imported.filter((item) => item.state === 'active' && item.type === 'procedure').length,
-    observations: imported.filter((item) => item.state === 'captured').length,
-  };
+  const summary = importOpenClawWorkspace(store, options.source);
 
   return [
     `Imported OpenClaw memory from ${options.source}`,

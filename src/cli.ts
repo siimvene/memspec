@@ -28,6 +28,8 @@ program
   .option('--embeddings-model <model>', 'embedding model name')
   .option('--embeddings-api-key <key>', 'embedding API key')
   .option('--no-interactive', 'disable setup prompts')
+  .option('--skip-import', 'skip brownfield memory import')
+  .option('--skip-patch', 'skip AGENTS.md/CLAUDE.md patching')
   .action(async (options: {
     cwd?: string;
     searchEngine?: 'fts5' | 'hybrid';
@@ -36,6 +38,8 @@ program
     embeddingsModel?: string;
     embeddingsApiKey?: string;
     interactive?: boolean;
+    skipImport?: boolean;
+    skipPatch?: boolean;
   }) => {
     console.log(await runInit(options));
   });
