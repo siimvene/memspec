@@ -20,7 +20,7 @@ Memspec is a **specification and CLI** for managing living project knowledge. It
 For a potential user, the point is simple:
 
 - Keep memory **inside the repo**, not trapped in a vendor backend
-- Make it **usable by both humans and agents** without translation
+- Make it **agent-operated with human oversight**, not human-curated with agent access
 - Improve retrieval and hygiene **without introducing a service to babysit**
 - Let any tool speak to the same memory through **files, CLI, or MCP**
 
@@ -61,7 +61,7 @@ That architecture exists for one reason: long-lived project memory should be por
 
 - **Files are truth.** The derived index is disposable and rebuildable from files. If the index disappears, you lose speed, not data.
 - **Three memory types.** Facts, decisions, and procedures. That's the universal vocabulary every agent understands. Richer categorization uses the extension model, not new core types.
-- **Self-correction over curation.** When knowledge goes stale, agents signal corrections — the old memory is superseded, the new one takes its place, and the evolution is traceable in git history. No human review queue.
+- **Self-correction over curation.** Agents write, correct, and expire memories autonomously. When knowledge goes stale, the agent supersedes it — the old memory links to the replacement, and the evolution is traceable in git history. No human review queue.
 - **Decay is a feature.** Every memory has a TTL. Facts go stale as code changes. Procedures drift as tooling evolves. Forcing re-verification keeps memory honest.
 - **Zero-infrastructure default.** `npm install` and `memspec init` — that's it. No accounts, no API keys, no hosted services. Works offline, works on any platform Node runs on.
 
@@ -118,42 +118,54 @@ npm install && npm run build
 npm link
 ```
 
-## Quickstart
+## How It Works
+
+**Memspec is agent-operated.** The human runs one command — `memspec init` — to set up the store. After that, the agent reads, writes, corrects, and maintains memory autonomously through CLI commands, MCP tools, or direct file I/O.
+
+The human's role is oversight, not curation: review what the agent captured in git diffs, override when needed, and trust the lifecycle to handle staleness.
+
+### Human: one-time setup
 
 ```bash
-# Initialize a memory store in your project.
-# Interactive mode lets you choose search engine:
-#   FTS5 only (default, zero-setup)
-#   Hybrid with OpenAI-compatible embeddings
-#   Hybrid with Ollama local embeddings
 memspec init
+# Interactive prompt: choose FTS5 (default) or hybrid with embeddings
+# Creates .memspec/ in your project root
+# Done. The agent takes it from here.
+```
 
-# Add memories
+### Agent: ongoing operation
+
+The agent uses these commands (via shell, MCP, or programmatic access) as part of its normal workflow:
+
+```bash
+# Learn something → write it down
 memspec add fact "API uses JWT" \
   --body "JWT with 15min expiry and refresh tokens" \
-  --source therin --tags auth,api
+  --source agent --tags auth,api
 
 memspec add decision "REST over GraphQL" \
   --body "REST for simplicity — most consumers are CLI tools" \
-  --source siim --decay-after never
+  --source agent --decay-after never
 
 memspec add procedure "Deploy bot" \
   --body "SSH to server, git pull, pm2 restart" \
-  --source therin --tags deploy
+  --source agent --tags deploy
 
-# Search
+# Need context → search for it
 memspec search "auth"
 memspec search "deploy" --type procedure --json
 
-# Correct stale knowledge
+# Knowledge is stale → correct it
 memspec correct ms_01HXK... --reason "Migrated to OAuth" \
   --replace "Now uses OAuth2 with PKCE"
 
-# Maintenance
+# Housekeeping (agent runs periodically)
 memspec status
 memspec validate
 memspec decay --dry-run
 ```
+
+No human in the loop for day-to-day memory operations. The agent decides what to remember, when to search, and when knowledge has gone stale. The human sees the results in git.
 
 ## Who It Is For
 
@@ -162,7 +174,7 @@ Use Memspec if you want:
 - project memory that survives model swaps and tool churn
 - git-visible knowledge instead of hidden prompts or opaque vector stores
 - better retrieval than `grep`, without standing up a memory service
-- one memory substrate that can serve humans, scripts, and agents
+- agent-operated memory where you review in git, not curate by hand
 
 It is a bad fit if you want:
 
