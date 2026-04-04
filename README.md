@@ -17,6 +17,13 @@ Existing solutions fall into two camps:
 
 Memspec is a **specification and CLI** for managing living project knowledge. It keeps markdown files under `.memspec/` as the canonical source of truth, then layers structured lifecycle management, full-text search, and an MCP server on top.
 
+For a potential user, the point is simple:
+
+- Keep memory **inside the repo**, not trapped in a vendor backend
+- Make it **usable by both humans and agents** without translation
+- Improve retrieval and hygiene **without introducing a service to babysit**
+- Let any tool speak to the same memory through **files, CLI, or MCP**
+
 ```
 Any agent (CLI, MCP, or direct file I/O)
     │
@@ -36,6 +43,19 @@ Any agent (CLI, MCP, or direct file I/O)
 ```
 
 No daemon. No backend service. No database-owned state.
+
+## Why This Shape
+
+Most agent memory systems ask you to adopt their runtime, their database, and their API surface before you get value. That is fine for a product. It is bad for a standard.
+
+Memspec takes the opposite path:
+
+- **The repo owns memory.** Your project can outlive any model, SDK, MCP server, or wrapper.
+- **Derived state stays disposable.** Search indexes and embeddings can be rebuilt; the markdown files remain the contract.
+- **Interop is optional, not mandatory.** A shell script can read the files, an agent can use the CLI, and Claude/Cursor/Codex can use MCP. Same store, different access paths.
+- **Adoption stays low-friction.** `memspec init` gives you working search immediately, and better retrieval is an additive upgrade rather than a platform migration.
+
+That architecture exists for one reason: long-lived project memory should be portable across tools and boring to operate.
 
 ### Design Principles
 
@@ -134,6 +154,21 @@ memspec status
 memspec validate
 memspec decay --dry-run
 ```
+
+## Who It Is For
+
+Use Memspec if you want:
+
+- project memory that survives model swaps and tool churn
+- git-visible knowledge instead of hidden prompts or opaque vector stores
+- better retrieval than `grep`, without standing up a memory service
+- one memory substrate that can serve humans, scripts, and agents
+
+It is a bad fit if you want:
+
+- a hosted multi-tenant product with user accounts, dashboards, and org-level administration
+- a central memory service that owns the canonical state
+- fully automatic long-term memory with no review of what gets captured
 
 ## Search
 
