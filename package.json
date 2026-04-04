@@ -1,0 +1,42 @@
+{
+  "name": "memspec",
+  "version": "0.2.0",
+  "description": "Structured memory for AI agents - spec plus CLI",
+  "type": "module",
+  "bin": {
+    "memspec": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "check": "npm run build && npm test",
+    "prepublishOnly": "npm run check"
+  },
+  "keywords": ["ai", "agent", "memory", "specification", "cli"],
+  "author": "Siim Vene",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/siimvene/memspec.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "commander": "^14.0.0",
+    "gray-matter": "^4.0.3",
+    "ulid": "^3.0.1",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

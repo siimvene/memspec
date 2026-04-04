@@ -1,23 +1,44 @@
 # Memspec
 
-A methodology for managing living project knowledge — the tribal memory of a codebase. Architecture decisions, configuration rationale, principles, component relationships: captured, kept current as the code evolves, and available to any agent or human starting cold.
+A methodology and CLI for managing living project knowledge in agent workflows.
 
-Reference implementation: markdown files in a git repo. Zero dependencies. Any agent that can read/write files participates.
+Memspec keeps markdown files under `.memspec/` as the canonical source of truth. The CLI is a thin local tool for creating, validating, and later searching that memory without turning the format into a database-owned system.
 
-## Core Ideas
+## Package Shape
 
-- **Living knowledge, not static docs**: memories self-correct as the codebase evolves. Active memory always reflects current state.
-- **3 memory types**: facts, decisions, procedures. That's it.
-- **Autonomous lifecycle**: capture → classify → active → decay → archive. No human gates.
-- **Self-correction**: agents signal when a memory is stale or wrong. The system updates.
-- **Cold start onboarding**: an agent loading memory at session start gets what's true now, not a replay of history.
-- **Markdown-canonical**: files are the source of truth. Indexes are optional and derived.
-- **Git-backed**: every state transition is a commit. Full audit trail. Evolution is traceable.
+- `docs/` holds the spec, research, reality check, and AGENTS addon.
+- `src/` holds the TypeScript CLI.
+- `.memspec/` inside a project is the memory store itself.
 
-## Status
+## Current CLI Slice
 
-Design phase. See [VISION.md](VISION.md) for motivation and [DESIGN.md](DESIGN.md) for architecture.
+The first implemented commands are:
+
+- `memspec init`
+- `memspec add`
+- `memspec validate`
+
+Later commands like `search`, `status`, `decay`, and `correct` should build on the same file-canonical model rather than replace it.
+
+## Quickstart
+
+```bash
+npm install
+npm run build
+node dist/cli.js init
+node dist/cli.js add fact "JWT auth" --body "JWT with refresh tokens" --source therin --tags auth,api
+node dist/cli.js validate
+```
+
+## Docs
+
+- `docs/SPEC.md`
+- `docs/DESIGN.md`
+- `docs/RESEARCH.md`
+- `docs/REALITY-CHECK.md`
+- `docs/AGENTS-ADDON.md`
+- `docs/plans/2026-04-04-cli-foundation.md`
 
 ## License
 
-Open source (license TBD).
+MIT
