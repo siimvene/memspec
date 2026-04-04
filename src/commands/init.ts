@@ -1,7 +1,11 @@
+import { existsSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { MemspecStore } from '../lib/store.js';
 import type { ConfigGenerationOptions } from '../lib/config.js';
+import { runImportOpenClaw } from '../lib/import-openclaw.js';
+import { patchAgentInstructions } from '../lib/agent-addon.js';
 
 export interface InitOptions extends ConfigGenerationOptions {
   cwd?: string;
@@ -159,8 +163,19 @@ function shouldPromptInteractively(options: InitOptions, io: PromptIo): boolean 
   return io.isTty ?? (inputIsTty && outputIsTty);
 }
 
+function hasOpenClawBrownfieldMemory(projectRoot: string): boolean {
+  const candidates = [
+    join(projectRoot, 'MEMORY.md'),
+    join(projectRoot, 'memory', 'observations.md'),
+    join(projectRoot, 'memory', 'procedures'),
+  ];
+
+  return candidates.some((path) => existsSync(path));
+}
+
 export async function runInit(options: InitOptions, io: PromptIo = {}): Promise<string> {
-  const store = new MemspecStore(options.cwd);
+  const projectRoot = options.cwd ?? process.cwd();
+  const store = new MemspecStore(projectRoot);
 
   const config = shouldPromptInteractively(options, io)
     ? await resolveInteractiveConfig(options, io)
@@ -174,5 +189,20 @@ export async function runInit(options: InitOptions, io: PromptIo = {}): Promise<
 
   store.init(config);
 
-  return `Initialized Memspec store at ${store.root}`;
+  const messages = [`Initialized Memspec store at ${store.root}`];
+
+  if (store.loadAll().length === 0 && hasOpenClawBrownfieldMemory(projectRoot)) {
+    messages.push(runImportOpenClaw({ cwd: projectRoot, source: projectRoot }));
+    messages.push('Imported brownfield memory into .memspec/');
+  }
+
+  const patch = patchAgentInstructions(projectRoot);
+  const patchedFile = basename(patch.path);
+  if (patch.changed) {
+    messages.push(`Patched ${patchedFile} with Memspec agent instructions`);
+  } else {
+    messages.push(`${patchedFile} already contains Memspec agent instructions`);
+  }
+
+  return messages.join('\n');
 }

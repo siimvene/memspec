@@ -130,8 +130,23 @@ The human's role is oversight, not curation: review what the agent captured in g
 memspec init
 # Interactive prompt: choose FTS5 (default) or hybrid with embeddings
 # Creates .memspec/ in your project root
+# Detects brownfield memory sources like MEMORY.md and memory/
+# Patches AGENTS.md or CLAUDE.md so the agent knows to use Memspec
 # Done. The agent takes it from here.
 ```
+
+`init` is intentionally more than scaffolding. On a brownfield repo, it should leave you with a usable memory store, not an empty directory and more setup work.
+
+### Brownfield categorization
+
+When `init` imports existing memory, the categorization is conservative:
+
+- current project state, architecture, and configuration become `fact`
+- choices with rationale become `decision`
+- reusable workflows and runbooks become `procedure`
+- ambiguous notes stay as observations until the agent can classify them safely
+
+The goal is not perfect first-pass extraction. The goal is a correct-enough starting store that the agent can improve through normal work.
 
 ### Agent: ongoing operation
 
@@ -268,6 +283,10 @@ Before answering questions about prior work, project state, or past decisions:
 - Retrieval profiles with token budgeting and context-aware ranking
 - Automatic observation classification (rule-based + optional LLM)
 - Extension model for domain-specific metadata without breaking core types
+
+## AGENTS Addon
+
+If `init` cannot patch your repo instructions automatically, copy the block from [AGENTS-ADDON.md](AGENTS-ADDON.md) into `AGENTS.md` or `CLAUDE.md`.
 
 ## License
 

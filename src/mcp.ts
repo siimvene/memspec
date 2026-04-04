@@ -45,7 +45,7 @@ function resolveSearchType(type?: string): MemoryType[] | undefined {
 
 server.tool(
   'memspec_search',
-  'Search active memories by query. Returns ranked results using FTS5/BM25 with phrase bonus.',
+  'Search active project memory before answering questions, planning work, or editing code. Returns ranked active facts, decisions, and procedures.',
   {
     query: z.string().describe('Search terms'),
     type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
@@ -292,7 +292,7 @@ server.tool(
 
 server.tool(
   'memspec_init',
-  'Initialize a memspec store in a directory. Creates .memspec/ with config and directory structure.',
+  'Initialize Memspec in a repo: create .memspec/, import brownfield memory sources when present, and patch AGENTS.md or CLAUDE.md so agents know to use the store.',
   {
     search_engine: z.enum(['fts5', 'hybrid']).optional().describe('Search engine (default fts5)'),
     embeddings_provider: z.string().optional().describe('openai or ollama'),

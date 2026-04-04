@@ -125,9 +125,10 @@ test('mcp server lists all memspec tools over stdio', async () => {
     const list = await session.request('tools/list');
     assert.equal(list.error, undefined);
 
-    const toolNames = ((list.result as { tools: Array<{ name: string }> }).tools ?? [])
-      .map((tool) => tool.name)
-      .sort();
+    const tools = ((list.result as {
+      tools: Array<{ name: string; description?: string }>;
+    }).tools ?? []);
+    const toolNames = tools.map((tool) => tool.name).sort();
 
     assert.deepEqual(toolNames, [
       'memspec_add',
@@ -139,6 +140,13 @@ test('mcp server lists all memspec tools over stdio', async () => {
       'memspec_status',
       'memspec_validate',
     ]);
+
+    const initTool = tools.find((tool) => tool.name === 'memspec_init');
+    assert.ok(initTool?.description?.includes('brownfield'));
+    assert.ok(initTool?.description?.includes('AGENTS.md'));
+
+    const searchTool = tools.find((tool) => tool.name === 'memspec_search');
+    assert.ok(searchTool?.description?.includes('before answering'));
   } finally {
     await session.close();
   }

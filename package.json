@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "docs",
+    "AGENTS-ADDON.md",
     "README.md",
     "LICENSE"
   ],
