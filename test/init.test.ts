@@ -43,7 +43,7 @@ test('init imports existing OpenClaw memory and patches AGENTS.md without duplic
 
   const agentsOnce = await readText(join(target, 'AGENTS.md'));
   assert.match(agentsOnce, /## Memory \(Memspec\)/);
-  assert.match(agentsOnce, /Before answering questions about prior work/);
+  assert.match(agentsOnce, /Before answering questions, planning work, or editing code/);
   assert.match(first.stdout, /Imported: 4 facts, 2 decisions, 1 procedures, 2 observations/);
   assert.match(first.stdout, /Patched .*AGENTS\.md with memspec instructions/);
 

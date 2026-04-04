@@ -142,7 +142,7 @@ test('mcp server lists all memspec tools over stdio', async () => {
     ]);
 
     const initTool = tools.find((tool) => tool.name === 'memspec_init');
-    assert.ok(initTool?.description?.includes('brownfield'));
+    assert.ok(initTool?.description?.includes('existing memory files'));
     assert.ok(initTool?.description?.includes('AGENTS.md'));
 
     const searchTool = tools.find((tool) => tool.name === 'memspec_search');

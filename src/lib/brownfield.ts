@@ -317,8 +317,8 @@ export function importBrownfield(projectRoot: string, store: MemspecStore): Brow
     detected,
     imported: {
       facts: allItems.filter((i) => i.type === 'fact' && i.state === 'active').length,
-      decisions: allItems.filter((i) => i.type === 'decision').length,
-      procedures: allItems.filter((i) => i.type === 'procedure').length,
+      decisions: allItems.filter((i) => i.type === 'decision' && i.state === 'active').length,
+      procedures: allItems.filter((i) => i.type === 'procedure' && i.state === 'active').length,
       observations: allItems.filter((i) => i.state === 'captured').length,
     },
   };
