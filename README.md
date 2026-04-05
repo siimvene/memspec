@@ -247,46 +247,69 @@ Each memory is a markdown file with YAML frontmatter (id, type, state, confidenc
 | `memspec decay [--dry-run] [--archive]` | Apply TTL rules to expired items |
 | `memspec validate` | Check all memory files against schema |
 
+## Memory Consolidation
+
+Agents need triggers to write and maintain memories. Memspec uses two mechanisms:
+
+### 1. Behavioral triggers (agent instructions)
+
+`memspec init` patches your `CLAUDE.md` or `AGENTS.md` with instructions that tie memory writes to observable events:
+
+- **Fixed a bug** → write/correct the relevant `fact`
+- **Changed architecture or configuration** → correct stale memories, write new ones
+- **Established a workflow** → write a `procedure`
+- **Discovered something non-obvious** → write a `fact`
+- **Made a design choice** → write a `decision` with rationale
+
+These work regardless of git discipline. The agent writes memories as part of the task, not as a deferred chore.
+
+### 2. Commit hook (Claude Code)
+
+For Claude Code users, a PostToolUse hook triggers a consolidation prompt when the agent commits code. The agent still has full conversation context, so it can write meaningful memories about what it just committed and why.
+
+Install the hook by copying [`hooks/memspec-consolidate.js`](hooks/memspec-consolidate.js) to `~/.claude/hooks/` and adding to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/.claude/hooks/memspec-consolidate.js\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Configurable in `.memspec/config.yaml`:
+
+```yaml
+consolidation:
+  trigger: commit    # commit | manual | none
+  frequency: once    # once (per session) | always
+```
+
+- `commit` + `once` (default): first commit in a session triggers consolidation
+- `commit` + `always`: every commit triggers (thorough but noisy)
+- `manual`: agent instructions only, no hook enforcement
+- `none`: disabled entirely
+
 ## For Agent Authors
 
-Copy this into your agent's system prompt or `AGENTS.md`:
-
-```markdown
-## Memory (Memspec)
-
-This project uses Memspec for structured memory. Memory lives in `.memspec/`.
-
-### When to Recall
-Before answering questions about prior work, project state, or past decisions:
-1. Run `memspec search "<query>"`
-2. Prefer active memories over archive history
-3. If search returns nothing, say so — don't fabricate from stale context
-
-### When to Write
-- `memspec add fact "<title>" --body "<content>" --source <agent> --tags tag1,tag2`
-- `memspec add decision "<title>" --body "<content>" --source <agent> --decay-after never`
-- `memspec add procedure "<title>" --body "<content>" --source <agent>`
-
-### When to Correct
-- `memspec correct <id> --reason "<why>"`
-- `memspec correct <id> --reason "<why>" --replace "<new content>"`
-
-### Rules
-- `.memspec/` files are canonical. The index is derived and disposable.
-- Use only `fact`, `decision`, and `procedure` as core types.
-- Never store secrets in memory files.
-- Don't delete stale knowledge silently — correct or decay it.
-```
+If `init` cannot patch your repo instructions automatically, copy the block from [AGENTS-ADDON.md](AGENTS-ADDON.md) into `AGENTS.md` or `CLAUDE.md`.
 
 ## What's Planned
 
 - Retrieval profiles with token budgeting and context-aware ranking
 - Automatic observation classification (rule-based + optional LLM)
 - Extension model for domain-specific metadata without breaking core types
-
-## AGENTS Addon
-
-If `init` cannot patch your repo instructions automatically, copy the block from [AGENTS-ADDON.md](AGENTS-ADDON.md) into `AGENTS.md` or `CLAUDE.md`.
 
 ## License
 

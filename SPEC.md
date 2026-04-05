@@ -326,7 +326,52 @@ All configuration has sensible defaults. An empty or missing `config.yaml` uses 
 
 ---
 
-## 10. Conformance
+## 10. Consolidation
+
+Agents need triggers to write and maintain memories. Memspec defines two consolidation mechanisms:
+
+### 10.1 Behavioral Triggers (agent instructions)
+
+The agent instructions (patched into CLAUDE.md/AGENTS.md by `init`) tie memory writes to observable events during work:
+
+- Fixed a bug → write/correct the relevant `fact`
+- Changed architecture or configuration → correct stale memories, write new ones
+- Established a workflow → write a `procedure`
+- Discovered something non-obvious → write a `fact`
+- Made a design choice → write a `decision` with rationale
+
+This is the primary consolidation mechanism. It works with any agent runtime and requires no tooling beyond the CLI.
+
+### 10.2 Commit Hook (optional, Claude Code)
+
+A PostToolUse hook that fires when the agent runs `git commit` or `git push`. The hook injects a consolidation prompt while the agent still has full conversation context — it knows what it committed and why.
+
+Configuration in `.memspec/config.yaml`:
+
+```yaml
+consolidation:
+  trigger: commit    # commit | manual | none
+  frequency: once    # once (per session) | always
+```
+
+- `commit` + `once`: first commit in a session triggers consolidation
+- `commit` + `always`: every commit triggers
+- `manual`: agent instructions only, no hook
+- `none`: consolidation disabled
+
+The hook is implementation-specific (Claude Code PostToolUse) but the consolidation config key is part of the spec. Other implementations MAY use different hook mechanisms tied to the same config.
+
+### 10.3 Design Rationale
+
+Agents don't reliably perform deferred tasks. A generic "review memories before ending" instruction is easy to ignore. Tying memory writes to specific completed actions (fixed a bug, made a decision, committed code) is more reliable because:
+
+1. The trigger is concrete and observable
+2. The agent has full context about *why* the change was made
+3. The memory is written as part of the task, not as an afterthought
+
+---
+
+## 11. Conformance
 
 An implementation is Memspec-conformant if it:
 

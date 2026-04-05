@@ -3,21 +3,28 @@
 Add this block to the repo's `AGENTS.md`, `CLAUDE.md`, or equivalent instruction file if `memspec init` cannot patch it automatically.
 
 ```markdown
-## Memspec
+## Memory (Memspec)
 
-This repository uses Memspec for project memory. `.memspec/` is the canonical store for durable project knowledge.
+This project uses Memspec for structured memory. `.memspec/` is the canonical store for durable project knowledge.
+Memspec is agent-operated, not human-curated with agent access.
 
-Before answering questions, planning work, or editing code:
-1. Search Memspec for relevant facts, decisions, and procedures.
-2. Prefer active memory over stale assumptions.
+### On session start
+Run `memspec search` for context relevant to the task. Prefer active memories over stale assumptions.
 
-While working:
-1. Write durable project truths back to Memspec as:
-   - `fact` for current state or constraints
-   - `decision` for choices and rationale
-   - `procedure` for repeatable workflows
-2. If something is useful but still unclear, record it as an observation instead of forcing a type.
-3. If you discover memory drift, correct the stale memory instead of leaving both versions active.
+### When to write memories
+After these events, write or correct memories immediately — don't defer to session end:
+- **Fixed a bug** → write/correct the relevant `fact` about how the system works
+- **Changed architecture or configuration** → correct stale `decision`/`fact`, write new ones
+- **Established a workflow** (deploy, test, debug sequence) → write a `procedure`
+- **Discovered something non-obvious** about the codebase → write a `fact`
+- **Made a design choice** between alternatives → write a `decision` with rationale
 
-Do not treat Memspec as a chat transcript dump or private scratchpad. It is for durable repo knowledge that should survive agent resets.
+Use `memspec add <type> "<title>" --body "<content>" --source <agent> --tags <tags>`.
+Use `memspec correct <id> --reason "<why>" --replace "<new content>"` for stale memories.
+
+### Rules
+- Only write knowledge that helps a future agent starting cold. No session transcripts.
+- If the store is thin, persist stable facts and decisions you discover while scanning the repo.
+- If you discover memory drift, correct the stale memory — don't leave both versions active.
+- Never store secrets in memory files.
 ```
