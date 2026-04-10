@@ -136,8 +136,10 @@ test('mcp server lists all memspec tools over stdio', async () => {
       'memspec_decay',
       'memspec_get',
       'memspec_init',
+      'memspec_promote',
       'memspec_search',
       'memspec_status',
+      'memspec_stores',
       'memspec_validate',
     ]);
 

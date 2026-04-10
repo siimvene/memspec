@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 
+import { homedir } from 'node:os';
 import { Command } from 'commander';
 import { runAdd } from './commands/add.js';
 import { runCorrect } from './commands/correct.js';
+import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
 import { runInit } from './commands/init.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
 import { runValidate } from './commands/validate.js';
+import { loadConfig } from './lib/config.js';
+import { MemspecStore } from './lib/store.js';
+import { CompositeStore } from './lib/composite-store.js';
 
 const program = new Command();
 
@@ -54,10 +59,24 @@ program
   .option('--source <source>', 'creator identifier')
   .option('--tags <tags>', 'comma-separated tags')
   .option('--decay-after <value>', 'ISO timestamp or "never"')
+  .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
   .action((type: string, title: string, options: {
-    cwd?: string; body?: string; source?: string; tags?: string; decayAfter?: string;
+    cwd?: string; body?: string; source?: string; tags?: string; decayAfter?: string; store?: string;
   }) => {
+    if (options.store === 'global') {
+      options.cwd = homedir();
+    }
     console.log(runAdd(type, title, options));
+  });
+
+program
+  .command('promote')
+  .description('Confirm or promote a captured memory to active')
+  .argument('<id>', 'memory ID to promote')
+  .option('--cwd <path>', 'project root')
+  .option('--source <source>', 'who is confirming')
+  .action((id: string, options: { cwd?: string; source?: string }) => {
+    console.log(runPromote(id, options));
   });
 
 program
@@ -122,6 +141,29 @@ program
   .option('--cwd <path>', 'project root')
   .action((options: { cwd?: string }) => {
     console.log(runValidate(options));
+  });
+
+program
+  .command('stores')
+  .description('List configured store layers')
+  .option('--cwd <path>', 'project root')
+  .action((options: { cwd?: string }) => {
+    const store = new MemspecStore(options.cwd);
+    const config = loadConfig(store.root);
+    const composite = CompositeStore.fromConfig(config.stores, options.cwd);
+    const layers = composite.listLayers();
+
+    if (layers.length === 0) {
+      console.log('No store layers configured');
+      return;
+    }
+
+    console.log('Store layers (highest priority first):');
+    for (const layer of layers) {
+      const status = layer.exists ? `${layer.itemCount} items` : 'not initialized';
+      const rw = layer.writable ? 'rw' : 'ro';
+      console.log(`  ${layer.name} [${rw}] (priority ${layer.priority}) — ${layer.path} (${status})`);
+    }
   });
 
 try {

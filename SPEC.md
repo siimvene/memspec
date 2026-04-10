@@ -371,7 +371,141 @@ Agents don't reliably perform deferred tasks. A generic "review memories before 
 
 ---
 
-## 11. Conformance
+## 11. Stabilization Gate
+
+### 11.1 Purpose
+
+The stabilization gate is an optional mechanism that prevents unvalidated observations from immediately becoming active memories. When enabled, new memories start as `captured` and require confirmation before promotion to `active`.
+
+This addresses a universal problem across domains: agents generate noisy observations that shouldn't be treated as established knowledge without validation. Whether a personal agent learning "user prefers morning meetings" or an infra agent observing "this service restarts every Tuesday" — unvalidated claims need a stabilization period.
+
+### 11.2 Configuration
+
+```yaml
+stabilization:
+  enabled: true                  # Default: false (backward compatible)
+  min_confirmations: 2           # Times memory must be independently confirmed
+  auto_promote_confidence: 0.9   # Confidence threshold for automatic promotion
+```
+
+When `enabled` is `false` (default), new memories go directly to `active` as in prior versions.
+
+### 11.3 Promotion Criteria
+
+A captured memory is promoted to `active` when ANY of:
+- It has been confirmed `min_confirmations` times (by the same or different agents)
+- Its confidence score reaches `auto_promote_confidence`
+
+### 11.4 Confirmation Tracking
+
+Confirmations are tracked via the `ext` field (see §6.5):
+
+```yaml
+ext:
+  confirmations: 2
+  confirmed_by: [claude-code, cursor]
+  promoted_at: 2026-04-10T10:00:00Z
+```
+
+Each confirmation increments the count and raises confidence by an implementation-defined amount. The `confirmed_by` list tracks unique sources that confirmed the memory.
+
+### 11.5 Behavior When Enabled
+
+1. `add` creates memories with `state: captured` regardless of type
+2. Captured memories are stored in `observations/`, not `memory/{type}s/`
+3. Captured memories are NOT returned by default retrieval (consistent with §3.1)
+4. Upon promotion, the file moves from `observations/` to `memory/{type}s/`
+5. The `promoted_at` timestamp is recorded in `ext`
+
+---
+
+## 12. Store Composition
+
+### 12.1 Purpose
+
+A single agent may need memory from multiple scopes — personal preferences that follow across projects, organization-wide conventions, and project-specific knowledge. Store composition defines how multiple memory stores layer with precedence.
+
+### 12.2 Store Layers
+
+A store layer is a named memory store with:
+- **name**: Identifier (e.g., `global`, `project`, `org`)
+- **path**: Directory containing `.memspec/`
+- **priority**: Integer — higher values take precedence
+- **writable**: Whether the layer accepts writes
+
+```yaml
+stores:
+  - name: global
+    path: ~/.memspec
+    priority: 0
+    writable: true
+  - name: project
+    path: .memspec
+    priority: 10
+    writable: true
+```
+
+### 12.3 Precedence Rules
+
+When multiple layers contain memories:
+- **Search**: Results from all layers are merged, deduplicated by ID. Higher-priority layers win on ID collisions.
+- **Write**: Writes go to the highest-priority writable layer by default. An explicit layer name may be specified.
+- **Correction**: A correction in any layer marks the target as corrected, regardless of which layer the target lives in.
+
+### 12.4 Auto-Detection
+
+If no `stores` configuration is provided:
+- The project `.memspec/` is used (priority 10, writable)
+- If `~/.memspec/` exists, it is included automatically (priority 0, writable)
+
+This means a global store is available without configuration — just `memspec init` in your home directory.
+
+### 12.5 Use Cases
+
+| Layer | Contains | Example |
+|-------|----------|---------|
+| `~/.memspec` (global) | Personal preferences, cross-project identity | "I use pnpm", "prefer functional style" |
+| `.memspec` (project) | Project-specific knowledge | "uses PostgreSQL", "deploy process" |
+| `/org/.memspec` (org, read-only) | Team conventions, shared decisions | "all services use structured logging" |
+
+### 12.6 Extension Metadata Convention
+
+The `ext` field (§6.5) supports a `store_layer` key indicating which layer a memory belongs to:
+
+```yaml
+ext:
+  store_layer: global
+```
+
+This is informational — the file's physical location determines its layer, not this field.
+
+---
+
+## 13. Extension Metadata
+
+### 13.1 The `ext` Field
+
+The `ext` field in frontmatter is the official extension mechanism. It holds implementation-specific or domain-specific metadata without polluting the core schema.
+
+### 13.2 Registered Conventions
+
+The following `ext` keys have defined semantics across implementations:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `confirmations` | number | Times this memory has been independently confirmed (§11.4) |
+| `confirmed_by` | string[] | Sources that confirmed this memory |
+| `promoted_at` | string | ISO 8601 timestamp of promotion to active |
+| `store_layer` | string | Name of the store layer this memory belongs to (§12.6) |
+| `episode` | string | Episode identifier for grouping related memories |
+| `sequence` | number | Order within an episode |
+| `relates_to` | string[] | IDs of related memories |
+
+Implementations MAY use additional `ext` keys. Unknown keys MUST be preserved on read/write.
+
+---
+
+## 14. Conformance
 
 An implementation is Memspec-conformant if it:
 
@@ -381,6 +515,7 @@ An implementation is Memspec-conformant if it:
 4. Uses the directory layout and file format conventions
 5. Supports file I/O as a minimum integration method
 6. Keeps the file store as canonical source of truth (indexes are derived)
+7. Preserves unknown `ext` keys on read/write
 
 An implementation MAY additionally:
 - Provide MCP, CLI, or REST interfaces
@@ -388,6 +523,9 @@ An implementation MAY additionally:
 - Use LLM-enhanced classification
 - Support custom retrieval profiles
 - Add pre-storage filtering (PII, secrets)
+- Implement the stabilization gate (§11)
+- Support store composition (§12)
+- Use registered `ext` conventions (§12)
 
 ---
 

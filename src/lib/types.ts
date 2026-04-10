@@ -15,6 +15,12 @@ export interface MemoryFrontmatter {
   decay_after: string; // ISO 8601 or "never"
   corrects?: string;
   corrected_by?: string;
+  /**
+   * Recommended ext field conventions:
+   * - ext.confirmations: number — times this memory has been independently confirmed
+   * - ext.confirmed_by: string[] — sources that confirmed this memory
+   * - ext.promoted_at: string — ISO 8601 timestamp of promotion to active
+   */
   ext?: Record<string, unknown>;
 }
 

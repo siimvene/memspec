@@ -9,6 +9,7 @@ export interface AddOptions {
   source?: string;
   tags?: string;
   decayAfter?: string;
+  store?: string;  // target store layer name (e.g., 'global')
 }
 
 function assertMemoryType(input: string): MemoryType {
@@ -45,18 +46,29 @@ export function runAdd(typeInput: string, title: string, options: AddOptions): s
 
   const created = new Date().toISOString();
   const id = `ms_${ulid()}`;
-  const filePath = store.writeItem({
+
+  const stabilize = config.stabilization.enabled;
+  const state = stabilize ? 'captured' : 'active';
+  const confidence = stabilize ? 0.5 : 0.7;
+
+  const itemData: Parameters<typeof store.writeItem>[0] = {
     id,
     type,
-    state: 'active',
-    confidence: 0.7,
+    state,
+    confidence,
     created,
     source: options.source ?? 'unknown',
     tags: parseTags(options.tags),
     decay_after: toDecayAfter(type, decayDays, options.decayAfter),
     title,
     body: options.body ?? '',
-  });
+  };
+
+  if (stabilize) {
+    itemData.ext = { confirmations: 0, confirmed_by: [] };
+  }
+
+  const filePath = store.writeItem(itemData);
 
   return `Created ${type} memory at ${filePath}`;
 }

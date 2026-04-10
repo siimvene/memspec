@@ -16,10 +16,25 @@ export interface SearchConfig {
   embeddings?: EmbeddingsConfig;
 }
 
+export interface StabilizationConfig {
+  enabled: boolean;
+  min_confirmations: number;
+  auto_promote_confidence: number;
+}
+
+export interface StoreLayerConfig {
+  name: string;
+  path: string;
+  priority: number;    // higher = takes precedence
+  writable: boolean;   // can this layer be written to?
+}
+
 export interface MemspecConfig {
   decay: Record<string, string>;
   profiles: Record<string, MemspecProfile>;
   search: SearchConfig;
+  stabilization: StabilizationConfig;
+  stores?: StoreLayerConfig[];
 }
 
 export interface MemspecProfile {
@@ -47,6 +62,11 @@ const DEFAULT_CONFIG: MemspecConfig = {
   search: {
     engine: 'fts5',
   },
+  stabilization: {
+    enabled: false,
+    min_confirmations: 2,
+    auto_promote_confidence: 0.9,
+  },
 };
 
 export function loadConfig(root: string): MemspecConfig {
@@ -66,10 +86,26 @@ export function loadConfig(root: string): MemspecConfig {
       embeddings: searchData?.embeddings as EmbeddingsConfig | undefined,
     };
 
+    const stabData = data.stabilization as Record<string, unknown> | undefined;
+    const stabilization: StabilizationConfig = {
+      ...DEFAULT_CONFIG.stabilization,
+      ...(stabData ? {
+        enabled: typeof stabData.enabled === 'boolean' ? stabData.enabled : DEFAULT_CONFIG.stabilization.enabled,
+        min_confirmations: typeof stabData.min_confirmations === 'number' ? stabData.min_confirmations : DEFAULT_CONFIG.stabilization.min_confirmations,
+        auto_promote_confidence: typeof stabData.auto_promote_confidence === 'number' ? stabData.auto_promote_confidence : DEFAULT_CONFIG.stabilization.auto_promote_confidence,
+      } : {}),
+    };
+
+    const stores = Array.isArray(data.stores)
+      ? (data.stores as StoreLayerConfig[])
+      : undefined;
+
     return {
       decay: { ...DEFAULT_CONFIG.decay, ...(data.decay as Record<string, string> ?? {}) },
       profiles: { ...DEFAULT_CONFIG.profiles, ...(data.profiles as MemspecConfig['profiles'] ?? {}) },
       search,
+      stabilization,
+      stores,
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -135,6 +171,30 @@ profiles:
       relevance: 0.4
       confidence: 0.3
       recency: 0.3
+`;
+
+  yaml += `
+# Stabilization gate (optional)
+# When enabled, new memories start as captured and require confirmations
+# before promotion to active state.
+# stabilization:
+#   enabled: true
+#   min_confirmations: 2
+#   auto_promote_confidence: 0.9
+`;
+
+  yaml += `
+# Store composition (optional)
+# Layer multiple stores with precedence. Higher priority wins on conflicts.
+# stores:
+#   - name: global
+#     path: ~/.memspec
+#     priority: 0
+#     writable: true
+#   - name: project
+#     path: .memspec
+#     priority: 10
+#     writable: true
 `;
 
   if (options.searchEngine === 'hybrid' && options.embeddingsProvider) {

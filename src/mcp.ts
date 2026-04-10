@@ -6,13 +6,16 @@ import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { runAdd } from './commands/add.js';
 import { runCorrect } from './commands/correct.js';
+import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
 import { runValidate } from './commands/validate.js';
 import { runInit } from './commands/init.js';
+import { homedir } from 'node:os';
 import { loadConfig, getProfile } from './lib/config.js';
 import { MemspecStore } from './lib/store.js';
+import { CompositeStore } from './lib/composite-store.js';
 import { MEMORY_TYPES, type MemoryType } from './lib/types.js';
 
 const { values } = parseArgs({
@@ -158,15 +161,18 @@ server.tool(
     source: z.string().optional().describe('Who/what created this memory'),
     tags: z.string().optional().describe('Comma-separated tags'),
     decay_after: z.string().optional().describe('ISO timestamp or "never"'),
+    store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
   },
-  async ({ type, title, body, source, tags, decay_after }) => {
+  async ({ type, title, body, source, tags, decay_after, store: storeName }) => {
     try {
+      const cwd = storeName === 'global' ? homedir() : defaultCwd;
       const result = runAdd(type, title, {
-        cwd: defaultCwd,
+        cwd,
         body,
         source,
         tags,
         decayAfter: decay_after,
+        store: storeName,
       });
       return {
         content: [{ type: 'text' as const, text: result }],
@@ -177,6 +183,26 @@ server.tool(
           tags: tags?.split(',').map((tag) => tag.trim()).filter(Boolean) ?? [],
           decay_after: decay_after ?? null,
         },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_promote',
+  'Confirm or promote a captured memory. When stabilization is enabled, memories start as captured and need confirmations before becoming active. Call this when you re-encounter a previously captured observation to strengthen it.',
+  {
+    id: z.string().describe('Memory ID to confirm/promote'),
+    source: z.string().optional().describe('Who is confirming this memory'),
+  },
+  async ({ id, source }) => {
+    try {
+      const result = runPromote(id, { cwd: defaultCwd, source });
+      return {
+        content: [{ type: 'text' as const, text: result }],
+        structuredContent: { id, source: source ?? null, result },
       };
     } catch (err) {
       return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
@@ -320,6 +346,27 @@ server.tool(
           embeddings_endpoint: embeddings_endpoint ?? null,
           embeddings_model: embeddings_model ?? null,
         },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_stores',
+  'List configured memory store layers. Shows global, project, and any custom stores with their priority, status, and item counts.',
+  {},
+  async () => {
+    try {
+      const store = new MemspecStore(defaultCwd);
+      const config = loadConfig(store.root);
+      const composite = CompositeStore.fromConfig(config.stores, defaultCwd);
+      const layers = composite.listLayers();
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(layers, null, 2) }],
+        structuredContent: { layers },
       };
     } catch (err) {
       return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
