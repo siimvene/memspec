@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { MemspecStore } from '../lib/store.js';
 import type { ConfigGenerationOptions } from '../lib/config.js';
 import { detectBrownfieldSources, importBrownfield } from '../lib/brownfield.js';
@@ -211,6 +212,35 @@ export async function runInit(options: InitOptions, io: PromptIo = {}): Promise<
     } else {
       lines.push(`Agent instructions already configured at ${patch.path}`);
     }
+  }
+
+  // Write .mcp.json for MCP host discovery
+  const mcpJsonPath = join(projectRoot, '.mcp.json');
+  const mcpEntry = {
+    command: 'memspec-mcp',
+    args: ['--cwd', resolve(projectRoot)],
+  };
+
+  if (existsSync(mcpJsonPath)) {
+    try {
+      const existing = JSON.parse(readFileSync(mcpJsonPath, 'utf8')) as {
+        mcpServers?: Record<string, unknown>;
+      };
+      if (existing.mcpServers && 'memspec' in existing.mcpServers) {
+        lines.push(`MCP config already registered at ${mcpJsonPath}`);
+      } else {
+        existing.mcpServers = existing.mcpServers ?? {};
+        existing.mcpServers.memspec = mcpEntry;
+        writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2) + '\n');
+        lines.push(`Added memspec server to ${mcpJsonPath}`);
+      }
+    } catch {
+      lines.push(`Warning: could not parse ${mcpJsonPath}, skipping MCP config`);
+    }
+  } else {
+    const mcpConfig = { mcpServers: { memspec: mcpEntry } };
+    writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + '\n');
+    lines.push(`Created ${mcpJsonPath} with memspec MCP server`);
   }
 
   return lines.join('\n');

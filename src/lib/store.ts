@@ -81,6 +81,14 @@ export class MemspecStore {
       mkdirSync(dir, { recursive: true });
     }
 
+    const gitignorePath = join(this.root, '.gitignore');
+    if (!existsSync(gitignorePath)) {
+      writeFileSync(
+        gitignorePath,
+        '# Derived search index — rebuildable from files\n*.db\n*.db-journal\n*.db-wal\n',
+      );
+    }
+
     if (!existsSync(this.configPath)) {
       writeFileSync(this.configPath, defaultConfigYaml(configOptions));
     }

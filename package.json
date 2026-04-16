@@ -9,8 +9,9 @@
   },
   "files": [
     "dist",
-    "docs",
+    "hooks",
     "AGENTS-ADDON.md",
+    "SPEC.md",
     "README.md",
     "LICENSE"
   ],

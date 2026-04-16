@@ -218,7 +218,36 @@ memspec-mcp
 memspec-mcp --cwd /path/to/project
 ```
 
-Exposed tools: `memspec_init`, `memspec_add`, `memspec_search`, `memspec_status`, `memspec_validate`
+Exposed tools: `memspec_search`, `memspec_get`, `memspec_add`, `memspec_promote`, `memspec_correct`, `memspec_status`, `memspec_validate`, `memspec_decay`, `memspec_init`, `memspec_stores`
+
+### Host Registration
+
+`memspec init` auto-creates a `.mcp.json` file in the project root for host tool discovery. MCP-compatible tools (Claude Code, Cursor, etc.) read this file to find available servers.
+
+For manual setup or other tools, add to `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "memspec": {
+      "command": "memspec-mcp",
+      "args": ["--cwd", "/absolute/path/to/project"]
+    }
+  }
+}
+```
+
+If `.mcp.json` already exists with other servers, `memspec init` merges its entry without overwriting them.
+
+## Global Store
+
+Memspec supports a global store at `~/.memspec/` for cross-project memory (personal preferences, common patterns, infrastructure knowledge). When both a project store and a global store exist, the project store takes priority and the global store is merged as a lower-priority layer.
+
+Create the global store with:
+
+```bash
+memspec init --cwd ~/.memspec
+```
 
 ## Store Layout
 
