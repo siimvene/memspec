@@ -132,6 +132,7 @@ test('mcp server lists all memspec tools over stdio', async () => {
 
     assert.deepEqual(toolNames, [
       'memspec_add',
+      'memspec_consolidate',
       'memspec_correct',
       'memspec_decay',
       'memspec_get',

@@ -53,6 +53,26 @@ Observations are classified into types using these rules, applied in order:
 
 Implementations MAY add additional classification rules. Implementations MUST NOT add additional memory types.
 
+### 2.2 Classification Guidance for Common Gray Zones
+
+Some knowledge doesn't map obviously to one type. These guidelines resolve the most common ambiguities:
+
+**Rules and policies** ("always lint before committing", "never deploy on Fridays"):
+- If the *why* is the valuable part — why we adopted this constraint, what alternatives were considered → `decision`
+- If the *steps* are the valuable part — what to actually do and in what order → `procedure`
+- If neither — it's just describing how things work right now → `fact`
+- A rule often warrants both: a `decision` capturing the rationale, and a `procedure` capturing the workflow it implies. This is not duplication — they serve different retrieval needs.
+
+**Skills and techniques** ("debug memory leaks with heap snapshots", "profile API latency with tracing"):
+- If it's a repeatable sequence an agent should follow → `procedure`
+- If it's a statement about what tool/approach we use and why → `decision` (chose heap snapshots over core dumps)
+- If it's a statement about what's available or true → `fact` (heap snapshot support is enabled in staging)
+
+**The disambiguation test:** Ask "what would a future agent need this for?"
+- To understand *why things are this way* → `decision`
+- To *do something* step by step → `procedure`
+- To know *what is true now* → `fact`
+
 ---
 
 ## 3. Lifecycle

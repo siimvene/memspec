@@ -3,6 +3,7 @@
 import { homedir } from 'node:os';
 import { Command } from 'commander';
 import { runAdd } from './commands/add.js';
+import { runConsolidate } from './commands/consolidate.js';
 import { runCorrect } from './commands/correct.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
@@ -27,7 +28,7 @@ program
   .command('init')
   .description('Initialize a memspec store')
   .option('--cwd <path>', 'project root')
-  .option('--search-engine <engine>', 'fts5 | hybrid')
+  .option('--search-engine <engine>', 'fts5 (default) | hybrid (experimental, requires embeddings)')
   .option('--embeddings-provider <provider>', 'openai | ollama')
   .option('--embeddings-endpoint <url>', 'embedding endpoint URL')
   .option('--embeddings-model <model>', 'embedding model name')
@@ -66,7 +67,15 @@ program
     if (options.store === 'global') {
       options.cwd = homedir();
     }
-    console.log(runAdd(type, title, options));
+    const result = runAdd(type, title, options);
+    console.log(result.message);
+    if (result.duplicates && result.duplicates.length > 0) {
+      console.log('\n\u26a0 Potential duplicates found:');
+      for (const dup of result.duplicates) {
+        console.log(`  - [${dup.id}] ${dup.title}`);
+      }
+      console.log('  Consider using memspec correct instead.');
+    }
   });
 
 program
@@ -164,6 +173,17 @@ program
       const rw = layer.writable ? 'rw' : 'ro';
       console.log(`  ${layer.name} [${rw}] (priority ${layer.priority}) — ${layer.path} (${status})`);
     }
+  });
+
+program
+  .command('consolidate')
+  .description('Find duplicate/redundant memories')
+  .option('--cwd <path>', 'project root')
+  .option('--type <type>', 'filter by memory type')
+  .option('--json', 'JSON output')
+  .action((options: { cwd?: string; type?: string; json?: boolean }) => {
+    const result = runConsolidate(options);
+    console.log(result.message);
   });
 
 try {

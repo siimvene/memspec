@@ -12,6 +12,17 @@ export interface AddOptions {
   store?: string;  // target store layer name (e.g., 'global')
 }
 
+export interface DuplicateMatch {
+  id: string;
+  title: string;
+  score: number;
+}
+
+export interface AddResult {
+  message: string;
+  duplicates?: DuplicateMatch[];
+}
+
 function assertMemoryType(input: string): MemoryType {
   if ((MEMORY_TYPES as readonly string[]).includes(input)) {
     return input as MemoryType;
@@ -36,13 +47,29 @@ function parseTags(raw?: string): string[] {
     .filter(Boolean);
 }
 
-export function runAdd(typeInput: string, title: string, options: AddOptions): string {
+export function runAdd(typeInput: string, title: string, options: AddOptions): AddResult {
   const type = assertMemoryType(typeInput);
   const store = new MemspecStore(options.cwd);
   store.init();
 
   const config = loadConfig(store.root);
   const decayDays = getDecayDays(config, type);
+
+  // Pre-flight dedup check: search existing memories for potential duplicates
+  let duplicates: DuplicateMatch[] | undefined;
+  try {
+    const existing = store.search(title, { types: [type], limit: 3 });
+    if (existing.length > 0) {
+      duplicates = existing.map((item) => ({
+        id: item.id,
+        title: item.title,
+        // BM25 returns negative scores; invert for a positive relevance score
+        score: item.confidence,
+      }));
+    }
+  } catch {
+    // Search failure should not block memory creation
+  }
 
   const created = new Date().toISOString();
   const id = `ms_${ulid()}`;
@@ -70,5 +97,8 @@ export function runAdd(typeInput: string, title: string, options: AddOptions): s
 
   const filePath = store.writeItem(itemData);
 
-  return `Created ${type} memory at ${filePath}`;
+  return {
+    message: `Created ${type} memory at ${filePath}`,
+    duplicates: duplicates && duplicates.length > 0 ? duplicates : undefined,
+  };
 }

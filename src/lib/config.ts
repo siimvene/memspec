@@ -199,6 +199,7 @@ profiles:
 
   if (options.searchEngine === 'hybrid' && options.embeddingsProvider) {
     yaml += `
+# engine: fts5 (default) | hybrid (requires embeddings config -- future feature)
 search:
   engine: hybrid
   embeddings:
@@ -215,6 +216,7 @@ search:
     }
   } else {
     yaml += `
+# engine: fts5 (default) | hybrid (requires embeddings config -- future feature)
 search:
   engine: fts5
 `;

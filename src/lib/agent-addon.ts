@@ -25,11 +25,12 @@ export const AGENT_ADDON_BLOCK = [
   'Use `memspec add <type> "<title>" --body "<content>" --source <agent> --tags <tags>`.',
   'Use `memspec correct <id> --reason "<why>" --replace "<new content>"` for stale memories.',
   '',
-  '### Rules',
+  '### Guidelines',
   '- Only write knowledge that helps a future agent starting cold. No session transcripts.',
   '- If the store is thin, persist stable facts and decisions you discover while scanning the repo.',
   '- If you discover memory drift, correct the stale memory — don\'t leave both versions active.',
   '- Never store secrets in memory files.',
+  '- When classifying, ask: does a future agent need this to understand *why* (decision), to *do something* (procedure), or to know *what\'s true* (fact)?',
   ADDON_MARKER_END,
 ].join('\n');
 

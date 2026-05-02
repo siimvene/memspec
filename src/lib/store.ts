@@ -181,6 +181,7 @@ export class MemspecStore {
     writeFileSync(item.filePath, serializeMemoryFile(item));
   }
 
+  // Note: hybrid/embedding search is a planned future feature. Currently FTS5-only.
   search(query: string, options: StoreSearchOptions = {}): MemoryItem[] {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];

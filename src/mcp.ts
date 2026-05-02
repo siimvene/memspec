@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { runAdd } from './commands/add.js';
+import { runConsolidate } from './commands/consolidate.js';
 import { runCorrect } from './commands/correct.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
@@ -174,14 +175,22 @@ server.tool(
         decayAfter: decay_after,
         store: storeName,
       });
+
+      let text = result.message;
+      if (result.duplicates && result.duplicates.length > 0) {
+        const titles = result.duplicates.map((d) => d.title).join(', ');
+        text += `\n\u26a0 Potential duplicates found: ${titles}. Consider using memspec_correct instead.`;
+      }
+
       return {
-        content: [{ type: 'text' as const, text: result }],
+        content: [{ type: 'text' as const, text }],
         structuredContent: {
           type,
           title,
           source: source ?? 'unknown',
           tags: tags?.split(',').map((tag) => tag.trim()).filter(Boolean) ?? [],
           decay_after: decay_after ?? null,
+          duplicates: result.duplicates ?? null,
         },
       };
     } catch (err) {
@@ -317,14 +326,36 @@ server.tool(
 );
 
 server.tool(
+  'memspec_consolidate',
+  'Find duplicate or redundant memories that should be merged. Returns groups of similar items. Use memspec_correct to merge them.',
+  {
+    type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
+  },
+  async ({ type }) => {
+    try {
+      const result = runConsolidate({ cwd: defaultCwd, type, json: false });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          count: result.groups.length,
+          groups: result.groups,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
   'memspec_init',
   'Initialize a memspec store in a project. Creates .memspec/, detects and imports existing memory files (MEMORY.md, memory/, .claude/memory/), and patches AGENTS.md/CLAUDE.md with agent instructions.',
   {
-    search_engine: z.enum(['fts5', 'hybrid']).optional().describe('Search engine (default fts5)'),
-    embeddings_provider: z.string().optional().describe('openai or ollama'),
-    embeddings_endpoint: z.string().optional().describe('Embedding endpoint URL'),
-    embeddings_model: z.string().optional().describe('Embedding model name'),
-    embeddings_api_key: z.string().optional().describe('Embedding API key'),
+    search_engine: z.enum(['fts5', 'hybrid']).optional().describe('Search engine (default fts5). hybrid is experimental/future and requires embeddings config'),
+    embeddings_provider: z.string().optional().describe('openai or ollama (only used with hybrid search -- future feature)'),
+    embeddings_endpoint: z.string().optional().describe('Embedding endpoint URL (future feature)'),
+    embeddings_model: z.string().optional().describe('Embedding model name (future feature)'),
+    embeddings_api_key: z.string().optional().describe('Embedding API key (future feature)'),
   },
   async ({ search_engine, embeddings_provider, embeddings_endpoint, embeddings_model, embeddings_api_key }) => {
     try {
