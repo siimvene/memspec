@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { Command } from 'commander';
 import { runAdd } from './commands/add.js';
 import { runConsolidate } from './commands/consolidate.js';
+import { runContext } from './commands/context.js';
 import { runCorrect } from './commands/correct.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
@@ -173,6 +174,21 @@ program
       const rw = layer.writable ? 'rw' : 'ro';
       console.log(`  ${layer.name} [${rw}] (priority ${layer.priority}) — ${layer.path} (${status})`);
     }
+  });
+
+program
+  .command('context')
+  .description('Emit a token-budgeted summary of relevant memories for agent context injection')
+  .option('--cwd <path>', 'project root')
+  .option('--format <format>', 'markdown (default) | json', 'markdown')
+  .option('--query <text>', 'run a search instead of selecting the most recent active items')
+  .option('--type <type>', 'filter by memory type (fact | decision | procedure)')
+  .option('--limit <n>', 'max items (hard cap 20)')
+  .option('--budget <tokens>', 'token budget for markdown output (default 2000)')
+  .action((options: {
+    cwd?: string; format?: string; query?: string; type?: string; limit?: string; budget?: string;
+  }) => {
+    console.log(runContext(options));
   });
 
 program
