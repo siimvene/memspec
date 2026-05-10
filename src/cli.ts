@@ -37,6 +37,7 @@ program
   .option('--no-interactive', 'disable setup prompts')
   .option('--skip-import', 'skip brownfield memory import')
   .option('--skip-patch', 'skip AGENTS.md/CLAUDE.md patching')
+  .option('--no-install-hooks', 'skip installing Claude Code hooks into ~/.claude/')
   .action(async (options: {
     cwd?: string;
     searchEngine?: 'fts5' | 'hybrid';
@@ -47,6 +48,7 @@ program
     interactive?: boolean;
     skipImport?: boolean;
     skipPatch?: boolean;
+    installHooks?: boolean;
   }) => {
     console.log(await runInit(options));
   });
