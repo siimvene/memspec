@@ -271,10 +271,34 @@ Each memory is a markdown file with YAML frontmatter (id, type, state, confidenc
 | `memspec init` | Create `.memspec/` and configure search engine |
 | `memspec add <type> <title>` | Add a fact, decision, or procedure |
 | `memspec search <query>` | Search active memories |
+| `memspec context [--format] [--query] [--type]` | Emit a token-budgeted memory summary for agent context injection |
 | `memspec correct <id> --reason "..."` | Correct or invalidate a memory |
 | `memspec status` | Store summary (counts, decay warnings, recent items) |
 | `memspec decay [--dry-run] [--archive]` | Apply TTL rules to expired items |
 | `memspec validate` | Check all memory files against schema |
+
+## Session-start context injection
+
+The hard part of agent memory is not storage — it's making sure the agent actually reads it.
+Telling agents "run `memspec_search` at session start" works in theory and fails in practice:
+under task pressure, the instruction gets ignored.
+
+The architectural fix is to stop asking. `memspec init` installs a Claude Code `SessionStart`
+hook at `~/.claude/hooks/memspec-session-start.js` that runs `memspec context --format markdown`
+and pushes the result into the agent's session-start context automatically. The agent never has
+to decide whether to use memspec — the relevant memories are already in the prompt.
+
+```bash
+memspec context                  # markdown block for the SessionStart hook
+memspec context --format json    # structured array for programmatic consumers
+memspec context --query auth     # search-mode, useful for task-aware lookups
+memspec context --limit 5        # hard-cap items (hard ceiling is 20)
+memspec context --budget 1500    # token budget (default 2000)
+```
+
+If you manage hooks manually, pass `--no-install-hooks` to `memspec init`. See
+[`hooks/memspec-session-start.js`](hooks/memspec-session-start.js) for the script that
+fires on `SessionStart`.
 
 ## Memory Consolidation
 
@@ -296,7 +320,10 @@ These work regardless of git discipline. The agent writes memories as part of th
 
 For Claude Code users, a PostToolUse hook triggers a consolidation prompt when the agent commits code. The agent still has full conversation context, so it can write meaningful memories about what it just committed and why.
 
-Install the hook by copying [`hooks/memspec-consolidate.js`](hooks/memspec-consolidate.js) to `~/.claude/hooks/` and adding to `~/.claude/settings.json`:
+`memspec init` installs this hook automatically alongside the session-start hook
+(pass `--no-install-hooks` to opt out). For manual installation, copy
+[`hooks/memspec-consolidate.js`](hooks/memspec-consolidate.js) to `~/.claude/hooks/`
+and add to `~/.claude/settings.json`:
 
 ```json
 {
