@@ -1,7 +1,9 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { MemspecStore } from '../lib/store.js';
 import type { ConfigGenerationOptions } from '../lib/config.js';
 import { detectBrownfieldSources, importBrownfield } from '../lib/brownfield.js';
@@ -12,6 +14,132 @@ export interface InitOptions extends ConfigGenerationOptions {
   interactive?: boolean;
   skipImport?: boolean;
   skipPatch?: boolean;
+  installHooks?: boolean;
+}
+
+interface HookEntry {
+  type: 'command';
+  command: string;
+  timeout?: number;
+}
+
+interface HookMatcherEntry {
+  matcher?: string;
+  hooks: HookEntry[];
+}
+
+interface ClaudeSettings {
+  hooks?: Record<string, HookMatcherEntry[]>;
+  [key: string]: unknown;
+}
+
+const HOOKS_TO_INSTALL = [
+  {
+    file: 'memspec-session-start.js',
+    event: 'SessionStart',
+    matcher: undefined,
+    timeout: 5,
+  },
+  {
+    file: 'memspec-consolidate.js',
+    event: 'PostToolUse',
+    matcher: 'Bash',
+    timeout: 5,
+  },
+] as const;
+
+function findHooksDir(): string | null {
+  // dist/commands/init.js → repo root → hooks/
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(here, '..', '..', 'hooks'),
+    resolve(here, '..', '..', '..', 'hooks'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function isMemspecHookCommand(command: string): boolean {
+  return /memspec-(session-start|consolidate)\.js/.test(command);
+}
+
+function installClaudeCodeHooks(): { messages: string[] } {
+  const messages: string[] = [];
+  const claudeDir = join(homedir(), '.claude');
+  if (!existsSync(claudeDir)) {
+    return { messages };
+  }
+
+  const sourceHooksDir = findHooksDir();
+  if (!sourceHooksDir) {
+    messages.push('Detected Claude Code at ~/.claude but could not locate memspec hook scripts; skipped hook install');
+    return { messages };
+  }
+
+  const targetHooksDir = join(claudeDir, 'hooks');
+  mkdirSync(targetHooksDir, { recursive: true });
+
+  for (const hook of HOOKS_TO_INSTALL) {
+    const src = join(sourceHooksDir, hook.file);
+    const dst = join(targetHooksDir, hook.file);
+    if (!existsSync(src)) {
+      messages.push(`Skipped ${hook.file} (not found in package)`);
+      continue;
+    }
+    copyFileSync(src, dst);
+    try {
+      chmodSync(dst, 0o755);
+    } catch {
+      // best-effort
+    }
+    messages.push(`Installed hook ${hook.file} to ${dst}`);
+  }
+
+  const settingsPath = join(claudeDir, 'settings.json');
+  let settings: ClaudeSettings = {};
+  if (existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as ClaudeSettings;
+    } catch {
+      messages.push(`Warning: could not parse ${settingsPath}, skipped hook registration`);
+      return { messages };
+    }
+  }
+
+  settings.hooks = settings.hooks ?? {};
+
+  let registrationChanged = false;
+  for (const hook of HOOKS_TO_INSTALL) {
+    const event = hook.event;
+    const command = `node "$HOME/.claude/hooks/${hook.file}"`;
+    const existingForEvent = settings.hooks[event] ?? [];
+
+    const alreadyRegistered = existingForEvent.some((entry) =>
+      entry.hooks?.some((h) => isMemspecHookCommand(h.command) && h.command.includes(hook.file)),
+    );
+    if (alreadyRegistered) {
+      messages.push(`Hook ${hook.file} already registered for ${event}; left settings.json unchanged`);
+      continue;
+    }
+
+    const newEntry: HookMatcherEntry = {
+      hooks: [{ type: 'command', command, timeout: hook.timeout }],
+    };
+    if (hook.matcher) newEntry.matcher = hook.matcher;
+
+    existingForEvent.push(newEntry);
+    settings.hooks[event] = existingForEvent;
+    registrationChanged = true;
+    messages.push(`Registered ${hook.file} for ${event} in ${settingsPath}`);
+  }
+
+  if (registrationChanged) {
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  }
+
+  return { messages };
 }
 
 interface PromptIo {
@@ -241,6 +369,15 @@ export async function runInit(options: InitOptions, io: PromptIo = {}): Promise<
     const mcpConfig = { mcpServers: { memspec: mcpEntry } };
     writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + '\n');
     lines.push(`Created ${mcpJsonPath} with memspec MCP server`);
+  }
+
+  if (options.installHooks !== false) {
+    try {
+      const { messages } = installClaudeCodeHooks();
+      lines.push(...messages);
+    } catch (err) {
+      lines.push(`Warning: hook install failed (${err instanceof Error ? err.message : String(err)})`);
+    }
   }
 
   return lines.join('\n');

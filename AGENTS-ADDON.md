@@ -9,7 +9,10 @@ This project uses Memspec for structured memory. `.memspec/` is the canonical st
 Memspec is agent-operated, not human-curated with agent access.
 
 ### On session start
-Run `memspec search` for context relevant to the task. Prefer active memories over stale assumptions.
+In Claude Code (and any harness supporting `SessionStart` hooks), the relevant active memories
+are auto-injected at session start via `memspec context` — you should already see them.
+As a fallback, run `memspec search` for context relevant to the task. Prefer active memories
+over stale assumptions.
 
 ### When to write memories
 After these events, write or correct memories immediately — don't defer to session end:
