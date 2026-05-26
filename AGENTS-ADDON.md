@@ -14,10 +14,14 @@ are auto-injected at session start via `memspec context` — you should already 
 As a fallback, run `memspec search` for context relevant to the task. Prefer active memories
 over stale assumptions.
 
-### Before answering operational questions
-When your next action requires project-specific operational knowledge — how to deploy, where services run, server addresses, credential paths, established workflows — search memspec first.
-Run `memspec search <topic>` (e.g. `memspec search deploy`, `memspec search server`) before falling back to generic pattern-matching (Dockerfile, CI configs, Makefile).
-The memory store is the documented answer; the repo scan is the guess. Never skip this step even if you believe you can infer the answer from repo structure.
+### Retrieve before assuming
+Before acting on an assumption about how this project works, search memspec. This applies to:
+- **Operational knowledge** — deploy steps, server addresses, credential paths, established workflows
+- **Architectural decisions** — tech stack choices, API design patterns, component boundaries, data models
+- **Project conventions** — naming, file structure, testing strategy, code style rationale
+
+Run `memspec search <topic>` before falling back to inference from repo structure or generic heuristics.
+A recorded decision, fact, or procedure outweighs what the codebase appears to suggest — the memory captures *why*, the code only shows *what*.
 
 ### When to write memories
 After these events, write or correct memories immediately — don't defer to session end:
