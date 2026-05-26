@@ -4,6 +4,10 @@ import { join } from 'node:path';
 const ADDON_MARKER_START = '<!-- memspec:init:start -->';
 const ADDON_MARKER_END = '<!-- memspec:init:end -->';
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export const AGENT_ADDON_BLOCK = [
   ADDON_MARKER_START,
   '## Memory (Memspec)',
@@ -64,11 +68,15 @@ export function patchAgentInstructions(projectRoot: string): AgentInstructionPat
   const current = created ? '' : readFileSync(targetPath, 'utf8');
 
   if (current.includes(ADDON_MARKER_START) && current.includes(ADDON_MARKER_END)) {
-    return {
-      path: targetPath,
-      changed: false,
-      created,
-    };
+    const updated = current.replace(
+      new RegExp(`${escapeRegExp(ADDON_MARKER_START)}[\\s\\S]*?${escapeRegExp(ADDON_MARKER_END)}`),
+      AGENT_ADDON_BLOCK,
+    );
+    if (updated === current) {
+      return { path: targetPath, changed: false, created };
+    }
+    writeFileSync(targetPath, updated, 'utf8');
+    return { path: targetPath, changed: true, created };
   }
 
   const next = current.trimEnd().length > 0
