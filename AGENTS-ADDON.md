@@ -14,6 +14,11 @@ are auto-injected at session start via `memspec context` — you should already 
 As a fallback, run `memspec search` for context relevant to the task. Prefer active memories
 over stale assumptions.
 
+If the `memspec` command is not found (not on PATH) and no `memspec_*` MCP tools are available,
+the CLI is still usable: it is a Node tool — run `npm link` in the memspec checkout to expose
+`memspec`/`memspec-mcp`, or invoke it directly as `node <memspec-repo>/dist/cli.js <command>`.
+Do not conclude the tool is missing without checking these.
+
 ### Retrieve before assuming
 Before acting on an assumption about how this project works, search memspec. This applies to:
 - **Operational knowledge** — deploy steps, server addresses, credential paths, established workflows
