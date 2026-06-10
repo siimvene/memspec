@@ -10,6 +10,7 @@ import { runConsolidate } from './commands/consolidate.js';
 import { runCorrect } from './commands/correct.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
+import { runReconcile } from './commands/reconcile.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
 import { runValidate } from './commands/validate.js';
@@ -377,6 +378,32 @@ server.tool(
           dry_run: dry_run ?? false,
           archive: archive ?? false,
           summary: result,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_reconcile',
+  'Find anchored memories whose code has drifted. Compares each active memory\'s code anchors against current file content and reports candidates for review (verify, correct, or re-anchor). Run after landing commits that change system behavior.',
+  {
+    since_ref: z.string().optional().describe('Git ref to diff from (default: last reconcile checkpoint, fallback HEAD~10)'),
+  },
+  async ({ since_ref }) => {
+    try {
+      const result = runReconcile({ cwd: defaultCwd, since: since_ref });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          reconciled_at: result.reconciled_at,
+          since_ref: result.since_ref,
+          head: result.head,
+          anchored_memories: result.anchored_memories,
+          count: result.candidates.length,
+          candidates: result.candidates,
         },
       };
     } catch (err) {

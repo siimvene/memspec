@@ -9,6 +9,7 @@ import { runContext } from './commands/context.js';
 import { runCorrect } from './commands/correct.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
+import { runReconcile } from './commands/reconcile.js';
 import { runInit } from './commands/init.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
@@ -174,6 +175,25 @@ program
   .option('--archive', 'move to archive instead of marking decayed')
   .action((options: { cwd?: string; dryRun?: boolean; archive?: boolean }) => {
     console.log(runDecay(options));
+  });
+
+program
+  .command('reconcile')
+  .description('Find anchored memories whose code has drifted since they were last verified')
+  .option('--cwd <path>', 'project root')
+  .option('--since <ref>', 'git ref to diff from (default: last reconcile checkpoint, fallback HEAD~10)')
+  .option('--json', 'output as JSON')
+  .action((options: { cwd?: string; since?: string; json?: boolean }) => {
+    const result = runReconcile(options);
+    if (options.json) {
+      const { message, ...data } = result;
+      console.log(JSON.stringify(data, null, 2));
+    } else {
+      console.log(result.message);
+    }
+    if (result.candidates.length > 0) {
+      process.exitCode = 1;
+    }
   });
 
 program
