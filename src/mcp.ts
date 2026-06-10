@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { runAdd } from './commands/add.js';
+import { runAnchor } from './commands/anchor.js';
 import { runConsolidate } from './commands/consolidate.js';
 import { runCorrect } from './commands/correct.js';
 import { runPromote } from './commands/promote.js';
@@ -12,6 +13,7 @@ import { runDecay } from './commands/decay.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
 import { runValidate } from './commands/validate.js';
+import { runVerify } from './commands/verify.js';
 import { runInit } from './commands/init.js';
 import { homedir } from 'node:os';
 import { loadConfig, getProfile } from './lib/config.js';
@@ -217,6 +219,59 @@ server.tool(
       return {
         content: [{ type: 'text' as const, text: result }],
         structuredContent: { id, source: source ?? null, result },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_verify',
+  'Record that a memory is still true as of now. If the memory has code anchors, checks each anchored file against its recorded blob SHA first — drifted anchors return needs_review without touching the memory. Clean verification refreshes last_verified, bumps confidence, and resets the decay clock.',
+  {
+    id: z.string().describe('Memory ID to verify'),
+    evidence: z.string().optional().describe('Free-text reason/source for the verification'),
+    source: z.string().optional().describe('Who is verifying'),
+  },
+  async ({ id, evidence, source }) => {
+    try {
+      const result = runVerify(id, { cwd: defaultCwd, evidence, source });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          id: result.id,
+          status: result.status,
+          last_verified: result.last_verified,
+          confidence: result.confidence,
+          anchors: result.anchors,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_anchor',
+  'Link a memory to the source files it depends on. Records the git blob SHA of each file so verify/reconcile/decay can detect when the code a memory describes has changed. Anchoring also asserts the memory is true against the current file state.',
+  {
+    id: z.string().describe('Memory ID to anchor'),
+    files: z.array(z.string()).min(1).describe('File paths relative to the project root'),
+    replace: z.boolean().optional().describe('Replace existing anchors instead of merging'),
+    source: z.string().optional().describe('Who is anchoring'),
+  },
+  async ({ id, files, replace, source }) => {
+    try {
+      const result = runAnchor(id, files, { cwd: defaultCwd, replace, source });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          id: result.id,
+          anchors: result.anchors,
+          warnings: result.warnings,
+        },
       };
     } catch (err) {
       return { content: [{ type: 'text' as const, text: String(err) }], isError: true };

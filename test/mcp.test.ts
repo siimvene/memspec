@@ -132,6 +132,7 @@ test('mcp server lists all memspec tools over stdio', async () => {
 
     assert.deepEqual(toolNames, [
       'memspec_add',
+      'memspec_anchor',
       'memspec_consolidate',
       'memspec_correct',
       'memspec_decay',
@@ -142,6 +143,7 @@ test('mcp server lists all memspec tools over stdio', async () => {
       'memspec_status',
       'memspec_stores',
       'memspec_validate',
+      'memspec_verify',
     ]);
 
     const initTool = tools.find((tool) => tool.name === 'memspec_init');

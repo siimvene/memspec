@@ -3,6 +3,7 @@
 import { homedir } from 'node:os';
 import { Command } from 'commander';
 import { runAdd } from './commands/add.js';
+import { runAnchor } from './commands/anchor.js';
 import { runConsolidate } from './commands/consolidate.js';
 import { runContext } from './commands/context.js';
 import { runCorrect } from './commands/correct.js';
@@ -13,6 +14,7 @@ import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
 import { runValidate } from './commands/validate.js';
+import { runVerify } from './commands/verify.js';
 import { loadConfig } from './lib/config.js';
 import { MemspecStore } from './lib/store.js';
 import { CompositeStore } from './lib/composite-store.js';
@@ -89,6 +91,33 @@ program
   .option('--source <source>', 'who is confirming')
   .action((id: string, options: { cwd?: string; source?: string }) => {
     console.log(runPromote(id, options));
+  });
+
+program
+  .command('verify')
+  .description('Record that a memory is still true; checks code anchors when present')
+  .argument('<id>', 'memory ID to verify')
+  .option('--cwd <path>', 'project root')
+  .option('--evidence <text>', 'free-text reason/source for the verification')
+  .option('--source <source>', 'who is verifying')
+  .action((id: string, options: { cwd?: string; evidence?: string; source?: string }) => {
+    const result = runVerify(id, options);
+    console.log(result.message);
+    if (result.status === 'needs_review') {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('anchor')
+  .description('Link a memory to the files it depends on (records git blob SHAs)')
+  .argument('<id>', 'memory ID to anchor')
+  .argument('<files...>', 'file paths relative to the project root')
+  .option('--cwd <path>', 'project root')
+  .option('--replace', 'replace existing anchors instead of merging')
+  .option('--source <source>', 'who is anchoring')
+  .action((id: string, files: string[], options: { cwd?: string; replace?: boolean; source?: string }) => {
+    console.log(runAnchor(id, files, options).message);
   });
 
 program
