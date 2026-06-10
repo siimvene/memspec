@@ -134,9 +134,9 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
 
   const lines: string[] = [];
   if (candidates.length === 0) {
-    lines.push(`Reconcile clean: ${anchored.length} anchored memorie(s) match current code.`);
+    lines.push(`Reconcile clean: ${anchored.length} anchored memory(ies) match current code.`);
   } else {
-    lines.push(`${candidates.length} memorie(s) need reconciliation (of ${anchored.length} anchored):`, '');
+    lines.push(`${candidates.length} memory(ies) need reconciliation (of ${anchored.length} anchored):`, '');
     for (const c of candidates) {
       lines.push(`[${c.type}] ${c.title}`);
       lines.push(`  ${c.memory_id} (last verified: ${c.last_verified?.substring(0, 10) ?? 'never'})`);

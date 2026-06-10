@@ -70,7 +70,7 @@ test('reconcile flags memories whose anchored files changed', async () => {
   await assert.rejects(
     () => runCli(['reconcile', '--cwd', target]),
     (error: Error & { stdout?: string }) => {
-      assert.match(error.stdout ?? '', /1 memorie\(s\) need reconciliation \(of 2 anchored\)/);
+      assert.match(error.stdout ?? '', /1 memory\(ies\) need reconciliation \(of 2 anchored\)/);
       assert.match(error.stdout ?? '', new RegExp(anchoredId));
       assert.match(error.stdout ?? '', /changed: auth\.py/);
       assert.doesNotMatch(error.stdout ?? '', /other\.py/);
