@@ -76,7 +76,11 @@ export class FtsIndex {
 
   /**
    * Search using FTS5 with BM25 ranking.
-   * Falls back to prefix matching if exact match yields no results.
+   *
+   * Fallback chain: exact-AND → prefix-AND → exact-OR → prefix-OR.
+   * AND-first keeps precision when every term matches; the OR fallback keeps
+   * multi-term natural-language queries from returning zero results just
+   * because one term is absent (BM25 still ranks the best match first).
    */
   search(query: string, options: FtsSearchOptions = {}): FtsScoredResult[] {
     const {
@@ -85,14 +89,18 @@ export class FtsIndex {
       minConfidence = 0,
     } = options;
 
-    // Build the FTS5 query: each term gets quoted, joined with OR for broad recall
     const terms = query.trim().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];
 
-    // Try exact terms first, then prefix
-    let results = this.runFtsQuery(terms, false, types, minConfidence, limit);
+    let results = this.runFtsQuery(terms, false, 'AND', types, minConfidence, limit);
     if (results.length === 0) {
-      results = this.runFtsQuery(terms, true, types, minConfidence, limit);
+      results = this.runFtsQuery(terms, true, 'AND', types, minConfidence, limit);
+    }
+    if (results.length === 0 && terms.length > 1) {
+      results = this.runFtsQuery(terms, false, 'OR', types, minConfidence, limit);
+      if (results.length === 0) {
+        results = this.runFtsQuery(terms, true, 'OR', types, minConfidence, limit);
+      }
     }
 
     return results;
@@ -101,19 +109,18 @@ export class FtsIndex {
   private runFtsQuery(
     terms: string[],
     prefix: boolean,
+    operator: 'AND' | 'OR',
     types: string[] | undefined,
     minConfidence: number,
     limit: number,
   ): FtsScoredResult[] {
-    // Build FTS5 match expression
-    // For multi-term: use AND to require all terms
     const ftsTerms = terms.map((t) => {
       // Escape double quotes in terms
       const base = prefix ? toPrefixStem(t) : t;
       const escaped = base.replace(/"/g, '""');
       return prefix ? `"${escaped}"*` : `"${escaped}"`;
     });
-    const matchExpr = ftsTerms.join(' AND ');
+    const matchExpr = ftsTerms.join(` ${operator} `);
 
     // BM25 weights: title(10), tags(5), body(1)
     let sql = `

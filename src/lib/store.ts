@@ -85,7 +85,7 @@ export class MemspecStore {
     if (!existsSync(gitignorePath)) {
       writeFileSync(
         gitignorePath,
-        '# Derived search index — rebuildable from files\n*.db\n*.db-journal\n*.db-wal\n',
+        '# Derived search index — rebuildable from files\n*.db\n*.db-journal\n*.db-wal\n# Per-clone reconcile checkpoint\n.reconcile.json\n',
       );
     }
 
@@ -134,7 +134,7 @@ export class MemspecStore {
         const data = parsed.data as Record<string, unknown>;
 
         // Coerce dates before validation
-        for (const key of ['created', 'decay_after']) {
+        for (const key of ['created', 'decay_after', 'last_verified']) {
           if (data[key] instanceof Date) {
             data[key] = (data[key] as Date).toISOString();
           }

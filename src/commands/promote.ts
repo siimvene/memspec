@@ -40,6 +40,7 @@ export function runPromote(id: string, options: PromoteOptions): string {
       ...item,
       state: 'active',
       confidence: newConfidence,
+      last_verified: new Date().toISOString(),
       ext: { ...ext, confirmations, confirmed_by: confirmedBy, promoted_at: new Date().toISOString() },
     });
 
@@ -50,6 +51,7 @@ export function runPromote(id: string, options: PromoteOptions): string {
     store.updateItem({
       ...item,
       confidence: newConfidence,
+      last_verified: new Date().toISOString(),
       ext: { ...ext, confirmations, confirmed_by: confirmedBy },
     });
 

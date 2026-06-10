@@ -6,7 +6,7 @@ import { MemspecStore } from '../lib/store.js';
 
 function coerceDates(data: Record<string, unknown>): Record<string, unknown> {
   const result = { ...data };
-  for (const key of ['created', 'decay_after']) {
+  for (const key of ['created', 'decay_after', 'last_verified']) {
     if (result[key] instanceof Date) {
       result[key] = (result[key] as Date).toISOString();
     }

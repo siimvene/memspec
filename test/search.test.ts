@@ -34,6 +34,7 @@ test('search --json returns valid JSON', async () => {
   assert.ok(Array.isArray(parsed));
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].type, 'decision');
+  assert.match(parsed[0].last_verified, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test('search --type filters by memory type', async () => {

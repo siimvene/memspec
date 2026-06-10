@@ -72,6 +72,40 @@ test('FTS5: existing phrase ranking still works', async () => {
   assert.equal(parsed[0].title, 'Use files over DB');
 });
 
+test('FTS5: multi-word query with absent terms still finds the best match', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  // Regression for the 2026-06-10 findings: these natural-language queries
+  // returned zero results while the bare keyword matched.
+  await runCli(['add', 'fact', 'Kleidia ICP', '--cwd', target,
+    '--body', 'Target customers are defence and government organisations needing YubiKey lifecycle management',
+    '--source', 'test', '--tags', 'kleidia,icp']);
+  await runCli(['add', 'fact', 'Unrelated networking note', '--cwd', target,
+    '--body', 'VLAN trunking on the lab switch', '--source', 'test']);
+
+  const result = await runCli(['search', 'Kleidia ICP target customers defence government strategy', '--cwd', target, '--json']);
+  const parsed = JSON.parse(result.stdout);
+  assert.ok(parsed.length >= 1, 'OR fallback should rescue queries with absent terms');
+  assert.equal(parsed[0].title, 'Kleidia ICP');
+});
+
+test('FTS5: OR fallback does not dilute exact AND matches', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  await runCli(['add', 'fact', 'JWT auth tokens', '--cwd', target,
+    '--body', 'Uses refresh tokens', '--source', 'test']);
+  await runCli(['add', 'fact', 'JWT logging', '--cwd', target,
+    '--body', 'Log token ids only', '--source', 'test']);
+
+  // Both terms present in one item: AND must win, the partial match stays out
+  const result = await runCli(['search', 'JWT auth', '--cwd', target, '--json']);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.length, 1, 'AND should be tried before falling back to OR');
+  assert.equal(parsed[0].title, 'JWT auth tokens');
+});
+
 test('FTS5: type filtering works with FTS backend', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);

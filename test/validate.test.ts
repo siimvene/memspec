@@ -86,3 +86,36 @@ Hand-written file using natural YAML timestamps.
   const result = await runCli(['validate', '--cwd', target]);
   assert.match(result.stdout, /memspec file\(s\) valid/);
 });
+
+test('validate accepts last_verified and ext.code_anchors', async () => {
+  const target = await makeTempProject();
+
+  await runCli(['init', '--cwd', target]);
+  const anchoredPath = join(target, '.memspec', 'memory', 'facts', 'anchored.md');
+  await writeFile(
+    anchoredPath,
+    `---
+id: ms_01HANCHOREDFACTCHECK000000
+type: fact
+state: active
+confidence: 0.8
+created: 2026-04-04T07:00:00Z
+source: manual
+tags: [auth]
+decay_after: 2026-07-03T07:00:00Z
+last_verified: 2026-06-01T12:00:00Z
+ext:
+  code_anchors:
+    - file: api/auth.py
+      sha: 0123456789abcdef0123456789abcdef01234567
+---
+
+# Auth uses argon2id
+
+Anchored to the auth implementation file.
+`,
+  );
+
+  const result = await runCli(['validate', '--cwd', target]);
+  assert.match(result.stdout, /memspec file\(s\) valid/);
+});

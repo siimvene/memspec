@@ -229,6 +229,7 @@ created: {ISO 8601}
 source: {agent or human identifier}
 tags: [{tag}, ...]
 decay_after: {ISO 8601}
+last_verified: {ISO 8601}  # optional — when this memory was last confirmed true (defaults to created)
 corrects: {id}          # present if this corrects another memory
 corrected_by: {id}      # present if this was corrected
 ---
@@ -520,8 +521,18 @@ The following `ext` keys have defined semantics across implementations:
 | `episode` | string | Episode identifier for grouping related memories |
 | `sequence` | number | Order within an episode |
 | `relates_to` | string[] | IDs of related memories |
+| `code_anchors` | array | Files this memory depends on: `[{file, sha}]` where `file` is project-root-relative (POSIX) and `sha` is the git blob SHA of the file content at anchor time (§13.3) |
+| `last_verification` | object | Most recent verification: `{at: ISO 8601, source?, evidence?}` |
 
 Implementations MAY use additional `ext` keys. Unknown keys MUST be preserved on read/write.
+
+### 13.3 Code Anchors
+
+A memory about code state ("auth uses argon2id", "the app has 7 screens") goes stale the moment the code it describes changes — calendar TTL fires too late. Code anchors link a memory to the files it depends on so staleness can be detected from code change, not just time.
+
+`ext.code_anchors` is an array of `{file, sha}` pairs. `sha` is the git blob SHA of the file content (`git hash-object <file>`) at the time the anchor was set or last verified. Comparing the recorded SHA against the current file content answers "has this file changed since the memory was last known true?" — including uncommitted edits, and insensitive to history rewrites.
+
+Anchors are a convention, not a schema requirement. Tools that understand them (verify, reconcile, anchor-aware decay) use them; tools that don't ignore them. Memories without anchors keep calendar-only behavior.
 
 ---
 

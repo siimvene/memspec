@@ -3,16 +3,19 @@
 import { homedir } from 'node:os';
 import { Command } from 'commander';
 import { runAdd } from './commands/add.js';
+import { runAnchor } from './commands/anchor.js';
 import { runConsolidate } from './commands/consolidate.js';
 import { runContext } from './commands/context.js';
 import { runCorrect } from './commands/correct.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
+import { runReconcile } from './commands/reconcile.js';
 import { runInit } from './commands/init.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
 import { runValidate } from './commands/validate.js';
+import { runVerify } from './commands/verify.js';
 import { loadConfig } from './lib/config.js';
 import { MemspecStore } from './lib/store.js';
 import { CompositeStore } from './lib/composite-store.js';
@@ -92,6 +95,33 @@ program
   });
 
 program
+  .command('verify')
+  .description('Record that a memory is still true; checks code anchors when present')
+  .argument('<id>', 'memory ID to verify')
+  .option('--cwd <path>', 'project root')
+  .option('--evidence <text>', 'free-text reason/source for the verification')
+  .option('--source <source>', 'who is verifying')
+  .action((id: string, options: { cwd?: string; evidence?: string; source?: string }) => {
+    const result = runVerify(id, options);
+    console.log(result.message);
+    if (result.status === 'needs_review') {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('anchor')
+  .description('Link a memory to the files it depends on (records git blob SHAs)')
+  .argument('<id>', 'memory ID to anchor')
+  .argument('<files...>', 'file paths relative to the project root')
+  .option('--cwd <path>', 'project root')
+  .option('--replace', 'replace existing anchors instead of merging')
+  .option('--source <source>', 'who is anchoring')
+  .action((id: string, files: string[], options: { cwd?: string; replace?: boolean; source?: string }) => {
+    console.log(runAnchor(id, files, options).message);
+  });
+
+program
   .command('import-openclaw')
   .description('Import an OpenClaw memory workspace into memspec')
   .requiredOption('--source <path>', 'OpenClaw workspace root')
@@ -145,6 +175,25 @@ program
   .option('--archive', 'move to archive instead of marking decayed')
   .action((options: { cwd?: string; dryRun?: boolean; archive?: boolean }) => {
     console.log(runDecay(options));
+  });
+
+program
+  .command('reconcile')
+  .description('Find anchored memories whose code has drifted since they were last verified')
+  .option('--cwd <path>', 'project root')
+  .option('--since <ref>', 'git ref to diff from (default: last reconcile checkpoint, fallback HEAD~10)')
+  .option('--json', 'output as JSON')
+  .action((options: { cwd?: string; since?: string; json?: boolean }) => {
+    const result = runReconcile(options);
+    if (options.json) {
+      const { message, ...data } = result;
+      console.log(JSON.stringify(data, null, 2));
+    } else {
+      console.log(result.message);
+    }
+    if (result.candidates.length > 0) {
+      process.exitCode = 1;
+    }
   });
 
 program

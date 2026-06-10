@@ -1,3 +1,4 @@
+import { projectRootForStore } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
 import { findDecayCandidates } from '../lib/decay.js';
 
@@ -36,7 +37,9 @@ export function runStatus(options: StatusOptions): string {
   lines.push(`  ${'total'.padEnd(12)} ${String(items.length).padStart(4)}`);
   lines.push('');
 
-  const decaying = findDecayCandidates(items);
+  const candidates = findDecayCandidates(items, { projectRoot: projectRootForStore(store.root) });
+  const decaying = candidates.filter((c) => c.kind === 'expired');
+  const drifted = candidates.filter((c) => c.kind === 'anchor-drift');
   if (decaying.length > 0) {
     lines.push(`${decaying.length} item(s) past TTL:`);
     for (const c of decaying.slice(0, 5)) {
@@ -45,6 +48,14 @@ export function runStatus(options: StatusOptions): string {
     if (decaying.length > 5) lines.push(`  ... and ${decaying.length - 5} more`);
   } else {
     lines.push('No items past TTL.');
+  }
+
+  if (drifted.length > 0) {
+    lines.push('', `${drifted.length} item(s) with anchor drift:`);
+    for (const c of drifted.slice(0, 5)) {
+      lines.push(`  ${c.item.id} - ${c.item.title} (${c.reason})`);
+    }
+    if (drifted.length > 5) lines.push(`  ... and ${drifted.length - 5} more`);
   }
 
   const recent = items
