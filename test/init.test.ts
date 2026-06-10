@@ -44,6 +44,10 @@ test('init imports existing OpenClaw memory and patches AGENTS.md without duplic
   const agentsOnce = await readText(join(target, 'AGENTS.md'));
   assert.match(agentsOnce, /## Memory \(Memspec\)/);
   assert.match(agentsOnce, /run `memspec search` for context relevant to the task/);
+  assert.match(agentsOnce, /### Code-anchored verification/);
+  assert.match(agentsOnce, /memspec reconcile/);
+  assert.match(agentsOnce, /### Memory hygiene/);
+  assert.match(agentsOnce, /Search before adding/);
   assert.match(first.stdout, /Imported: 4 facts, 2 decisions, 1 procedures, 2 observations/);
   assert.match(first.stdout, /Patched .*AGENTS\.md with memspec instructions/);
 
@@ -71,4 +75,37 @@ test('init creates AGENTS.md with memspec instructions when no agent file exists
   const agents = await readText(join(target, 'AGENTS.md'));
   assert.match(agents, /## Memory \(Memspec\)/);
   assert.match(agents, /This project uses Memspec for structured memory/);
+});
+
+test('init upgrades an outdated addon block in CLAUDE.md in place', async () => {
+  const target = await makeTempProject();
+
+  await writeFile(
+    join(target, 'CLAUDE.md'),
+    [
+      '# Project notes',
+      '',
+      'Keep these.',
+      '',
+      '<!-- memspec:init:start -->',
+      '## Memory (Memspec)',
+      '',
+      'Old block from a previous memspec version.',
+      '<!-- memspec:init:end -->',
+      '',
+      'Trailing notes stay too.',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await runCli(['init', '--cwd', target]);
+
+  const claude = await readText(join(target, 'CLAUDE.md'));
+  assert.doesNotMatch(claude, /Old block from a previous memspec version/);
+  assert.match(claude, /### Code-anchored verification/);
+  assert.match(claude, /### Memory hygiene/);
+  assert.match(claude, /Keep these\./);
+  assert.match(claude, /Trailing notes stay too\./);
+  assert.equal((claude.match(/## Memory \(Memspec\)/g) ?? []).length, 1);
 });

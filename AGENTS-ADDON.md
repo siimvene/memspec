@@ -39,6 +39,23 @@ After these events, write or correct memories immediately — don't defer to ses
 Use `memspec add <type> "<title>" --body "<content>" --source <agent> --tags <tags>`.
 Use `memspec correct <id> --reason "<why>" --replace "<new content>"` for stale memories.
 
+### Code-anchored verification
+Facts about code state ("auth is a mockup", "the app has 7 screens") go stale the moment
+the code changes — calendar decay fires too late. Anchor them to the files they describe:
+- After writing a code-state `fact`, run `memspec anchor <id> <files...>` to link it to its source files.
+- After committing changes, run `memspec reconcile` — it lists memories whose anchored files changed.
+- Resolve each candidate: `memspec verify <id>` (still true), `memspec correct <id> --reason ... --replace ...`
+  (now wrong), or `memspec anchor <id> <files...>` (still true against the new code; re-baseline).
+- When you re-confirm any memory is still accurate, record it with `memspec verify <id>` — this refreshes
+  its freshness signal and resets the decay clock. Re-verification that isn't recorded is invisible.
+
+### Memory hygiene
+- **Search before adding.** Run `memspec search <topic>` first. If a similar memory exists and is wrong,
+  `memspec correct` it; if it exists and is right, `memspec verify` it — don't add a duplicate.
+- **Don't ask permission** to write, correct, verify, or decay memories. Memory upkeep is the agent's job;
+  asking is friction. The bar is: would a future agent starting cold benefit?
+- **Run `memspec status` periodically** and review expired and anchor-drifted items it reports.
+
 ### Guidelines
 - Only write knowledge that helps a future agent starting cold. No session transcripts.
 - If the store is thin, persist stable facts and decisions you discover while scanning the repo.
