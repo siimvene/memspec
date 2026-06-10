@@ -36,6 +36,7 @@ test('add creates a fact file with required frontmatter fields', async () => {
   assert.equal(parsed.data.source, 'test');
   assert.deepEqual(parsed.data.tags, ['auth', 'api']);
   assert.match(parsed.data.decay_after, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(parsed.data.last_verified, parsed.data.created);
   assert.match(parsed.content, /JWT with refresh tokens/);
 });
 

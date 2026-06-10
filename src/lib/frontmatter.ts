@@ -4,7 +4,7 @@ import { assertValidFrontmatter } from './schema.js';
 
 function coerceDates(data: Record<string, unknown>): Record<string, unknown> {
   const result = { ...data };
-  for (const key of ['created', 'decay_after']) {
+  for (const key of ['created', 'decay_after', 'last_verified']) {
     if (result[key] instanceof Date) {
       result[key] = (result[key] as Date).toISOString();
     }
@@ -30,6 +30,7 @@ export function parseMemoryFile(content: string, filePath: string): MemoryItem {
     source: data.source,
     tags: data.tags,
     decay_after: data.decay_after,
+    last_verified: data.last_verified,
     corrects: data.corrects,
     corrected_by: data.corrected_by,
     ext: data.ext,
@@ -51,6 +52,7 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
     decay_after: item.decay_after,
   };
 
+  if (item.last_verified) frontmatter.last_verified = item.last_verified;
   if (item.corrects) frontmatter.corrects = item.corrects;
   if (item.corrected_by) frontmatter.corrected_by = item.corrected_by;
   if (item.ext && Object.keys(item.ext).length > 0) frontmatter.ext = item.ext;

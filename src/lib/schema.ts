@@ -16,6 +16,10 @@ export const memoryFrontmatterSchema = z.object({
     (s) => s === 'never' || !isNaN(Date.parse(s)),
     'Must be ISO 8601 date or "never"',
   ),
+  last_verified: z.string().refine(
+    (s) => !isNaN(Date.parse(s)),
+    'Must be a valid ISO 8601 date',
+  ).optional(),
   corrects: z.string().optional(),
   corrected_by: z.string().optional(),
   ext: z.record(z.string(), z.unknown()).optional(),

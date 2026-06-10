@@ -34,7 +34,7 @@ export function findDecayCandidates(items: MemoryItem[]): DecayCandidate[] {
       expiryTime = Date.parse(item.decay_after);
     } else {
       const ttlDays = DEFAULT_DECAY_DAYS[item.type] ?? 90;
-      expiryTime = Date.parse(item.created) + ttlDays * 24 * 60 * 60 * 1000;
+      expiryTime = Date.parse(item.last_verified ?? item.created) + ttlDays * 24 * 60 * 60 * 1000;
     }
 
     if (isNaN(expiryTime)) continue;

@@ -87,6 +87,7 @@ export function runAdd(typeInput: string, title: string, options: AddOptions): A
     source: options.source ?? 'unknown',
     tags: parseTags(options.tags),
     decay_after: toDecayAfter(type, decayDays, options.decayAfter),
+    last_verified: created,
     title,
     body: options.body ?? '',
   };

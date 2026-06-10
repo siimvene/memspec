@@ -35,6 +35,7 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
       source,
       tags: target.tags,
       decay_after: target.decay_after,
+      last_verified: now,
       corrects: target.id,
       title: target.title,
       body: options.replace,

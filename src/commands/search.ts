@@ -53,6 +53,7 @@ export function runSearch(query: string, options: SearchOptions): string {
       title: r.title,
       confidence: r.confidence,
       created: r.created,
+      last_verified: r.last_verified ?? r.created,
       tags: r.tags,
       source: r.source,
     })), null, 2);
