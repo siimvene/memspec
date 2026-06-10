@@ -103,6 +103,26 @@ No transition requires human approval. Corrections create new memories and link 
 
 Per-item overrides via `decay_after` in frontmatter. Use `never` for genuinely permanent knowledge.
 
+### Code-anchored verification
+
+Calendar TTL is the wrong signal for facts about code state — "auth is a mockup" goes stale
+the moment the auth implementation ships, not 90 days later. Memspec closes that gap with
+three operations:
+
+- **`memspec anchor <id> <files...>`** links a memory to the files it depends on, recording
+  each file's git blob SHA (`ext.code_anchors`). Anchoring asserts the memory is true against
+  the current file state.
+- **`memspec verify <id>`** records "this memory is still true as of now." If the memory has
+  anchors, each anchored file is checked first — drifted anchors return `needs_review` without
+  touching the memory. A clean verify refreshes `last_verified`, bumps confidence, and resets
+  the decay clock.
+- **`memspec reconcile`** scans all anchored memories for drift (including uncommitted edits)
+  and reports candidates for review. Run it after landing commits; resolve each candidate with
+  `verify` (still true), `correct` (now wrong), or `anchor` (still true, re-baseline).
+
+`memspec decay` and `memspec status` surface anchor drift alongside TTL expiry, but drifted
+memories are never auto-archived — code change is a signal for review, not deletion.
+
 ## Install
 
 ```bash
@@ -273,8 +293,11 @@ Each memory is a markdown file with YAML frontmatter (id, type, state, confidenc
 | `memspec search <query>` | Search active memories |
 | `memspec context [--format] [--query] [--type]` | Emit a token-budgeted memory summary for agent context injection |
 | `memspec correct <id> --reason "..."` | Correct or invalidate a memory |
-| `memspec status` | Store summary (counts, decay warnings, recent items) |
-| `memspec decay [--dry-run] [--archive]` | Apply TTL rules to expired items |
+| `memspec verify <id> [--evidence "..."]` | Record that a memory is still true; checks code anchors |
+| `memspec anchor <id> <files...> [--replace]` | Link a memory to the files it depends on |
+| `memspec reconcile [--since <ref>] [--json]` | Find anchored memories whose code has drifted |
+| `memspec status` | Store summary (counts, decay warnings, anchor drift, recent items) |
+| `memspec decay [--dry-run] [--archive]` | Apply TTL rules to expired items; reports anchor drift |
 | `memspec validate` | Check all memory files against schema |
 
 ## Session-start context injection
