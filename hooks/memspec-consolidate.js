@@ -18,9 +18,10 @@ const CONSOLIDATION_PROMPT = `## Memspec Consolidation
 
 You just committed code. Before continuing, review what you learned this session and update project memory:
 
-1. **New knowledge**: Did you discover facts about the codebase, make decisions, or establish procedures? Write them with \`memspec add\`.
-2. **Stale memories**: Did your work invalidate any existing memories? Correct them with \`memspec correct\`.
-3. **Quick check**: Run \`memspec status\` to see current store health.
+1. **Reconcile**: Run \`memspec reconcile\` — it lists memories whose anchored files your commit touched. For each candidate: \`memspec verify\` (still true), \`memspec correct\` (now wrong), or \`memspec anchor\` (still true, re-baseline).
+2. **New knowledge**: Did you discover facts about the codebase, make decisions, or establish procedures? Write them with \`memspec add\`. Anchor code-state facts to their files with \`memspec anchor <id> <files...>\`.
+3. **Stale memories**: Did your work invalidate any existing memories? Correct them with \`memspec correct\`.
+4. **Quick check**: Run \`memspec status\` to see current store health.
 
 Be selective — only write memories that would help a future agent starting cold. Don't dump session transcripts.`;
 
