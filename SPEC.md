@@ -1,4 +1,4 @@
-# Memspec Specification v0.2
+# Memspec Specification v0.3
 
 ## Abstract
 
@@ -6,18 +6,30 @@ Memspec is a specification for managing living project knowledge in AI agent wor
 
 This document is the portable specification. It is implementation-agnostic — any system that conforms to this spec is Memspec-compatible, regardless of language, storage backend, or agent runtime.
 
+### Changes in v0.3 (Witnessed Claims, full slice)
+
+v0.3 completes the witnessed-claims model: every memory is a claim paired with the evidence that last attested it, and the read surface shows the witness in words rather than as a number.
+
+- **Confidence float retired.** Trust is expressed by provenance (`source_kind`) and the witness class (`verified_with`) instead of a 0.0–1.0 number. Old records keep their value as `ext.legacy_confidence` for archaeology, but it is no longer used in ranking or filtering.
+- **State enum collapsed.** `captured | corrected | decayed | archived` are gone. The active set is `active | superseded | retired`. Past values are accepted on read (mapped: `captured → active`, `corrected → superseded`, `decayed | archived → retired`) and rewritten on first migration.
+- **Field renames.** `decay_after → check_by`, `corrects → supersedes` (now an array, since N→1 merges are first-class), `corrected_by → superseded_by`, `correction_reason → supersede_reason`. The reader accepts both names for one version; the writer emits the new ones.
+- **`kind`** (new): `claim | observation`. Claims have a `type`; observations index a moment, never go stale because never claimed to be current. `expires` is the observation-only hard expiry.
+- **`pinned`** (new, operator-only): always surfaced in boot context.
+- **`conflicts_with`** (new): explicit conflict edges. Annotated on read to surface contradictions rather than ranking them blind.
+- **`verified_with`** (new): `anchor | operator | evidence | assertion`. Replaces `confidence` as the trust signal. Inferred at read time from existing data when missing.
+- **Anchors are schema spine.** `ext.code_anchors` is dual-read for one version; the writer emits top-level `anchors`. The position change makes anchors first-class rather than optional garnish.
+- **Migration.** `memspec migrate` is the one-shot, idempotent CLI that renames fields, remaps states, promotes anchors, retires confidence, and backfills `verified_with` from existing data. Dry-run is the default; `--apply` writes. Emits a source-to-source_kind inference table before any writes for operator review.
+
 ### Changes in v0.2 (Witnessed Claims, first slice)
 
-v0.2 starts moving memspec toward a witnessed-claims model: every memory is a claim paired with the evidence that last attested it. This release is schema-compatible — readers tolerate records written before it.
+v0.2 began moving memspec toward the witnessed-claims model with these schema-compatible additions:
 
 - **`source` is required at write time.** `'unknown'` is rejected. MCP implementations default it to the connected client name.
-- **`source_kind`** (optional field): `operator | agent | import`, inferred from the source string at write time. Operator-sourced records are protected: correcting one requires an explicit override, and the override is logged into the correction reason.
-- **Correction reasons are durable.** `correction_reason` is written to both the replacement and the archived original. Corrections may carry a fresh title, and may supersede into an existing memory instead of minting a new one (duplicate merging).
-- **Anchorless verification requires evidence.** A bare self-verify is rejected; the caller must state what was checked.
-- **Anchors may be cross-repo** (`{file, sha, repo?}`). An anchor whose repo is not checked out flags the claim for review instead of failing.
-- **TTL expiry flags, never deletes.** Items past `decay_after` get `stale: true` and stay active and searchable; results carry the flag. Physical retirement is `memspec sweep`, an interactive operator-run CLI command.
-
-Planned for v0.3 (breaking): removal of the `confidence` float in favor of witness display, MCP tool surface reduction and renames (`remember`/`supersede`/`observe`), an `observation` record kind with hard expiry, and a boot-context ranking rewrite.
+- **`source_kind`** (`operator | agent | import`), inferred from the source string at write time. Operator-sourced records are protected: correcting one requires an explicit override, logged into the persisted reason.
+- **Correction reasons are durable** (later renamed to `supersede_reason` in v0.3).
+- **Anchorless verification requires evidence.**
+- **Anchors may be cross-repo.**
+- **TTL expiry flags, never deletes** (`decay_after`, now `check_by`).
 
 ---
 
@@ -94,25 +106,22 @@ Some knowledge doesn't map obviously to one type. These guidelines resolve the m
 
 | State | Description | Retrievable |
 |-------|-------------|-------------|
-| `captured` | Raw observation, not yet classified | No |
 | `active` | Classified and current. Represents what's true now. | Yes |
-| `corrected` | Superseded by a newer memory. No longer current. | No (unless explicitly requested) |
-| `decayed` | TTL expired. No longer relevant. | No (unless explicitly requested) |
-| `archived` | Removed from working set. Retained in history. | No |
+| `superseded` | Replaced by a newer memory (via correction or merge). | No (unless explicitly requested) |
+| `retired` | Removed from the working set by operator sweep. Retained in history. | No |
+
+Legacy states from earlier versions still load: `captured → active`, `corrected → superseded`, `decayed | archived → retired`.
 
 ### 3.2 Transitions
 
 ```
-captured ──→ active       (classification)
-captured ──→ archived     (unclassifiable + TTL expired)
-active   ──→ corrected    (correction signal received)
-active   ──→ archived     (operator-approved sweep, or manual cleanup)
-corrected ──→ archived    (after retention period)
+active   ──→ superseded   (correction or merge signal received)
+active   ──→ retired      (operator-approved sweep)
 ```
 
-As of v0.2, TTL expiry does **not** transition state. An item past `decay_after` stays `active` and gets `stale: true` in frontmatter — it remains retrievable, with the flag carried in results so readers know to re-verify or correct before relying on it. A successful verification clears the flag. The `decayed` state remains defined for records written by earlier versions.
+TTL expiry does **not** transition state. An item past `check_by` stays `active` and gets `stale: true` in frontmatter — it remains retrievable, with the flag carried in results so readers know to re-verify or supersede before relying on it. A successful verification clears the flag.
 
-State transitions out of `active` are explicit acts: a correction (with a durable reason) or an operator-approved sweep. Time alone never removes knowledge.
+State transitions out of `active` are explicit acts: a supersede (with a durable reason) or an operator-approved sweep. Time alone never removes knowledge.
 
 ### 3.3 Decay Defaults
 
@@ -127,17 +136,20 @@ Implementations MAY override these defaults via configuration. A TTL of `0` or `
 
 Passing the TTL flags the item `stale: true` (see §3.2); it does not archive it. Physical retirement is `memspec sweep` — interactive, one prompt per candidate, CLI-only by design (removal is an operator act, not an agent surface).
 
-### 3.4 Confidence Score
+### 3.4 Witness Class (`verified_with`)
 
-> **Deprecated.** Scheduled for removal in v0.3 — trust will be expressed by provenance (`source_kind`) and verification method instead of a number. New tooling should not build on this field.
+Each active memory carries a witness class indicating how its current truth is attested. This replaces the v0.2 confidence float.
 
-Each active memory has a confidence score from 0.0 to 1.0. This affects retrieval ranking, not lifecycle.
+| Witness | Meaning |
+|---------|---------|
+| `anchor` | At least one code anchor was unchanged at last verification. Mechanical witness, strongest. |
+| `operator` | An operator (`source_kind: operator`) stated this directly. Authority witness. |
+| `evidence` | An agent verified the claim and stated what it checked (recorded in `ext.last_verification.evidence`). |
+| `assertion` | The claim has only the writer's say-so. No anchor, no operator, no evidence. Weakest. |
 
-- Initial confidence is set by classification (rule-based: 0.7, LLM-enhanced: LLM-assigned)
-- Confidence increases when an agent or human explicitly confirms the memory (e.g., via a confirmation signal or by correcting a different memory and citing this one as still accurate)
-- Confidence decreases as the memory approaches its TTL without confirmation
-- Confidence does not affect whether an item is retrievable — only its ranking
-- The mechanism for tracking confirmation is implementation-defined
+Witness is information for the reader, not a write-rate limiter. The consuming LLM weighs the evidence in words. The witness is set at write time and updated by `verify` and `anchor` operations; it is inferred from existing data on records that predate the field.
+
+**Historical: confidence float (removed in v0.3).** Pre-0.3 records had a `confidence` float [0, 1]. It encoded "verify call count" rather than truth probability, and the ranking formulas that mixed it with raw BM25 were cosmetic. The reader preserves any historical value under `ext.legacy_confidence` for archaeology; it is no longer used.
 
 ---
 
@@ -145,29 +157,31 @@ Each active memory has a confidence score from 0.0 to 1.0. This affects retrieva
 
 Self-correction is how memory stays current as the codebase evolves.
 
-### 4.1 Correction Signal
+### 4.1 Supersede Signal
 
-Any agent or human can signal a correction. A correction signal contains:
-- **target**: ID of the memory being corrected
-- **reason**: Why it's wrong or stale (free text)
-- **replacement** (optional): New content that supersedes the target
-- **title** (optional): Fresh title for the replacement — corrected knowledge often no longer fits the old title
-- **supersede_by** (optional): ID of an existing active memory that supersedes the target, instead of minting a new one. Mutually exclusive with replacement. This is how duplicates merge.
+Any agent or human can supersede a record. A supersede signal contains:
+- **target**: ID of the memory being superseded
+- **reason**: Why it's wrong or stale (free text). Persisted durably on both records.
+- **replacement** (optional): New content that supersedes the target.
+- **title** (optional): Fresh title for the replacement — superseded knowledge often no longer fits the old title.
+- **merge_from** (optional, planned): List of duplicate ids to collapse atomically into one survivor.
 
-### 4.2 Correction Processing
+### 4.2 Supersede Processing
 
-When a correction signal is received:
+When a supersede signal is received:
 
-1. The target memory transitions to `corrected` state
-2. The target's `corrected_by` field is set to the superseding memory's ID (the new replacement, or the existing memory named by `supersede_by`)
-3. If replacement content is provided, a new memory is created in `active` state with `corrects` pointing to the target, the provided title (or the old one), and a decay clock reset to the type default — fresh knowledge does not inherit the dying record's TTL
-4. If no replacement is provided, the target is corrected without replacement (the knowledge is simply invalidated)
-5. Both memories are retained — the correction and the original
-6. The **reason is persisted durably** as `correction_reason` frontmatter on every record involved: the archived original and (when minted) the replacement
+1. The target memory transitions to `superseded` state.
+2. The target's `superseded_by` field is set to the surviving memory's id.
+3. If replacement content is provided, a new memory is created in `active` state with `supersedes: [target_id]`, the provided title (or the old one), and a `check_by` reset to the type default — fresh knowledge does not inherit the dying record's TTL.
+4. If no replacement is provided, the target is superseded without replacement (the knowledge is simply invalidated).
+5. Both memories are retained — the supersede and the original.
+6. The **reason is persisted durably** as `supersede_reason` frontmatter on every record involved: the archived original and (when minted) the replacement.
+
+Historical correction reasons whose values the v0.2 bug dropped come back from migration as `supersede_reason: "(predates reason tracking)"`.
 
 ### 4.2.1 Operator Record Protection
 
-Records whose effective `source_kind` is `operator` (the stored field, or inferred from the source string for records that predate it) MUST NOT be corrected without an explicit override flag (`--override-operator` / `override_operator`). When the override is used, that fact is appended to the persisted correction reason — overriding operator knowledge leaves a trace.
+Records whose effective `source_kind` is `operator` (the stored field, or inferred from the source string for records that predate it) MUST NOT be superseded without an explicit override flag (`--override-operator` / `override_operator`). When the override is used, that fact is appended to the persisted reason — overriding operator knowledge leaves a trace.
 
 ### 4.3 Implicit Correction (optional, requires index)
 
@@ -246,19 +260,24 @@ Each memory item is a markdown file with YAML frontmatter:
 ```markdown
 ---
 id: ms_{ulid}
-type: fact | decision | procedure
-state: captured | active | corrected | decayed | archived
-confidence: 0.0-1.0       # deprecated, removal planned for v0.3
+kind: claim | observation                 # NEW in v0.3; defaults to claim
+type: fact | decision | procedure         # claims only
+state: active | superseded | retired
 created: {ISO 8601}
-source: {agent or human identifier}   # required; 'unknown' is rejected at write time
-source_kind: operator | agent | import   # optional — trust tier inferred from source at write time
+source: {agent or human identifier}       # required; 'unknown' is rejected at write time
+source_kind: operator | agent | import    # trust tier inferred from source at write time
 tags: [{tag}, ...]
-decay_after: {ISO 8601}
-stale: true               # optional — set when decay_after passes; cleared by verification
-last_verified: {ISO 8601}  # optional — when this memory was last confirmed true (defaults to created)
-corrects: {id}          # present if this corrects another memory
-corrected_by: {id}      # present if this was corrected
-correction_reason: {text}  # present on corrected records and their replacements
+check_by: {ISO 8601} | never              # renamed from decay_after; flag-only, never deletes
+stale: true                               # optional — set when check_by passes; cleared by verification
+last_verified: {ISO 8601}                 # optional — when last confirmed true (defaults to created)
+verified_with: anchor | operator | evidence | assertion   # witness class; replaces confidence
+pinned: true                              # optional — operator only; always surfaced in boot
+anchors: [{file, sha, repo?}, ...]        # PROMOTED from ext.code_anchors to schema spine
+supersedes: [{id}, ...]                   # ids this record replaces (renamed from corrects; now array)
+superseded_by: {id}                       # id of the record that replaced this one (renamed from corrected_by)
+supersede_reason: {text}                  # renamed from correction_reason
+conflicts_with: [{id}, ...]               # explicit conflict edges to other memory ids
+expires: {ISO 8601}                       # observations only — hard expiry
 ---
 
 # {Title}
@@ -271,6 +290,8 @@ correction_reason: {text}  # present on corrected records and their replacements
 ## Alternatives
 {Optional — for decisions, what was considered and rejected}
 ```
+
+**Reader compatibility.** For one version, the reader accepts pre-0.3 frontmatter (`decay_after`, `corrects`/`corrected_by`/`correction_reason`, the old state values, `ext.code_anchors`, top-level `confidence`) and normalizes it into the v0.3 shape on parse. The writer emits v0.3 names only — re-saved records migrate organically. `memspec migrate` covers everything else in one pass.
 
 ### 6.3 Required Fields
 
