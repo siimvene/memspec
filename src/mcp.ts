@@ -167,7 +167,7 @@ server.tool(
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
     body: z.string().optional().describe('Full content/details'),
-    source: z.string().optional().describe('Who/what created this memory'),
+    source: z.string().optional().describe('Who/what created this memory (defaults to the connected client name; "unknown" is rejected)'),
     tags: z.string().optional().describe('Comma-separated tags'),
     decay_after: z.string().optional().describe('ISO timestamp or "never"'),
     store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
@@ -175,10 +175,11 @@ server.tool(
   async ({ type, title, body, source, tags, decay_after, store: storeName }) => {
     try {
       const cwd = storeName === 'global' ? homedir() : defaultCwd;
+      const resolvedSource = source ?? server.server.getClientVersion()?.name;
       const result = runAdd(type, title, {
         cwd,
         body,
-        source,
+        source: resolvedSource,
         tags,
         decayAfter: decay_after,
         store: storeName,
@@ -195,7 +196,7 @@ server.tool(
         structuredContent: {
           type,
           title,
-          source: source ?? 'unknown',
+          source: resolvedSource ?? null,
           tags: tags?.split(',').map((tag) => tag.trim()).filter(Boolean) ?? [],
           decay_after: decay_after ?? null,
           duplicates: result.duplicates ?? null,

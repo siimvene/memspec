@@ -63,7 +63,7 @@ program
   .argument('<title>', 'memory title')
   .option('--cwd <path>', 'project root')
   .option('--body <text>', 'memory body')
-  .option('--source <source>', 'creator identifier')
+  .requiredOption('--source <source>', 'creator identifier (required; "unknown" is rejected)')
   .option('--tags <tags>', 'comma-separated tags')
   .option('--decay-after <value>', 'ISO timestamp or "never"')
   .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
