@@ -29,12 +29,18 @@ export interface StoreLayerConfig {
   writable: boolean;   // can this layer be written to?
 }
 
+export interface AnchorsConfig {
+  /** Directories searched (after the project root's parent) for cross-repo anchor checkouts. */
+  repo_search_paths?: string[];
+}
+
 export interface MemspecConfig {
   decay: Record<string, string>;
   profiles: Record<string, MemspecProfile>;
   search: SearchConfig;
   stabilization: StabilizationConfig;
   stores?: StoreLayerConfig[];
+  anchors?: AnchorsConfig;
 }
 
 export interface MemspecProfile {
@@ -100,12 +106,22 @@ export function loadConfig(root: string): MemspecConfig {
       ? (data.stores as StoreLayerConfig[])
       : undefined;
 
+    const anchorsData = data.anchors as Record<string, unknown> | undefined;
+    const anchors: AnchorsConfig | undefined = anchorsData
+      ? {
+          repo_search_paths: Array.isArray(anchorsData.repo_search_paths)
+            ? (anchorsData.repo_search_paths as unknown[]).filter((p): p is string => typeof p === 'string')
+            : undefined,
+        }
+      : undefined;
+
     return {
       decay: { ...DEFAULT_CONFIG.decay, ...(data.decay as Record<string, string> ?? {}) },
       profiles: { ...DEFAULT_CONFIG.profiles, ...(data.profiles as MemspecConfig['profiles'] ?? {}) },
       search,
       stabilization,
       stores,
+      anchors,
     };
   } catch {
     return DEFAULT_CONFIG;
