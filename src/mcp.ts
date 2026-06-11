@@ -230,10 +230,10 @@ server.tool(
 
 server.tool(
   'memspec_verify',
-  'Record that a memory is still true as of now. If the memory has code anchors, checks each anchored file against its recorded blob SHA first — drifted anchors return needs_review without touching the memory. Clean verification refreshes last_verified, bumps confidence, and resets the decay clock.',
+  'Record that a memory is still true as of now. If the memory has code anchors, checks each anchored file against its recorded blob SHA first — drifted anchors return needs_review without touching the memory. Anchorless memories require evidence text stating what you checked. Clean verification refreshes last_verified, bumps confidence, and resets the decay clock.',
   {
     id: z.string().describe('Memory ID to verify'),
-    evidence: z.string().optional().describe('Free-text reason/source for the verification'),
+    evidence: z.string().optional().describe('What you checked to confirm this is still true — required when the memory has no code anchors'),
     source: z.string().optional().describe('Who is verifying'),
   },
   async ({ id, evidence, source }) => {

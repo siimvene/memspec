@@ -28,6 +28,16 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
 
   const projectRoot = projectRootForStore(store.root);
   const anchors = getCodeAnchors(item);
+
+  // An anchorless verify has no mechanical witness — without evidence text it
+  // is the system trusting its own output. Refuse it.
+  if (anchors.length === 0 && !options.evidence?.trim()) {
+    throw new Error(
+      `${id} has no code anchors — anchorless verification requires --evidence "what you checked". ` +
+      'State the evidence, or anchor the memory to the files it depends on.',
+    );
+  }
+
   const statuses = checkAnchors(projectRoot, anchors);
   const drifted = statuses.filter((a) => a.status !== 'unchanged');
 

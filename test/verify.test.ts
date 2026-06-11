@@ -32,6 +32,25 @@ test('verify without anchors refreshes last_verified and decay clock', async () 
   assert.equal(after.ext.last_verification.evidence, 'checked manually');
 });
 
+test('verify rejects anchorless calls without evidence', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await addFact(target, 'Unwitnessed fact');
+  const factPath = join(target, '.memspec', 'memory', 'facts', `${id}.md`);
+  const before = await readText(factPath);
+
+  await assert.rejects(
+    () => runCli(['verify', id, '--cwd', target]),
+    (error: Error & { stderr?: string }) => {
+      assert.match(`${error.message}\n${error.stderr ?? ''}`, /requires --evidence/);
+      return true;
+    },
+  );
+
+  const after = await readText(factPath);
+  assert.equal(after, before, 'rejected verify must not mutate the memory file');
+});
+
 test('verify with unchanged anchors passes', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
@@ -115,7 +134,7 @@ test('verify keeps decay_after never untouched', async () => {
   const [entry] = await readdir(decisionsDir);
   const id = entry.replace(/\.md$/, '');
 
-  await runCli(['verify', id, '--cwd', target]);
+  await runCli(['verify', id, '--cwd', target, '--evidence', 'still locked in']);
 
   const after = matter(await readText(join(decisionsDir, entry))).data;
   assert.equal(after.decay_after, 'never');
