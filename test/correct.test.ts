@@ -96,6 +96,33 @@ test('correct without replacement persists the reason on the archived record', a
   assert.equal(archived.data.correction_reason, 'No longer true');
 });
 
+test('correct resets the replacement decay clock to the type default', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  await runCli([
+    'add', 'fact', 'Nearly expired', '--cwd', target,
+    '--body', 'Old TTL', '--source', 'test',
+    '--decay-after', '2030-01-01T00:00:00.000Z',
+  ]);
+  const entries = await readdir(join(target, '.memspec', 'memory', 'facts'));
+  const id = matter(await readText(join(target, '.memspec', 'memory', 'facts', entries[0]))).data.id;
+
+  await runCli([
+    'correct', id,
+    '--reason', 'stale', '--replace', 'Fresh knowledge',
+    '--cwd', target, '--source', 'test',
+  ]);
+
+  const factEntries = await readdir(join(target, '.memspec', 'memory', 'facts'));
+  const replacement = matter(await readText(join(target, '.memspec', 'memory', 'facts', factEntries[0])));
+
+  // Default fact TTL is 90d from now — nowhere near the inherited 2030 date.
+  const decayAfter = Date.parse(String(replacement.data.decay_after));
+  const expected = Date.now() + 90 * 24 * 60 * 60 * 1000;
+  const dayMs = 24 * 60 * 60 * 1000;
+  assert.ok(Math.abs(decayAfter - expected) < 2 * dayMs, 'decay clock should reset to the 90d fact default');
+});
+
 test('correct fails on nonexistent ID', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);

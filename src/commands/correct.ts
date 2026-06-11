@@ -1,4 +1,5 @@
 import { ulid } from 'ulid';
+import { getDecayDays, loadConfig } from '../lib/config.js';
 import { MemspecStore } from '../lib/store.js';
 
 export interface CorrectOptions {
@@ -26,6 +27,12 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
     const newId = `ms_${ulid()}`;
     const now = new Date().toISOString();
 
+    // The replacement is fresh knowledge: its decay clock starts now at the
+    // type default rather than inheriting whatever was left on the dying record.
+    const config = loadConfig(store.root);
+    const expires = new Date();
+    expires.setUTCDate(expires.getUTCDate() + getDecayDays(config, target.type));
+
     store.writeItem({
       id: newId,
       type: target.type,
@@ -34,7 +41,7 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
       created: now,
       source,
       tags: target.tags,
-      decay_after: target.decay_after,
+      decay_after: expires.toISOString(),
       last_verified: now,
       corrects: target.id,
       correction_reason: options.reason,
