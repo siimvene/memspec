@@ -101,7 +101,7 @@ export class MemspecStore {
     if (!existsSync(gitignorePath)) {
       writeFileSync(
         gitignorePath,
-        '# Derived search index — rebuildable from files\n*.db\n*.db-journal\n*.db-wal\n# Per-clone reconcile checkpoint\n.reconcile.json\n',
+        '# Derived search index — rebuildable from files\n*.db\n*.db-journal\n*.db-wal\n.fts.db\n.fts.db-journal\n.fts.db-wal\n# Per-clone reconcile checkpoint\n.reconcile.json\n# Local retrieval log — boot usage_boost input\nusage.jsonl\n',
       );
     }
 

@@ -1,6 +1,7 @@
 import { getProfile, loadConfig } from '../lib/config.js';
 import { MemspecStore, type StoreSearchOptions } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
+import { recordSearchHits } from '../lib/usage.js';
 
 export interface SearchOptions {
   cwd?: string;
@@ -171,6 +172,10 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
 
     return result;
   });
+
+  if (results.length > 0) {
+    recordSearchHits(store.root, results.map((r) => r.id));
+  }
 
   return {
     query,
