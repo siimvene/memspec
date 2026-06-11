@@ -7,6 +7,12 @@ export interface DecayOptions {
   dryRun?: boolean;
 }
 
+/**
+ * Deprecated in v0.3. Stale flagging is now automatic at read time
+ * (`store.loadActive()` lazily marks items past `check_by`), and physical
+ * retirement is `memspec sweep`. This command is kept on the CLI as a
+ * read-only summary for one release cycle; it never mutates the store.
+ */
 export function runDecay(options: DecayOptions): string {
   const store = new MemspecStore(options.cwd);
   const items = store.loadAll();
@@ -14,49 +20,29 @@ export function runDecay(options: DecayOptions): string {
   const expired = candidates.filter((c) => c.kind === 'expired');
   const drifted = candidates.filter((c) => c.kind === 'anchor-drift');
 
-  const lines: string[] = [];
+  const lines: string[] = [
+    'memspec decay is deprecated in v0.3. Stale flagging is automatic at read time;',
+    'use `memspec status` to view stale and drifted items, `memspec sweep` to retire them.',
+    '',
+  ];
 
   if (expired.length === 0) {
     lines.push('No items past TTL.');
   } else {
-    lines.push(`${expired.length} item(s) past TTL:`, '');
+    lines.push(`${expired.length} item(s) past TTL (flagged stale at read):`, '');
     for (const c of expired) {
-      lines.push(`[${c.item.type}] ${c.item.title}${c.item.stale ? ' (already flagged stale)' : ''}`);
+      lines.push(`[${c.item.type ?? 'observation'}] ${c.item.title}`);
       lines.push(`  ${c.item.id} - ${c.reason}`);
     }
   }
 
   if (drifted.length > 0) {
-    lines.push('', `${drifted.length} item(s) with anchor drift (review with memspec verify, correct, or anchor — not auto-archived):`, '');
+    lines.push('', `${drifted.length} item(s) with anchor drift (review with verify, supersede, or anchor):`, '');
     for (const c of drifted) {
-      lines.push(`[${c.item.type}] ${c.item.title}`);
+      lines.push(`[${c.item.type ?? 'observation'}] ${c.item.title}`);
       lines.push(`  ${c.item.id} - ${c.reason}`);
     }
   }
-
-  if (expired.length === 0) {
-    return lines.join('\n');
-  }
-
-  if (options.dryRun) {
-    lines.push('', 'Dry run - no changes made.');
-    return lines.join('\n');
-  }
-
-  // Expiry flags, never deletes: stale items stay active and searchable,
-  // marked for review. Physical retirement is `memspec sweep`, operator-run.
-  const fresh = expired.filter((c) => !c.item.stale);
-  for (const c of fresh) {
-    c.item.stale = true;
-    store.updateItem(c.item);
-  }
-
-  lines.push('');
-  lines.push(`Flagged ${fresh.length} item(s) stale.`);
-  if (expired.length > fresh.length) {
-    lines.push(`${expired.length - fresh.length} item(s) were already flagged.`);
-  }
-  lines.push('Stale items stay searchable; run `memspec sweep` to retire them interactively.');
 
   return lines.join('\n');
 }

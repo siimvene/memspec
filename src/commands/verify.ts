@@ -59,7 +59,7 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     if (drifted.length > 0) {
       lines.push(
         'Review the changed files, then either:',
-        `  memspec correct ${id} --reason "..." --replace "..."   # if the memory is now wrong`,
+        `  memspec supersede ${id} --reason "..." --body "..."   # if the memory is now wrong`,
         `  memspec anchor ${id} ${drifted.map((a) => a.file).join(' ')}   # if still true, re-baseline the anchors`,
       );
     }
