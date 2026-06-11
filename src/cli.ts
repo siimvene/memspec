@@ -7,13 +7,17 @@ import { runAnchor } from './commands/anchor.js';
 import { runConsolidate } from './commands/consolidate.js';
 import { runContext } from './commands/context.js';
 import { runCorrect } from './commands/correct.js';
+import { runObserve } from './commands/observe.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
 import { runReconcile } from './commands/reconcile.js';
+import { runRemember } from './commands/remember.js';
 import { runInit } from './commands/init.js';
+import { runMigrate } from './commands/migrate.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
+import { runSupersede } from './commands/supersede.js';
 import { runSweep } from './commands/sweep.js';
 import { runValidate } from './commands/validate.js';
 import { runVerify } from './commands/verify.js';
@@ -26,7 +30,7 @@ const program = new Command();
 program
   .name('memspec')
   .description('Structured memory for AI agents')
-  .version('0.2.0')
+  .version('0.3.0')
   .showHelpAfterError();
 
 program
@@ -86,6 +90,84 @@ program
   });
 
 program
+  .command('remember')
+  .description('Record a new memory (v0.3 — supersedes `add`; anchors inline)')
+  .argument('<type>', 'fact | decision | procedure')
+  .argument('<title>', 'memory title')
+  .option('--cwd <path>', 'project root')
+  .option('--body <text>', 'memory body')
+  .requiredOption('--source <source>', 'creator identifier (required; "unknown" is rejected)')
+  .option('--tags <tags>', 'comma-separated tags')
+  .option('--check-by <value>', 'ISO timestamp or "never"')
+  .option('--anchor <file...>', 'project-root-relative file paths to anchor this claim to')
+  .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
+  .option('--pin', 'always surface this claim in boot context (operator-only; CLI flag, not on the MCP surface)')
+  .action((type: string, title: string, options: {
+    cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
+  }) => {
+    if (options.store === 'global') {
+      options.cwd = homedir();
+    }
+    const result = runRemember(type, title, {
+      cwd: options.cwd,
+      body: options.body,
+      source: options.source,
+      tags: options.tags,
+      checkBy: options.checkBy,
+      anchors: options.anchor,
+      store: options.store,
+      pin: options.pin,
+    });
+    console.log(result.message);
+    if (result.duplicates && result.duplicates.length > 0) {
+      console.log('\n⚠ Potential duplicates found:');
+      for (const dup of result.duplicates) {
+        console.log(`  - [${dup.id}] ${dup.title}`);
+      }
+      console.log('  Consider `memspec supersede` instead.');
+    }
+  });
+
+program
+  .command('supersede')
+  .description('Replace, retract, or merge a memory (v0.3 — supersedes `correct`)')
+  .argument('<id>', 'memory ID to supersede (or survivor id when merging without --body)')
+  .requiredOption('--reason <text>', 'why this is wrong, stale, or being merged')
+  .option('--cwd <path>', 'project root')
+  .option('--body <text>', 'replacement content; if omitted with no --merge-from, the target is retracted')
+  .option('--title <text>', 'fresh title for the replacement (defaults to the old title)')
+  .option('--merge-from <ids>', 'comma-separated list of memory ids to collapse into the survivor')
+  .option('--override-operator', 'required to supersede operator-sourced records; logged into the reason')
+  .option('--source <source>', 'corrector identifier')
+  .action((id: string, options: {
+    cwd?: string; reason: string; body?: string; title?: string; mergeFrom?: string; overrideOperator?: boolean; source?: string;
+  }) => {
+    const mergeFrom = options.mergeFrom?.split(',').map((s) => s.trim()).filter(Boolean);
+    const result = runSupersede(id, {
+      cwd: options.cwd,
+      reason: options.reason,
+      body: options.body,
+      title: options.title,
+      mergeFrom,
+      overrideOperator: options.overrideOperator,
+      source: options.source,
+    });
+    console.log(result.message);
+  });
+
+program
+  .command('observe')
+  .description('Capture a point-in-time observation with hard expiry')
+  .argument('<text>', 'observation text (first line becomes the title)')
+  .option('--cwd <path>', 'project root')
+  .option('--ttl <value>', 'duration before expiry (e.g. 7d, 48h, never) — default 7d')
+  .option('--source <source>', 'observer identifier (defaults to "agent")')
+  .action((text: string, options: { cwd?: string; ttl?: string; source?: string }) => {
+    const result = runObserve({ cwd: options.cwd, text, ttl: options.ttl, source: options.source });
+    console.log(result.message);
+  });
+
+program
   .command('promote')
   .description('Confirm or promote a captured memory to active')
   .argument('<id>', 'memory ID to promote')
@@ -140,8 +222,9 @@ program
   .option('--profile <name>', 'retrieval profile', 'default')
   .option('--limit <n>', 'max results', '10')
   .option('--json', 'output as JSON')
+  .option('--full', 'include full body content (token-budgeted)')
   .action((query: string, options: {
-    cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean;
+    cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean; full?: boolean;
   }) => {
     console.log(runSearch(query, options));
   });
@@ -237,6 +320,28 @@ program
       const rw = layer.writable ? 'rw' : 'ro';
       console.log(`  ${layer.name} [${rw}] (priority ${layer.priority}) — ${layer.path} (${status})`);
     }
+  });
+
+program
+  .command('migrate')
+  .description('One-shot v0.2 -> v0.3 migration of a memspec store (idempotent; dry-run by default)')
+  .option('--cwd <path>', 'project root')
+  .option('--apply', 'write changes (dry-run is the default)')
+  .option('--override <pair...>', 'override source_kind for a source string: source=operator|agent|import')
+  .action((options: { cwd?: string; apply?: boolean; override?: string[] }) => {
+    const sourceOverrides: Record<string, 'operator' | 'agent' | 'import'> = {};
+    for (const pair of options.override ?? []) {
+      const idx = pair.lastIndexOf('=');
+      if (idx === -1) throw new Error(`--override expects source=tier; got "${pair}"`);
+      const source = pair.slice(0, idx);
+      const tier = pair.slice(idx + 1) as 'operator' | 'agent' | 'import';
+      if (!['operator', 'agent', 'import'].includes(tier)) {
+        throw new Error(`--override tier must be operator | agent | import; got "${tier}"`);
+      }
+      sourceOverrides[source] = tier;
+    }
+    const result = runMigrate({ cwd: options.cwd, apply: options.apply, sourceOverrides });
+    console.log(result.message);
   });
 
 program

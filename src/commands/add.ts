@@ -31,7 +31,7 @@ function assertMemoryType(input: string): MemoryType {
   throw new Error(`Unsupported memory type: ${input}`);
 }
 
-function toDecayAfter(type: MemoryType, decayDays: number, override?: string, now: Date = new Date()): string {
+function toCheckBy(type: MemoryType, decayDays: number, override?: string, now: Date = new Date()): string {
   if (override === 'never') return 'never';
   if (override) return override;
 
@@ -72,8 +72,7 @@ export function runAdd(typeInput: string, title: string, options: AddOptions): A
       duplicates = existing.map((item) => ({
         id: item.id,
         title: item.title,
-        // BM25 returns negative scores; invert for a positive relevance score
-        score: item.confidence,
+        score: 1,
       }));
     }
   } catch {
@@ -83,28 +82,20 @@ export function runAdd(typeInput: string, title: string, options: AddOptions): A
   const created = new Date().toISOString();
   const id = `ms_${ulid()}`;
 
-  const stabilize = config.stabilization.enabled;
-  const state = stabilize ? 'captured' : 'active';
-  const confidence = stabilize ? 0.5 : 0.7;
-
   const itemData: Parameters<typeof store.writeItem>[0] = {
     id,
+    kind: 'claim',
     type,
-    state,
-    confidence,
+    state: 'active',
     created,
     source,
     source_kind: inferSourceKind(source),
     tags: parseTags(options.tags),
-    decay_after: toDecayAfter(type, decayDays, options.decayAfter),
+    check_by: toCheckBy(type, decayDays, options.decayAfter),
     last_verified: created,
     title,
     body: options.body ?? '',
   };
-
-  if (stabilize) {
-    itemData.ext = { confirmations: 0, confirmed_by: [] };
-  }
 
   const filePath = store.writeItem(itemData);
 

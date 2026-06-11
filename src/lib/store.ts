@@ -7,6 +7,22 @@ import { validateFrontmatter } from './schema.js';
 import type { MemoryFrontmatter, MemoryItem, MemoryType } from './types.js';
 import matter from 'gray-matter';
 
+/**
+ * v0.3: items past check_by are stale at read time, even when the on-disk
+ * frontmatter hasn't been touched yet. The flag is computed lazily so callers
+ * (search, sweep, status) see the current state without a separate decay run.
+ * Files are never mutated here — physical retirement is still `memspec sweep`.
+ */
+function withLazyStale(item: MemoryItem): MemoryItem {
+  if (item.stale) return item;
+  if (item.check_by === 'never' || !item.check_by) return item;
+  if (item.kind === 'observation') return item;
+  const expiry = Date.parse(item.check_by);
+  if (Number.isNaN(expiry)) return item;
+  if (Date.now() <= expiry) return item;
+  return { ...item, stale: true };
+}
+
 function walkMarkdownFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
 
@@ -85,7 +101,7 @@ export class MemspecStore {
     if (!existsSync(gitignorePath)) {
       writeFileSync(
         gitignorePath,
-        '# Derived search index — rebuildable from files\n*.db\n*.db-journal\n*.db-wal\n# Per-clone reconcile checkpoint\n.reconcile.json\n',
+        '# Derived search index — rebuildable from files\n*.db\n*.db-journal\n*.db-wal\n.fts.db\n.fts.db-journal\n.fts.db-wal\n# Per-clone reconcile checkpoint\n.reconcile.json\n# Local retrieval log — boot usage_boost input\nusage.jsonl\n',
       );
     }
 
@@ -103,7 +119,7 @@ export class MemspecStore {
   }
 
   private pathForItem(item: MemoryFrontmatter): string {
-    if (item.state === 'captured') {
+    if (item.kind === 'observation' || !item.type) {
       return join(this.observationDir(), `${item.id}.md`);
     }
     return join(this.typeDir(item.type), `${item.id}.md`);
@@ -115,6 +131,18 @@ export class MemspecStore {
     mkdirSync(dir, { recursive: true });
     writeFileSync(filePath, serializeMemoryFile(item));
     return filePath;
+  }
+
+  /**
+   * Project-root markdown files that contribute to FTS. Active items live under
+   * memory/ and observations/; archive/ is excluded because superseded/retired
+   * records aren't searchable anyway.
+   */
+  activeSourceFiles(): string[] {
+    return [
+      ...walkMarkdownFiles(join(this.root, 'memory')),
+      ...walkMarkdownFiles(join(this.root, 'observations')),
+    ];
   }
 
   loadAll(): MemoryItem[] {
@@ -133,8 +161,8 @@ export class MemspecStore {
         const parsed = matter(raw);
         const data = parsed.data as Record<string, unknown>;
 
-        // Coerce dates before validation
-        for (const key of ['created', 'decay_after', 'last_verified']) {
+        // Coerce dates before validation (both legacy decay_after and v0.3 check_by)
+        for (const key of ['created', 'decay_after', 'check_by', 'last_verified', 'expires']) {
           if (data[key] instanceof Date) {
             data[key] = (data[key] as Date).toISOString();
           }
@@ -156,14 +184,16 @@ export class MemspecStore {
   }
 
   loadActive(): MemoryItem[] {
-    return this.loadAll().filter((item) => item.state === 'active');
+    return this.loadAll()
+      .filter((item) => item.state === 'active')
+      .map((item) => withLazyStale(item));
   }
 
   findById(id: string): MemoryItem | null {
     return this.loadAll().find((item) => item.id === id) ?? null;
   }
 
-  moveToArchive(item: MemoryItem, state: MemoryItem['state'] = 'archived'): void {
+  moveToArchive(item: MemoryItem, state: MemoryItem['state'] = 'retired'): void {
     const archivePath = join(this.root, 'archive', `${item.id}.md`);
     writeFileSync(
       archivePath,
@@ -195,28 +225,33 @@ export class MemspecStore {
 
     const activeItems = this.loadActive();
 
-    // Build FTS5 index and search
-    const fts = new FtsIndex();
+    // mtime-cached on-disk FTS index. Rebuild only when a source file's mtime
+    // is newer than the cache — at 200 items the win is invisible, at 5k it's
+    // 250ms → 5ms. Canonical truth still lives in markdown files.
+    const cachePath = join(this.root, '.fts.db');
+    const fts = FtsIndex.openOrBuild(cachePath, this.activeSourceFiles(), activeItems);
     try {
-      fts.populate(activeItems);
       const matches = fts.search(query, { limit: limit * 2, types, minConfidence });
 
       if (matches.length === 0) return [];
 
       const itemMap = new Map(activeItems.map((item) => [item.id, item]));
       const relevanceWeight = ranking?.relevance ?? 1;
-      const confidenceWeight = ranking?.confidence ?? 0;
+      // confidence weight is retained for config compatibility but ignored — the field is gone in v0.3
       const recencyWeight = ranking?.recency ?? 0;
       const now = Date.now();
       const phrase = terms.join(' ');
 
-      const scored = matches.map(({ id, bm25Score }) => {
+      // Pre-pass: collect raw FTS + phrase scores so we can normalize per-set
+      // before the weighted combination. Raw BM25 sits in the 3–15 range
+      // unbounded; without normalization the relevance weight is the only
+      // dial that ever moves the ranking. Per-set normalization makes the
+      // profile ranking ratios (relevance vs recency) actually apply.
+      const rawScored = matches.map(({ id, bm25Score }) => {
         const item = itemMap.get(id);
         if (!item) return null;
 
-        // FTS5 rank: bm25() returns negative values, so invert it.
         const ftsScore = -bm25Score;
-
         const titleLower = item.title.toLowerCase();
         const tagsLower = item.tags.join(' ').toLowerCase();
         const bodyLower = item.body.toLowerCase();
@@ -226,21 +261,26 @@ export class MemspecStore {
           else if (tagsLower.includes(phrase)) phraseBonus = 4;
           else if (bodyLower.includes(phrase)) phraseBonus = 3;
         }
+        const rawRelevance = ftsScore + phraseBonus;
 
         const ageMs = Math.max(0, now - Date.parse(item.created));
         const ageDays = ageMs / (24 * 60 * 60 * 1000);
         const recency = 1 / (1 + ageDays);
 
-        const score =
-          ((ftsScore + phraseBonus) * relevanceWeight) +
-          (item.confidence * confidenceWeight) +
-          (recency * recencyWeight);
+        return { item, rawRelevance, recency };
+      }).filter((entry): entry is { item: MemoryItem; rawRelevance: number; recency: number } => entry !== null);
 
-        return { item, score };
-      }).filter((entry): entry is { item: MemoryItem; score: number } => entry !== null);
+      // Per-set relevance normalization → [0, 1]. recency is already in [0, 1].
+      const maxRelevance = rawScored.reduce((m, r) => Math.max(m, r.rawRelevance), 0);
+      const denom = maxRelevance > 0 ? maxRelevance : 1;
+
+      const scored = rawScored.map(({ item, rawRelevance, recency }) => ({
+        item,
+        score: (rawRelevance / denom) * relevanceWeight + recency * recencyWeight,
+      }));
 
       return scored
-        .sort((a, b) => b.score - a.score || b.item.confidence - a.item.confidence)
+        .sort((a, b) => b.score - a.score)
         .slice(0, limit)
         .map(({ item }) => item);
     } finally {

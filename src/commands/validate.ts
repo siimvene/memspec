@@ -1,82 +1,29 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import matter from 'gray-matter';
-import { validateFrontmatter } from '../lib/schema.js';
-import { MemspecStore } from '../lib/store.js';
-
-function coerceDates(data: Record<string, unknown>): Record<string, unknown> {
-  const result = { ...data };
-  for (const key of ['created', 'decay_after', 'last_verified']) {
-    if (result[key] instanceof Date) {
-      result[key] = (result[key] as Date).toISOString();
-    }
-  }
-  return result;
-}
-
-function walk(dir: string): string[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-      const entryPath = join(dir, entry.name);
-      if (entry.isDirectory()) return walk(entryPath);
-      return entry.isFile() && entry.name.endsWith('.md') ? [entryPath] : [];
-    });
-  } catch {
-    return [];
-  }
-}
+import { buildStatusReport } from './status.js';
 
 export interface ValidateOptions {
   cwd?: string;
 }
 
+/**
+ * Deprecated in v0.3. Schema validation is part of `memspec status` now;
+ * this command runs the same check and reports the result, but the standalone
+ * surface (and the MCP tool) will be removed in v0.4.
+ */
 export function runValidate(options: ValidateOptions): string {
-  const store = new MemspecStore(options.cwd);
-  const files = [
-    ...walk(join(store.root, 'memory')),
-    ...walk(join(store.root, 'observations')),
-    ...walk(join(store.root, 'archive')),
-  ];
+  const { report } = buildStatusReport(options);
 
-  const errors: string[] = [];
-  const skipped: string[] = [];
-  let validCount = 0;
+  const header = 'memspec validate is deprecated in v0.3 — schema checks now live in `memspec status`.';
 
-  for (const file of files) {
-    const parsed = matter(readFileSync(file, 'utf8'));
-    const data = coerceDates(parsed.data as Record<string, unknown>);
-
-    // If file has no memspec-shaped frontmatter at all (no id field), skip gracefully
-    if (!data.id && !data.type && !data.state) {
-      skipped.push(file);
-      continue;
-    }
-
-    const result = validateFrontmatter(data);
-    if (!result.success) {
-      errors.push(`${file}: ${result.errors.join('; ')}`);
-    } else {
-      validCount++;
-    }
+  if (report.schemaViolations.length === 0) {
+    const summary = report.total > 0
+      ? `${report.total} memspec file(s) valid.`
+      : 'No memspec files found.';
+    return [header, '', summary].join('\n');
   }
 
-  const lines: string[] = [];
-
-  if (errors.length > 0) {
-    lines.push(`Validation failed (${errors.length} error(s)):`);
-    lines.push(...errors);
+  const lines = [header, '', `Validation failed (${report.schemaViolations.length} error(s)):`];
+  for (const v of report.schemaViolations) {
+    lines.push(`${v.file}: ${v.errors.join('; ')}`);
   }
-
-  if (skipped.length > 0) {
-    if (lines.length > 0) lines.push('');
-    lines.push(`Skipped ${skipped.length} non-memspec file(s)`);
-  }
-
-  if (errors.length > 0) {
-    throw new Error(lines.join('\n'));
-  }
-
-  const parts = [`${validCount} memspec file(s) valid`];
-  if (skipped.length > 0) parts.push(`${skipped.length} non-memspec file(s) skipped`);
-  return parts.join(', ');
+  throw new Error(lines.join('\n'));
 }

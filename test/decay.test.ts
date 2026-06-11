@@ -5,69 +5,56 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import { makeTempProject, readText, runCli } from './helpers.js';
 
-test('decay flags expired items stale instead of archiving', async () => {
+// v0.3 retires the `memspec decay` write-side. Stale flagging is automatic at
+// read time (`store.loadActive()` adds the flag lazily for items past
+// `check_by`), and the CLI command is a read-only deprecation shim until the
+// next release. Physical retirement is `memspec sweep`. These tests cover the
+// new contract: lazy flagging, deprecation messaging, and `verify` clearing a
+// persisted stale flag.
+
+test('items past check_by surface as stale in search without an explicit decay run', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
-    'add',
-    'procedure',
-    'Restart gateway',
-    '--cwd',
-    target,
-    '--body',
-    'Run systemctl restart openclaw-gateway',
-    '--source',
-    'test',
-    '--decay-after',
-    '2000-01-01T00:00:00.000Z',
+    'add', 'procedure', 'Restart gateway', '--cwd', target,
+    '--body', 'Run systemctl restart openclaw-gateway', '--source', 'test',
+    '--decay-after', '2000-01-01T00:00:00.000Z',
   ]);
 
-  const result = await runCli(['decay', '--cwd', target]);
-  assert.match(result.stdout, /Flagged 1 item\(s\) stale/);
-  assert.match(result.stdout, /memspec sweep/);
-
-  // Flag, not delete: the item stays active in place, nothing is archived.
-  const proceduresDir = join(target, '.memspec', 'memory', 'procedures');
-  const entries = await readdir(proceduresDir);
-  assert.equal(entries.length, 1);
-
-  const flagged = matter(await readText(join(proceduresDir, entries[0])));
-  assert.equal(flagged.data.state, 'active');
-  assert.equal(flagged.data.stale, true);
-
-  assert.equal((await readdir(join(target, '.memspec', 'archive'))).length, 0);
-
-  // Search still returns it, carrying the stale flag.
+  // Search returns the item with stale=true because loadActive flags lazily.
   const search = await runCli(['search', 'gateway', '--cwd', target, '--json']);
   const results = JSON.parse(search.stdout);
   assert.equal(results.length, 1);
   assert.equal(results[0].stale, true);
+
+  // The on-disk file is not mutated — flagging is a read-time concern.
+  const proceduresDir = join(target, '.memspec', 'memory', 'procedures');
+  const [entry] = await readdir(proceduresDir);
+  const onDisk = matter(await readText(join(proceduresDir, entry)));
+  assert.equal(onDisk.data.stale, undefined, 'lazy flag must not mutate the file');
 });
 
-test('decay is idempotent on already-flagged items', async () => {
+test('decay CLI is deprecated in v0.3 and reports without mutating', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
-    'add',
-    'fact',
-    'Old port',
-    '--cwd',
-    target,
-    '--body',
-    'Service listens on 7779',
-    '--source',
-    'test',
-    '--decay-after',
-    '2000-01-01T00:00:00.000Z',
+    'add', 'fact', 'Old port', '--cwd', target,
+    '--body', 'Service listens on 7779', '--source', 'test',
+    '--decay-after', '2000-01-01T00:00:00.000Z',
   ]);
 
-  await runCli(['decay', '--cwd', target]);
-  const second = await runCli(['decay', '--cwd', target]);
-  assert.match(second.stdout, /Flagged 0 item\(s\) stale/);
-  assert.match(second.stdout, /1 item\(s\) were already flagged/);
+  const result = await runCli(['decay', '--cwd', target]);
+  assert.match(result.stdout, /deprecated in v0\.3/);
+  assert.match(result.stdout, /1 item\(s\) past TTL/);
+
+  // No mutation on disk.
+  const factsDir = join(target, '.memspec', 'memory', 'facts');
+  const [entry] = await readdir(factsDir);
+  const onDisk = matter(await readText(join(factsDir, entry)));
+  assert.equal(onDisk.data.stale, undefined);
 });
 
-test('verify clears the stale flag', async () => {
+test('verify clears a persisted stale flag', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
@@ -75,19 +62,25 @@ test('verify clears the stale flag', async () => {
     '--body', 'Holds up', '--source', 'test',
     '--decay-after', '2000-01-01T00:00:00.000Z',
   ]);
-  await runCli(['decay', '--cwd', target]);
 
+  // Hand-persist `stale: true` to simulate a record carried over from a
+  // previous sweep cycle or a v0.2 decay run.
   const factsDir = join(target, '.memspec', 'memory', 'facts');
   const [entry] = await readdir(factsDir);
-  const id = entry.replace(/\.md$/, '');
-  assert.equal(matter(await readText(join(factsDir, entry))).data.stale, true);
+  const filePath = join(factsDir, entry);
+  const raw = await readText(filePath);
+  const parsed = matter(raw);
+  parsed.data.stale = true;
+  await writeFile(filePath, matter.stringify(parsed.content, parsed.data));
 
+  const id = parsed.data.id;
   await runCli(['verify', id, '--cwd', target, '--evidence', 're-checked, still true']);
-  const after = matter(await readText(join(factsDir, entry))).data;
+
+  const after = matter(await readText(filePath)).data;
   assert.equal(after.stale, undefined);
 });
 
-test('decay surfaces anchor drift but never archives drifted items', async () => {
+test('decay surfaces anchor drift in its deprecation report', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await writeFile(join(target, 'auth.py'), 'mockup\n');
@@ -101,28 +94,27 @@ test('decay surfaces anchor drift but never archives drifted items', async () =>
   const id = factEntry.replace(/\.md$/, '');
   await runCli(['anchor', id, 'auth.py', '--cwd', target]);
 
-  // No drift yet: clean store
+  // No drift yet.
   const clean = await runCli(['decay', '--cwd', target, '--dry-run']);
   assert.doesNotMatch(clean.stdout, /anchor drift/);
 
-  // Code ships, anchored file changes
+  // Code ships, anchored file changes.
   await writeFile(join(target, 'auth.py'), 'real argon2id implementation\n');
 
   const dryRun = await runCli(['decay', '--cwd', target, '--dry-run']);
   assert.match(dryRun.stdout, /1 item\(s\) with anchor drift/);
   assert.match(dryRun.stdout, /auth\.py \(changed\)/);
 
-  // A real decay run must NOT archive the drifted item
-  await runCli(['decay', '--cwd', target]);
+  // The drifted item stays in place — verify/supersede/anchor decide its fate.
   assert.equal((await readdir(factsDir)).length, 1);
   assert.equal((await readdir(join(target, '.memspec', 'archive'))).length, 0);
 
-  // status surfaces the drift too
+  // `memspec status` surfaces drift too.
   const status = await runCli(['status', '--cwd', target]);
-  assert.match(status.stdout, /1 item\(s\) with anchor drift/);
+  assert.match(status.stdout, /1 active item\(s\) with anchor drift/);
 });
 
-test('expired items are flagged even when also anchored', async () => {
+test('expired items remain in place even when also anchored', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await writeFile(join(target, 'lib.ts'), 'v1\n');
@@ -138,8 +130,8 @@ test('expired items are flagged even when also anchored', async () => {
   await runCli(['anchor', id, 'lib.ts', '--cwd', target]);
   await writeFile(join(target, 'lib.ts'), 'v2\n');
 
+  // Both expiry and drift surface; nothing gets archived.
   const result = await runCli(['decay', '--cwd', target]);
-  assert.match(result.stdout, /Flagged 1 item\(s\) stale/);
-  assert.doesNotMatch(result.stdout, /anchor drift/);
+  assert.match(result.stdout, /past TTL/);
   assert.equal((await readdir(factsDir)).length, 1);
 });

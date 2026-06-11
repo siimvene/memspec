@@ -1,34 +1,61 @@
+export const MEMORY_KINDS = ['claim', 'observation'] as const;
+export type MemoryKind = typeof MEMORY_KINDS[number];
+
 export const MEMORY_TYPES = ['fact', 'decision', 'procedure'] as const;
 export type MemoryType = typeof MEMORY_TYPES[number];
 
-export const LIFECYCLE_STATES = ['captured', 'active', 'corrected', 'decayed', 'archived'] as const;
+/**
+ * v0.3 lifecycle states. Earlier records used `captured | corrected | decayed | archived` —
+ * the reader collapses those into the new enum: captured → active, corrected → superseded,
+ * decayed → retired, archived → retired.
+ */
+export const LIFECYCLE_STATES = ['active', 'superseded', 'retired'] as const;
 export type LifecycleState = typeof LIFECYCLE_STATES[number];
+
+/** States produced by pre-0.3 writers, accepted on read and mapped to LIFECYCLE_STATES. */
+export const LEGACY_LIFECYCLE_STATES = ['captured', 'corrected', 'decayed', 'archived'] as const;
+export type LegacyLifecycleState = typeof LEGACY_LIFECYCLE_STATES[number];
 
 export const SOURCE_KINDS = ['operator', 'agent', 'import'] as const;
 export type SourceKind = typeof SOURCE_KINDS[number];
 
+/**
+ * How the claim was last witnessed. Replaces confidence in v0.3 — the reader infers
+ * the strongest available witness when the field is absent on legacy records.
+ *
+ * Strength order (descending): anchor > operator > evidence > assertion.
+ */
+export const VERIFIED_WITH = ['anchor', 'operator', 'evidence', 'assertion'] as const;
+export type VerifiedWith = typeof VERIFIED_WITH[number];
+
 export interface MemoryFrontmatter {
   id: string;
-  type: MemoryType;
+  kind: MemoryKind; // 'claim' for fact/decision/procedure; 'observation' for point-in-time notes
+  type?: MemoryType; // claims only — observations have no type
   state: LifecycleState;
-  confidence: number;
   created: string;
   source: string;
   source_kind?: SourceKind; // trust tier inferred from source at write time
   tags: string[];
-  decay_after: string; // ISO 8601 or "never"
-  stale?: boolean; // set by decay when TTL passes; cleared by verify; removal only via sweep
+  check_by: string; // ISO 8601 or "never" — renamed from decay_after; flag-only, never deletes
+  stale?: boolean; // set when check_by passes; cleared by verify; removal only via sweep
   last_verified?: string; // ISO 8601 — when this memory was last confirmed true (defaults to created)
-  corrects?: string;
-  corrected_by?: string;
-  correction_reason?: string; // why this record was corrected (on the archived original) or created (on the replacement)
+  verified_with?: VerifiedWith; // how it was last witnessed
+  pinned?: boolean; // operator-only; always surfaced in boot context
+  anchors?: CodeAnchor[]; // promoted from ext.code_anchors in v0.3 — schema spine
+  supersedes?: string[]; // ids this record replaces (renamed from corrects; now array)
+  superseded_by?: string; // id of the record that replaced this one (renamed from corrected_by)
+  supersede_reason?: string; // durable reason — renamed from correction_reason
+  conflicts_with?: string[]; // explicit conflict edges to other memory ids
+  expires?: string; // observations only — hard expiry (ISO 8601)
   /**
    * Recommended ext field conventions:
    * - ext.confirmations: number — times this memory has been independently confirmed
    * - ext.confirmed_by: string[] — sources that confirmed this memory
    * - ext.promoted_at: string — ISO 8601 timestamp of promotion to active
-   * - ext.code_anchors: CodeAnchor[] — files this memory depends on (see CodeAnchor)
+   * - ext.code_anchors: CodeAnchor[] — DEPRECATED in v0.3; reader migrates to top-level `anchors`
    * - ext.last_verification: { at: string, source?: string, evidence?: string } — most recent verify call
+   * - ext.legacy_confidence: number — pre-0.3 confidence float, kept for archaeology only
    */
   ext?: Record<string, unknown>;
 }
@@ -57,3 +84,5 @@ export const DEFAULT_DECAY_DAYS: Record<MemoryType, number> = {
   decision: 180,
   procedure: 90,
 };
+
+export const DEFAULT_OBSERVATION_TTL_DAYS = 7;

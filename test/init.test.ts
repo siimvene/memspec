@@ -35,11 +35,12 @@ test('init imports existing OpenClaw memory and patches AGENTS.md without duplic
   const facts = await readdir(join(target, '.memspec', 'memory', 'facts'));
   const decisions = await readdir(join(target, '.memspec', 'memory', 'decisions'));
   const procedures = await readdir(join(target, '.memspec', 'memory', 'procedures'));
-  const observations = await readdir(join(target, '.memspec', 'observations'));
-  assert.equal(facts.length, 4);
-  assert.equal(decisions.length, 2);
+  // v0.3 drops the captured state: legacy observations land as active claims
+  // of their classified type. The fixture has one decision-typed observation
+  // and one fact-typed observation.
+  assert.equal(facts.length, 5);
+  assert.equal(decisions.length, 3);
   assert.equal(procedures.length, 1);
-  assert.equal(observations.length, 2);
 
   const agentsOnce = await readText(join(target, 'AGENTS.md'));
   assert.match(agentsOnce, /## Memory \(Memspec\)/);
@@ -48,7 +49,7 @@ test('init imports existing OpenClaw memory and patches AGENTS.md without duplic
   assert.match(agentsOnce, /memspec reconcile/);
   assert.match(agentsOnce, /### Memory hygiene/);
   assert.match(agentsOnce, /Search before adding/);
-  assert.match(first.stdout, /Imported: 4 facts, 2 decisions, 1 procedures, 2 observations/);
+  assert.match(first.stdout, /Imported: 5 facts, 3 decisions, 1 procedures, 0 observations/);
   assert.match(first.stdout, /Patched .*AGENTS\.md with memspec instructions/);
 
   const second = await runCli(['init', '--cwd', target]);
@@ -56,11 +57,9 @@ test('init imports existing OpenClaw memory and patches AGENTS.md without duplic
   const factsAfterRerun = await readdir(join(target, '.memspec', 'memory', 'facts'));
   const decisionsAfterRerun = await readdir(join(target, '.memspec', 'memory', 'decisions'));
   const proceduresAfterRerun = await readdir(join(target, '.memspec', 'memory', 'procedures'));
-  const observationsAfterRerun = await readdir(join(target, '.memspec', 'observations'));
-  assert.equal(factsAfterRerun.length, 4);
-  assert.equal(decisionsAfterRerun.length, 2);
+  assert.equal(factsAfterRerun.length, 5);
+  assert.equal(decisionsAfterRerun.length, 3);
   assert.equal(proceduresAfterRerun.length, 1);
-  assert.equal(observationsAfterRerun.length, 2);
 
   const agentsTwice = await readText(join(target, 'AGENTS.md'));
   assert.equal((agentsTwice.match(/## Memory \(Memspec\)/g) ?? []).length, 1);

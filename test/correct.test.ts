@@ -28,7 +28,7 @@ test('correct invalidates a memory item without replacement', async () => {
 
   const content = await readText(join(target, '.memspec', 'archive', archiveEntries[0]));
   const parsed = matter(content);
-  assert.equal(parsed.data.state, 'corrected');
+  assert.equal(parsed.data.state, 'superseded');
 });
 
 test('correct with --replace creates a new active item and marks old as corrected', async () => {
@@ -51,15 +51,15 @@ test('correct with --replace creates a new active item and marks old as correcte
   const replacementContent = await readText(join(target, '.memspec', 'memory', 'facts', factEntries[0]));
   const replacement = matter(replacementContent);
   assert.equal(replacement.data.state, 'active');
-  assert.equal(replacement.data.corrects, id);
+  assert.deepEqual(replacement.data.supersedes, [id]);
 
   const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
   assert.equal(archiveEntries.length, 1);
 
   const archivedContent = await readText(join(target, '.memspec', 'archive', archiveEntries[0]));
   const archived = matter(archivedContent);
-  assert.equal(archived.data.state, 'corrected');
-  assert.ok(archived.data.corrected_by);
+  assert.equal(archived.data.state, 'superseded');
+  assert.ok(archived.data.superseded_by);
 });
 
 test('correct persists the reason to both records', async () => {
@@ -77,11 +77,11 @@ test('correct persists the reason to both records', async () => {
 
   const factEntries = await readdir(join(target, '.memspec', 'memory', 'facts'));
   const replacement = matter(await readText(join(target, '.memspec', 'memory', 'facts', factEntries[0])));
-  assert.equal(replacement.data.correction_reason, 'Migrated to OAuth');
+  assert.equal(replacement.data.supersede_reason, 'Migrated to OAuth');
 
   const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
   const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
-  assert.equal(archived.data.correction_reason, 'Migrated to OAuth');
+  assert.equal(archived.data.supersede_reason, 'Migrated to OAuth');
 });
 
 test('correct without replacement persists the reason on the archived record', async () => {
@@ -93,7 +93,7 @@ test('correct without replacement persists the reason on the archived record', a
 
   const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
   const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
-  assert.equal(archived.data.correction_reason, 'No longer true');
+  assert.equal(archived.data.supersede_reason, 'No longer true');
 });
 
 test('correct resets the replacement decay clock to the type default', async () => {
@@ -117,10 +117,10 @@ test('correct resets the replacement decay clock to the type default', async () 
   const replacement = matter(await readText(join(target, '.memspec', 'memory', 'facts', factEntries[0])));
 
   // Default fact TTL is 90d from now — nowhere near the inherited 2030 date.
-  const decayAfter = Date.parse(String(replacement.data.decay_after));
+  const checkBy = Date.parse(String(replacement.data.check_by));
   const expected = Date.now() + 90 * 24 * 60 * 60 * 1000;
   const dayMs = 24 * 60 * 60 * 1000;
-  assert.ok(Math.abs(decayAfter - expected) < 2 * dayMs, 'decay clock should reset to the 90d fact default');
+  assert.ok(Math.abs(checkBy - expected) < 2 * dayMs, 'check_by should reset to the 90d fact default');
 });
 
 test('correct --title gives the replacement a fresh title', async () => {
@@ -176,9 +176,9 @@ test('correct --supersede-by merges into an existing memory instead of minting',
   const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
   assert.equal(archiveEntries.length, 1);
   const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
-  assert.equal(archived.data.state, 'corrected');
-  assert.equal(archived.data.corrected_by, survivorId);
-  assert.equal(archived.data.correction_reason, 'Duplicate of survivor');
+  assert.equal(archived.data.state, 'superseded');
+  assert.equal(archived.data.superseded_by, survivorId);
+  assert.equal(archived.data.supersede_reason, 'Duplicate of survivor');
 });
 
 test('correct rejects --replace combined with --supersede-by', async () => {
@@ -224,9 +224,9 @@ test('correct refuses operator-sourced records without --override-operator', asy
   await runCli(['correct', id, '--reason', 'confirmed with operator', '--override-operator', '--cwd', target]);
   const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
   const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
-  assert.equal(archived.data.state, 'corrected');
-  assert.match(String(archived.data.correction_reason), /confirmed with operator/);
-  assert.match(String(archived.data.correction_reason), /--override-operator used/);
+  assert.equal(archived.data.state, 'superseded');
+  assert.match(String(archived.data.supersede_reason), /confirmed with operator/);
+  assert.match(String(archived.data.supersede_reason), /--override-operator used/);
 });
 
 test('correct fails on nonexistent ID', async () => {

@@ -8,12 +8,13 @@ import { makeTempProject, readText, REPO_ROOT, runCli } from './helpers.js';
 
 async function setupStaleFact(target: string): Promise<void> {
   await runCli(['init', '--cwd', target]);
+  // v0.3: lazy stale flagging means a past check_by is enough — no explicit
+  // decay step needed for sweep to see the item as a retirement candidate.
   await runCli([
     'add', 'fact', 'Old port', '--cwd', target,
     '--body', 'Service listens on 7779', '--source', 'test',
     '--decay-after', '2000-01-01T00:00:00.000Z',
   ]);
-  await runCli(['decay', '--cwd', target]);
 }
 
 function runSweepWithInput(target: string, input: string): Promise<string> {
@@ -60,7 +61,7 @@ test('sweep retires a stale item on confirmation', async () => {
   const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
   assert.equal(archiveEntries.length, 1);
   const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
-  assert.equal(archived.data.state, 'archived');
+  assert.equal(archived.data.state, 'retired');
 });
 
 test('sweep keeps items when declined', async () => {

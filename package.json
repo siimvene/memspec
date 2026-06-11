@@ -1,6 +1,6 @@
 {
   "name": "memspec",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Structured memory for AI agents - spec plus CLI",
   "type": "module",
   "bin": {
@@ -12,6 +12,8 @@
     "hooks",
     "AGENTS-ADDON.md",
     "SPEC.md",
+    "MIGRATION-v0.3.md",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],

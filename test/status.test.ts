@@ -29,7 +29,7 @@ test('status counts active items by type', async () => {
   assert.match(result.stdout, /total\s+3/);
 });
 
-test('status includes captured observations from observations directory', async () => {
+test('status includes legacy captured records from the observations directory as active', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
@@ -38,6 +38,8 @@ test('status includes captured observations from observations directory', async 
 
   const observationPath = join(obsDir, 'obs.md');
 
+  // v0.3 reader normalizes legacy frontmatter (captured → active, decay_after → check_by,
+  // top-level confidence → ext.legacy_confidence) so the record stays loadable.
   await writeFile(
     observationPath,
     `---
@@ -58,6 +60,6 @@ Observed before promotion into active memory.
   );
 
   const result = await runCli(['status', '--cwd', target]);
-  assert.match(result.stdout, /captured\s+1/);
+  assert.match(result.stdout, /active\s+1/);
   assert.match(result.stdout, /total\s+1/);
 });

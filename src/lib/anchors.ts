@@ -49,11 +49,17 @@ export function normalizeAnchorPath(projectRoot: string, file: string): string {
   return rel.split(sep).join('/');
 }
 
-/** Read ext.code_anchors leniently — malformed entries are ignored, not fatal. */
+/**
+ * Read code anchors leniently — malformed entries are ignored, not fatal.
+ * v0.3 stores anchors at the top level; older records used ext.code_anchors.
+ * The reader checks both.
+ */
 export function getCodeAnchors(item: MemoryItem): CodeAnchor[] {
+  const sources: unknown[] = [];
+  if (Array.isArray(item.anchors)) sources.push(...item.anchors);
   const raw = item.ext?.code_anchors;
-  if (!Array.isArray(raw)) return [];
-  return raw.filter((entry): entry is CodeAnchor =>
+  if (Array.isArray(raw)) sources.push(...raw);
+  return sources.filter((entry): entry is CodeAnchor =>
     typeof entry === 'object' && entry !== null &&
     typeof (entry as CodeAnchor).file === 'string' &&
     typeof (entry as CodeAnchor).sha === 'string',

@@ -26,8 +26,8 @@ test('verify without anchors refreshes last_verified and decay clock', async () 
 
   const after = matter(await readText(factPath)).data;
   assert.ok(Date.parse(String(after.last_verified)) >= Date.parse(String(before.last_verified)));
-  assert.ok(after.confidence > before.confidence);
-  assert.ok(Date.parse(String(after.decay_after)) >= Date.parse(String(before.decay_after)));
+  assert.ok(Date.parse(String(after.check_by)) >= Date.parse(String(before.check_by)));
+  assert.equal(after.verified_with, 'evidence');
   assert.equal(after.ext.last_verification.source, 'tester');
   assert.equal(after.ext.last_verification.evidence, 'checked manually');
 });
@@ -80,7 +80,7 @@ test('verify with changed anchor returns needs_review and leaves memory untouche
     (error: Error & { stdout?: string }) => {
       assert.match(error.stdout ?? '', /NEEDS REVIEW/);
       assert.match(error.stdout ?? '', /changed: auth\.py/);
-      assert.match(error.stdout ?? '', /memspec correct/);
+      assert.match(error.stdout ?? '', /memspec supersede/);
       return true;
     },
   );
@@ -115,7 +115,7 @@ test('verify flags repo-qualified anchor for review when the repo is not checked
   const factPath = join(target, '.memspec', 'memory', 'facts', `${id}.md`);
 
   const parsed = matter(await readText(factPath));
-  parsed.data.ext = { code_anchors: [{ file: 'src/auth.ts', sha: 'deadbeef', repo: 'other-service' }] };
+  parsed.data.anchors = [{ file: 'src/auth.ts', sha: 'deadbeef', repo: 'other-service' }];
   await writeFile(factPath, matter.stringify(parsed.content, parsed.data));
   const before = await readText(factPath);
 
@@ -148,7 +148,7 @@ test('verify resolves repo-qualified anchors against a sibling checkout', async 
   const { blobSha } = await import('../src/lib/anchors.js');
   const sha = blobSha(join(sibling, 'auth.ts'));
   const parsed = matter(await readText(factPath));
-  parsed.data.ext = { code_anchors: [{ file: 'auth.ts', sha, repo: 'other-service' }] };
+  parsed.data.anchors = [{ file: 'auth.ts', sha, repo: 'other-service' }];
   await writeFile(factPath, matter.stringify(parsed.content, parsed.data));
 
   const result = await runCli(['verify', id, '--cwd', project]);
@@ -171,7 +171,7 @@ test('verify rejects non-active memories', async () => {
   );
 });
 
-test('verify keeps decay_after never untouched', async () => {
+test('verify keeps check_by never untouched', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
@@ -185,5 +185,5 @@ test('verify keeps decay_after never untouched', async () => {
   await runCli(['verify', id, '--cwd', target, '--evidence', 'still locked in']);
 
   const after = matter(await readText(join(decisionsDir, entry))).data;
-  assert.equal(after.decay_after, 'never');
+  assert.equal(after.check_by, 'never');
 });

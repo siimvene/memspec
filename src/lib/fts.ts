@@ -1,12 +1,17 @@
 /**
  * FTS5-backed full-text search index for memspec.
  *
- * Builds an in-memory SQLite database with FTS5 virtual table from loaded items.
- * Provides BM25 ranking, stemming via porter tokenizer, and word-boundary tokenization.
- * The index is ephemeral — rebuilt from canonical markdown files on each search invocation.
+ * Builds an SQLite database with FTS5 virtual table from loaded items. The
+ * default is an in-memory database; passing `cachePath` persists the index
+ * on disk so subsequent searches reuse it (rebuilt only when any source
+ * file's mtime is newer than the cache).
+ *
+ * BM25 ranking, porter-stemmer tokenization. Canonical truth is still the
+ * markdown files — the cache is a derived artifact.
  */
 
 import Database from 'better-sqlite3';
+import { existsSync, statSync, unlinkSync } from 'node:fs';
 import type { MemoryItem } from './types.js';
 
 export interface FtsSearchOptions {
@@ -27,30 +32,60 @@ export interface FtsScoredResult {
 
 export class FtsIndex {
   private db: InstanceType<typeof Database>;
+  /** Whether the schema needs to be created (true for in-memory or rebuilt cache). */
+  readonly fresh: boolean;
 
-  constructor() {
-    this.db = new Database(':memory:');
+  constructor(cachePath?: string) {
+    if (cachePath) {
+      this.db = new Database(cachePath);
+      const hasSchema = this.db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='items'")
+        .get() !== undefined;
+      this.fresh = !hasSchema;
+    } else {
+      this.db = new Database(':memory:');
+      this.fresh = true;
+    }
 
-    // Item metadata table for confidence/recency filtering
-    this.db.exec(`
-      CREATE TABLE items (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        confidence REAL NOT NULL,
-        created TEXT NOT NULL
-      );
-    `);
+    if (this.fresh) {
+      // Item metadata table for type/recency filtering
+      this.db.exec(`
+        CREATE TABLE items (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          created TEXT NOT NULL
+        );
+      `);
 
-    // FTS5 virtual table with porter stemmer for stemming support
-    this.db.exec(`
-      CREATE VIRTUAL TABLE items_fts USING fts5(
-        id UNINDEXED,
-        title,
-        tags,
-        body,
-        tokenize = 'porter unicode61'
-      );
-    `);
+      // FTS5 virtual table with porter stemmer for stemming support
+      this.db.exec(`
+        CREATE VIRTUAL TABLE items_fts USING fts5(
+          id UNINDEXED,
+          title,
+          tags,
+          body,
+          tokenize = 'porter unicode61'
+        );
+      `);
+    }
+  }
+
+  /**
+   * Open an on-disk FTS cache if it's still valid (cache mtime newer than every
+   * source file mtime). Stale caches are unlinked and rebuilt. Returns a populated
+   * FtsIndex the caller can search against directly.
+   */
+  static openOrBuild(cachePath: string, sourceFiles: string[], items: MemoryItem[]): FtsIndex {
+    if (existsSync(cachePath) && isCacheFresh(cachePath, sourceFiles)) {
+      return new FtsIndex(cachePath);
+    }
+    // Stale or missing — drop the old file before constructing.
+    if (existsSync(cachePath)) {
+      try { unlinkSync(cachePath); } catch { /* ignore */ }
+    }
+    const fts = new FtsIndex(cachePath);
+    fts.populate(items);
+    return fts;
   }
 
   /**
@@ -58,7 +93,7 @@ export class FtsIndex {
    */
   populate(items: MemoryItem[]): void {
     const insertItem = this.db.prepare(
-      'INSERT OR REPLACE INTO items (id, type, confidence, created) VALUES (?, ?, ?, ?)',
+      'INSERT OR REPLACE INTO items (id, type, created) VALUES (?, ?, ?)',
     );
     const insertFts = this.db.prepare(
       'INSERT INTO items_fts (id, title, tags, body) VALUES (?, ?, ?, ?)',
@@ -66,7 +101,8 @@ export class FtsIndex {
 
     const batch = this.db.transaction((items: MemoryItem[]) => {
       for (const item of items) {
-        insertItem.run(item.id, item.type, item.confidence, item.created);
+        // observations have no type; bucket them as 'observation' so type filters work uniformly
+        insertItem.run(item.id, item.type ?? 'observation', item.created);
         insertFts.run(item.id, item.title, item.tags.join(' '), item.body);
       }
     });
@@ -86,20 +122,19 @@ export class FtsIndex {
     const {
       limit = 10,
       types,
-      minConfidence = 0,
     } = options;
 
     const terms = query.trim().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];
 
-    let results = this.runFtsQuery(terms, false, 'AND', types, minConfidence, limit);
+    let results = this.runFtsQuery(terms, false, 'AND', types, limit);
     if (results.length === 0) {
-      results = this.runFtsQuery(terms, true, 'AND', types, minConfidence, limit);
+      results = this.runFtsQuery(terms, true, 'AND', types, limit);
     }
     if (results.length === 0 && terms.length > 1) {
-      results = this.runFtsQuery(terms, false, 'OR', types, minConfidence, limit);
+      results = this.runFtsQuery(terms, false, 'OR', types, limit);
       if (results.length === 0) {
-        results = this.runFtsQuery(terms, true, 'OR', types, minConfidence, limit);
+        results = this.runFtsQuery(terms, true, 'OR', types, limit);
       }
     }
 
@@ -111,7 +146,6 @@ export class FtsIndex {
     prefix: boolean,
     operator: 'AND' | 'OR',
     types: string[] | undefined,
-    minConfidence: number,
     limit: number,
   ): FtsScoredResult[] {
     const ftsTerms = terms.map((t) => {
@@ -128,9 +162,8 @@ export class FtsIndex {
       FROM items_fts
       JOIN items ON items.id = items_fts.id
       WHERE items_fts MATCH ?
-        AND items.confidence >= ?
     `;
-    const params: unknown[] = [matchExpr, minConfidence];
+    const params: unknown[] = [matchExpr];
 
     if (types && types.length > 0) {
       sql += ` AND items.type IN (${types.map(() => '?').join(',')})`;
@@ -152,6 +185,21 @@ export class FtsIndex {
 
   close(): void {
     this.db.close();
+  }
+}
+
+/** Cache is fresh iff every source file mtime <= cache mtime. */
+function isCacheFresh(cachePath: string, sourceFiles: string[]): boolean {
+  try {
+    const cacheMtime = statSync(cachePath).mtimeMs;
+    for (const file of sourceFiles) {
+      if (!existsSync(file)) continue;
+      const mtime = statSync(file).mtimeMs;
+      if (mtime > cacheMtime) return false;
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
