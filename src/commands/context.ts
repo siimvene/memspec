@@ -3,6 +3,7 @@ import { loadConfig } from '../lib/config.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import { MemspecStore } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType } from '../lib/types.js';
+import { recentRetrievalCounts } from '../lib/usage.js';
 
 export interface ContextOptions {
   cwd?: string;
@@ -16,6 +17,61 @@ export interface ContextOptions {
 const DEFAULT_BUDGET_TOKENS = 2000;
 const HARD_LIMIT = 20;
 const BODY_PREVIEW_CHARS = 120;
+const USAGE_WINDOW_DAYS = 30;
+
+/**
+ * Ranking constants — the six hand-picked numbers from FABLE §7.
+ * Tuning candidates if the boot list ranking looks off in practice.
+ *
+ * type_weight: decisions are the most durable knowledge; procedures next;
+ * facts decay fastest because code changes outpace doc updates.
+ *
+ * halflife_days: aligned with the v0.3 check_by defaults so freshness halves
+ * at roughly the same time the stale flag would fire.
+ */
+const TYPE_WEIGHT: Record<MemoryType, number> = {
+  decision: 1.0,
+  procedure: 0.9,
+  fact: 0.8,
+};
+
+const HALFLIFE_DAYS: Record<MemoryType, number> = {
+  decision: 180,
+  procedure: 90,
+  fact: 45,
+};
+
+const USAGE_BOOST_COEFFICIENT = 0.25;
+
+/**
+ * Freshness clocks from last_verified, not created. Re-witnessed old claims
+ * are fresh — that's the whole point of the witness model.
+ */
+export function freshness(item: MemoryItem, now: number): number {
+  if (!item.type) return 0; // observations don't enter the boot list
+  const halflife = HALFLIFE_DAYS[item.type];
+  const witnessTs = Date.parse(item.last_verified ?? item.created);
+  const ageDays = Math.max(0, (now - witnessTs) / (24 * 60 * 60 * 1000));
+  return Math.exp(-Math.LN2 * ageDays / halflife);
+}
+
+/**
+ * usage_boost = log2(count + 1) * 0.25 + 1. Empty usage → 1.0 (no penalty).
+ * Five hits in a 30d window roughly doubles the boost; one hit nudges by
+ * ~0.25.
+ */
+export function usageBoost(count: number): number {
+  return Math.log2(count + 1) * USAGE_BOOST_COEFFICIENT + 1;
+}
+
+export function rankScore(
+  item: MemoryItem,
+  now: number,
+  retrievalCounts: Map<string, number>,
+): number {
+  if (!item.type) return 0;
+  return TYPE_WEIGHT[item.type] * freshness(item, now) * usageBoost(retrievalCounts.get(item.id) ?? 0);
+}
 
 function assertMemoryType(input: string): MemoryType {
   if ((MEMORY_TYPES as readonly string[]).includes(input)) {
@@ -36,21 +92,11 @@ function truncateBody(body: string, max: number = BODY_PREVIEW_CHARS): string {
   return collapsed.slice(0, max - 1).trimEnd() + '…';
 }
 
-function rankActive(items: MemoryItem[]): MemoryItem[] {
-  // Recency-by-last-witness as the spec calls for. Phase 5 brings the full
-  // freshness/half-life formula; for now we lean on hyperbolic recency from
-  // last_verified (falling back to created) so re-witnessed items rise.
-  const now = Date.now();
-  return [...items]
-    .map((item) => {
-      const witnessTs = Date.parse(item.last_verified ?? item.created);
-      const ageMs = Math.max(0, now - witnessTs);
-      const ageDays = ageMs / (24 * 60 * 60 * 1000);
-      const recency = 1 / (1 + ageDays);
-      return { item, score: recency };
-    })
-    .sort((a, b) => b.score - a.score)
-    .map(({ item }) => item);
+function rankActive(items: MemoryItem[], now: number, retrievalCounts: Map<string, number>): MemoryItem[] {
+  // Full freshness × type_weight × usage_boost formula. Replaces the simpler
+  // hyperbolic recency placeholder so the boot list reflects what the
+  // codebase is actually working on, not just what was touched last.
+  return [...items].sort((a, b) => rankScore(b, now, retrievalCounts) - rankScore(a, now, retrievalCounts));
 }
 
 /** Witness marker: anchored claims show the anchor; everything else shows verification age. */
@@ -138,6 +184,9 @@ export function runContext(options: ContextOptions): string {
   }
   const limit = Math.min(requestedLimit, HARD_LIMIT);
 
+  const now = Date.now();
+  const retrievalCounts = recentRetrievalCounts(store.root, USAGE_WINDOW_DAYS);
+
   let candidates: MemoryItem[];
   if (options.query) {
     const config = loadConfig(store.root);
@@ -151,7 +200,7 @@ export function runContext(options: ContextOptions): string {
   } else {
     const active = store.loadActive();
     const filtered = explicitType ? active.filter((item) => item.type === explicitType) : active;
-    candidates = rankActive(filtered).slice(0, limit);
+    candidates = rankActive(filtered, now, retrievalCounts).slice(0, limit);
   }
 
   const selected = selectWithinBudget(candidates, budget, limit);
