@@ -14,6 +14,7 @@ import { runInit } from './commands/init.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
+import { runSweep } from './commands/sweep.js';
 import { runValidate } from './commands/validate.js';
 import { runVerify } from './commands/verify.js';
 import { loadConfig } from './lib/config.js';
@@ -177,6 +178,15 @@ program
   .option('--dry-run', 'preview without changes')
   .action((options: { cwd?: string; dryRun?: boolean }) => {
     console.log(runDecay(options));
+  });
+
+program
+  .command('sweep')
+  .description('Interactively retire stale-flagged items (operator-run; the only path that removes memories)')
+  .option('--cwd <path>', 'project root')
+  .option('--dry-run', 'list candidates without prompting')
+  .action(async (options: { cwd?: string; dryRun?: boolean }) => {
+    console.log(await runSweep(options));
   });
 
 program
