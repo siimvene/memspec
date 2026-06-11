@@ -37,7 +37,12 @@ After these events, write or correct memories immediately — don't defer to ses
 - **Made a design choice** between alternatives → write a `decision` with rationale
 
 Use `memspec add <type> "<title>" --body "<content>" --source <agent> --tags <tags>`.
-Use `memspec correct <id> --reason "<why>" --replace "<new content>"` for stale memories.
+`--source` is required and may not be "unknown" — identify yourself.
+Use `memspec correct <id> --reason "<why>" --replace "<new content>" [--title "<new title>"]`
+for stale memories; the reason is persisted on both records, so make it one a future agent
+can act on. If the corrected content no longer fits the old title, pass `--title`.
+To merge a duplicate into an existing memory instead of minting a new one:
+`memspec correct <dup-id> --reason "duplicate of <id>" --supersede-by <id>`.
 
 ### Code-anchored verification
 Facts about code state ("auth is a mockup", "the app has 7 screens") go stale the moment
@@ -48,13 +53,27 @@ the code changes — calendar decay fires too late. Anchor them to the files the
   (now wrong), or `memspec anchor <id> <files...>` (still true against the new code; re-baseline).
 - When you re-confirm any memory is still accurate, record it with `memspec verify <id>` — this refreshes
   its freshness signal and resets the decay clock. Re-verification that isn't recorded is invisible.
+- Verifying a memory with no anchors requires `--evidence "what you checked"`. A bare self-verify
+  is rejected — state the evidence or anchor the memory.
+
+### Flags are work orders
+- A search result or status entry marked **stale**: the TTL passed without re-verification.
+  Re-check it against the world before relying on it, then `memspec verify` (with evidence)
+  or `memspec correct` it. Stale items are never auto-deleted; resolving the flag is your job.
+- A verify that returns **needs_review** (anchor drift, or "anchor in repo X, fetch to verify"):
+  read the changed files, then verify, correct, or re-anchor. The memory is left untouched
+  until you act.
+- A record with `source_kind: operator` is operator-stated knowledge. Correcting it requires
+  `--override-operator` — use it only with explicit cause, and say so in the reason.
+- Physical removal is `memspec sweep`, an operator-run CLI command. Don't try to delete
+  memories yourself; flag them via correction instead.
 
 ### Memory hygiene
 - **Search before adding.** Run `memspec search <topic>` first. If a similar memory exists and is wrong,
   `memspec correct` it; if it exists and is right, `memspec verify` it — don't add a duplicate.
 - **Don't ask permission** to write, correct, verify, or decay memories. Memory upkeep is the agent's job;
   asking is friction. The bar is: would a future agent starting cold benefit?
-- **Run `memspec status` periodically** and review expired and anchor-drifted items it reports.
+- **Run `memspec status` periodically** and review stale and anchor-drifted items it reports.
 
 ### Guidelines
 - Only write knowledge that helps a future agent starting cold. No session transcripts.

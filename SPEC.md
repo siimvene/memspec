@@ -1,10 +1,23 @@
-# Memspec Specification v0.1
+# Memspec Specification v0.2
 
 ## Abstract
 
 Memspec is a specification for managing living project knowledge in AI agent workflows. It defines a convention for capturing, classifying, correcting, and retrieving project knowledge so that any agent or human starting a fresh session can load the current state of a codebase's tribal memory.
 
 This document is the portable specification. It is implementation-agnostic — any system that conforms to this spec is Memspec-compatible, regardless of language, storage backend, or agent runtime.
+
+### Changes in v0.2 (Witnessed Claims, first slice)
+
+v0.2 starts moving memspec toward a witnessed-claims model: every memory is a claim paired with the evidence that last attested it. This release is schema-compatible — readers tolerate records written before it.
+
+- **`source` is required at write time.** `'unknown'` is rejected. MCP implementations default it to the connected client name.
+- **`source_kind`** (optional field): `operator | agent | import`, inferred from the source string at write time. Operator-sourced records are protected: correcting one requires an explicit override, and the override is logged into the correction reason.
+- **Correction reasons are durable.** `correction_reason` is written to both the replacement and the archived original. Corrections may carry a fresh title, and may supersede into an existing memory instead of minting a new one (duplicate merging).
+- **Anchorless verification requires evidence.** A bare self-verify is rejected; the caller must state what was checked.
+- **Anchors may be cross-repo** (`{file, sha, repo?}`). An anchor whose repo is not checked out flags the claim for review instead of failing.
+- **TTL expiry flags, never deletes.** Items past `decay_after` get `stale: true` and stay active and searchable; results carry the flag. Physical retirement is `memspec sweep`, an interactive operator-run CLI command.
+
+Planned for v0.3 (breaking): removal of the `confidence` float in favor of witness display, MCP tool surface reduction and renames (`remember`/`supersede`/`observe`), an `observation` record kind with hard expiry, and a boot-context ranking rewrite.
 
 ---
 
@@ -93,13 +106,13 @@ Some knowledge doesn't map obviously to one type. These guidelines resolve the m
 captured ──→ active       (classification)
 captured ──→ archived     (unclassifiable + TTL expired)
 active   ──→ corrected    (correction signal received)
-active   ──→ decayed      (TTL expired)
-active   ──→ archived     (manual or bulk cleanup)
+active   ──→ archived     (operator-approved sweep, or manual cleanup)
 corrected ──→ archived    (after retention period)
-decayed  ──→ archived     (after retention period)
 ```
 
-No transition requires human approval. All transitions are triggered by the system, by an agent, or by time.
+As of v0.2, TTL expiry does **not** transition state. An item past `decay_after` stays `active` and gets `stale: true` in frontmatter — it remains retrievable, with the flag carried in results so readers know to re-verify or correct before relying on it. A successful verification clears the flag. The `decayed` state remains defined for records written by earlier versions.
+
+State transitions out of `active` are explicit acts: a correction (with a durable reason) or an operator-approved sweep. Time alone never removes knowledge.
 
 ### 3.3 Decay Defaults
 
@@ -112,7 +125,11 @@ No transition requires human approval. All transitions are triggered by the syst
 
 Implementations MAY override these defaults via configuration. A TTL of `0` or `never` means the item does not decay automatically.
 
+Passing the TTL flags the item `stale: true` (see §3.2); it does not archive it. Physical retirement is `memspec sweep` — interactive, one prompt per candidate, CLI-only by design (removal is an operator act, not an agent surface).
+
 ### 3.4 Confidence Score
+
+> **Deprecated.** Scheduled for removal in v0.3 — trust will be expressed by provenance (`source_kind`) and verification method instead of a number. New tooling should not build on this field.
 
 Each active memory has a confidence score from 0.0 to 1.0. This affects retrieval ranking, not lifecycle.
 
@@ -134,16 +151,23 @@ Any agent or human can signal a correction. A correction signal contains:
 - **target**: ID of the memory being corrected
 - **reason**: Why it's wrong or stale (free text)
 - **replacement** (optional): New content that supersedes the target
+- **title** (optional): Fresh title for the replacement — corrected knowledge often no longer fits the old title
+- **supersede_by** (optional): ID of an existing active memory that supersedes the target, instead of minting a new one. Mutually exclusive with replacement. This is how duplicates merge.
 
 ### 4.2 Correction Processing
 
 When a correction signal is received:
 
 1. The target memory transitions to `corrected` state
-2. The target's `corrected_by` field is set to the new memory's ID
-3. If replacement content is provided, a new memory is created in `active` state with `corrects` pointing to the target
+2. The target's `corrected_by` field is set to the superseding memory's ID (the new replacement, or the existing memory named by `supersede_by`)
+3. If replacement content is provided, a new memory is created in `active` state with `corrects` pointing to the target, the provided title (or the old one), and a decay clock reset to the type default — fresh knowledge does not inherit the dying record's TTL
 4. If no replacement is provided, the target is corrected without replacement (the knowledge is simply invalidated)
 5. Both memories are retained — the correction and the original
+6. The **reason is persisted durably** as `correction_reason` frontmatter on every record involved: the archived original and (when minted) the replacement
+
+### 4.2.1 Operator Record Protection
+
+Records whose effective `source_kind` is `operator` (the stored field, or inferred from the source string for records that predate it) MUST NOT be corrected without an explicit override flag (`--override-operator` / `override_operator`). When the override is used, that fact is appended to the persisted correction reason — overriding operator knowledge leaves a trace.
 
 ### 4.3 Implicit Correction (optional, requires index)
 
@@ -224,14 +248,17 @@ Each memory item is a markdown file with YAML frontmatter:
 id: ms_{ulid}
 type: fact | decision | procedure
 state: captured | active | corrected | decayed | archived
-confidence: 0.0-1.0
+confidence: 0.0-1.0       # deprecated, removal planned for v0.3
 created: {ISO 8601}
-source: {agent or human identifier}
+source: {agent or human identifier}   # required; 'unknown' is rejected at write time
+source_kind: operator | agent | import   # optional — trust tier inferred from source at write time
 tags: [{tag}, ...]
 decay_after: {ISO 8601}
+stale: true               # optional — set when decay_after passes; cleared by verification
 last_verified: {ISO 8601}  # optional — when this memory was last confirmed true (defaults to created)
 corrects: {id}          # present if this corrects another memory
 corrected_by: {id}      # present if this was corrected
+correction_reason: {text}  # present on corrected records and their replacements
 ---
 
 # {Title}
@@ -251,6 +278,7 @@ corrected_by: {id}      # present if this was corrected
 - `type`: One of `fact`, `decision`, `procedure`.
 - `state`: One of the defined lifecycle states.
 - `created`: ISO 8601 timestamp.
+- `source`: Who wrote the record. Required at write time; `'unknown'` is rejected. MCP implementations SHOULD default it to the connected client name. `source_kind` is inferred at write time: source matching `siim|human:*|user` → `operator`; known import names → `import`; otherwise `agent`.
 
 ### 6.4 ID Format
 
@@ -521,7 +549,7 @@ The following `ext` keys have defined semantics across implementations:
 | `episode` | string | Episode identifier for grouping related memories |
 | `sequence` | number | Order within an episode |
 | `relates_to` | string[] | IDs of related memories |
-| `code_anchors` | array | Files this memory depends on: `[{file, sha}]` where `file` is project-root-relative (POSIX) and `sha` is the git blob SHA of the file content at anchor time (§13.3) |
+| `code_anchors` | array | Files this memory depends on: `[{file, sha, repo?}]` where `file` is project-root-relative (POSIX), `sha` is the git blob SHA of the file content at anchor time, and `repo` optionally names another repository the file lives in (§13.3) |
 | `last_verification` | object | Most recent verification: `{at: ISO 8601, source?, evidence?}` |
 
 Implementations MAY use additional `ext` keys. Unknown keys MUST be preserved on read/write.
@@ -533,6 +561,10 @@ A memory about code state ("auth uses argon2id", "the app has 7 screens") goes s
 `ext.code_anchors` is an array of `{file, sha}` pairs. `sha` is the git blob SHA of the file content (`git hash-object <file>`) at the time the anchor was set or last verified. Comparing the recorded SHA against the current file content answers "has this file changed since the memory was last known true?" — including uncommitted edits, and insensitive to history rewrites.
 
 Anchors are a convention, not a schema requirement. Tools that understand them (verify, reconcile, anchor-aware decay) use them; tools that don't ignore them. Memories without anchors keep calendar-only behavior.
+
+**Cross-repo anchors.** An anchor MAY carry a `repo` field naming another repository the anchored file lives in. Verification resolves the repo as a sibling directory of the project root first, then under directories listed in `anchors.repo_search_paths` in `config.yaml`. When the repo is not checked out, verification returns `needs_review` with "anchor in repo X, fetch to verify" — the claim is flagged, never failed hard, and never mutated. Anchors without `repo` behave exactly as before.
+
+**Anchorless verification.** As of v0.2, verifying a memory that has no anchors REQUIRES evidence text stating what was checked (recorded in `ext.last_verification.evidence`). A bare anchorless verify is the system trusting its own output and is rejected.
 
 ---
 
