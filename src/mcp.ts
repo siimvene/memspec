@@ -289,11 +289,12 @@ server.tool(
     reason: z.string().describe('Why this memory is wrong or stale'),
     replace: z.string().optional().describe('Replacement content (creates new memory)'),
     title: z.string().optional().describe('Fresh title for the replacement (defaults to the old title)'),
+    supersede_by: z.string().optional().describe('Mark this memory as corrected by an existing memory ID instead of minting a new one (merges duplicates)'),
     source: z.string().optional().describe('Who is making the correction'),
   },
-  async ({ id, reason, replace, title, source }) => {
+  async ({ id, reason, replace, title, supersede_by, source }) => {
     try {
-      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, title, source });
+      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, title, supersedeBy: supersede_by, source });
       return {
         content: [{ type: 'text' as const, text: result }],
         structuredContent: {
@@ -301,6 +302,7 @@ server.tool(
           reason,
           replace: replace ?? null,
           title: title ?? null,
+          supersede_by: supersede_by ?? null,
           source: source ?? null,
         },
       };

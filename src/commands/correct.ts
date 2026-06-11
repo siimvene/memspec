@@ -7,6 +7,7 @@ export interface CorrectOptions {
   reason: string;
   replace?: string;
   title?: string;
+  supersedeBy?: string;
   source?: string;
 }
 
@@ -22,7 +23,31 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
     throw new Error(`Item "${targetId}" is ${target.state}, not active`);
   }
 
+  if (options.replace && options.supersedeBy) {
+    throw new Error('--replace and --supersede-by are mutually exclusive');
+  }
+
   const source = options.source ?? 'unknown';
+
+  if (options.supersedeBy) {
+    const survivor = store.findById(options.supersedeBy);
+    if (!survivor) {
+      throw new Error(`Supersede target "${options.supersedeBy}" not found`);
+    }
+    if (survivor.id === target.id) {
+      throw new Error('A memory cannot supersede itself');
+    }
+    if (survivor.state !== 'active') {
+      throw new Error(`Supersede target "${options.supersedeBy}" is ${survivor.state}, not active`);
+    }
+
+    target.state = 'corrected';
+    target.corrected_by = survivor.id;
+    target.correction_reason = options.reason;
+    store.moveToArchive(target, 'corrected');
+
+    return `Superseded ${targetId} → ${survivor.id} (merged into existing memory)\nReason: ${options.reason}`;
+  }
 
   if (options.replace) {
     const newId = `ms_${ulid()}`;

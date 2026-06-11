@@ -143,6 +143,64 @@ test('correct --title gives the replacement a fresh title', async () => {
   assert.doesNotMatch(content, /# Old auth/);
 });
 
+test('correct --supersede-by merges into an existing memory instead of minting', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const loserId = await addAndGetId(target);
+  await runCli(['add', 'fact', 'Auth survivor', '--cwd', target, '--body', 'OAuth2 PKCE', '--source', 'test']);
+
+  const factsDir = join(target, '.memspec', 'memory', 'facts');
+  const entries = await readdir(factsDir);
+  let survivorId = '';
+  for (const entry of entries) {
+    const parsed = matter(await readText(join(factsDir, entry)));
+    if (parsed.data.id !== loserId) survivorId = parsed.data.id;
+  }
+
+  const result = await runCli([
+    'correct', loserId,
+    '--reason', 'Duplicate of survivor',
+    '--supersede-by', survivorId,
+    '--cwd', target,
+  ]);
+  assert.match(result.stdout, /Superseded/);
+  assert.match(result.stdout, /merged into existing memory/);
+
+  // No third record was minted: survivor stays, loser is archived.
+  const remaining = await readdir(factsDir);
+  assert.equal(remaining.length, 1);
+  const survivor = matter(await readText(join(factsDir, remaining[0])));
+  assert.equal(survivor.data.id, survivorId);
+  assert.equal(survivor.data.state, 'active');
+
+  const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
+  assert.equal(archiveEntries.length, 1);
+  const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
+  assert.equal(archived.data.state, 'corrected');
+  assert.equal(archived.data.corrected_by, survivorId);
+  assert.equal(archived.data.correction_reason, 'Duplicate of survivor');
+});
+
+test('correct rejects --replace combined with --supersede-by', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await addAndGetId(target);
+
+  await assert.rejects(
+    () => runCli([
+      'correct', id,
+      '--reason', 'test',
+      '--replace', 'new content',
+      '--supersede-by', 'ms_00000000000000000000000000',
+      '--cwd', target,
+    ]),
+    (error: Error & { stderr?: string }) => {
+      assert.match(`${error.message}\n${error.stderr ?? ''}`, /mutually exclusive/);
+      return true;
+    },
+  );
+});
+
 test('correct fails on nonexistent ID', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
