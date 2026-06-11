@@ -4,22 +4,18 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
-import { runAdd } from './commands/add.js';
 import { runAnchor } from './commands/anchor.js';
-import { runConsolidate } from './commands/consolidate.js';
-import { runCorrect } from './commands/correct.js';
-import { runPromote } from './commands/promote.js';
-import { runDecay } from './commands/decay.js';
+import { runObserve } from './commands/observe.js';
 import { runReconcile } from './commands/reconcile.js';
+import { runRemember } from './commands/remember.js';
 import { runSearch } from './commands/search.js';
-import { runStatus } from './commands/status.js';
-import { runValidate } from './commands/validate.js';
+import { buildStatusReport, runStatus } from './commands/status.js';
+import { runSupersede } from './commands/supersede.js';
 import { runVerify } from './commands/verify.js';
-import { runInit } from './commands/init.js';
 import { homedir } from 'node:os';
 import { loadConfig, getProfile } from './lib/config.js';
+import { buildLineage } from './lib/lineage.js';
 import { MemspecStore } from './lib/store.js';
-import { CompositeStore } from './lib/composite-store.js';
 import { MEMORY_TYPES, type MemoryType } from './lib/types.js';
 
 const { values } = parseArgs({
@@ -32,7 +28,7 @@ const defaultCwd = typeof values.cwd === 'string' ? values.cwd : process.env.MEM
 
 const server = new McpServer({
   name: 'memspec',
-  version: '0.2.0',
+  version: '0.3.0',
 });
 
 function previewFromBody(body: string): string {
@@ -48,7 +44,7 @@ function resolveSearchType(type?: string): MemoryType[] | undefined {
   return undefined;
 }
 
-// --- Tools ---
+// --- Tools (v0.3 surface — 9 tools) ---
 
 server.tool(
   'memspec_search',
@@ -111,53 +107,46 @@ server.tool(
 
 server.tool(
   'memspec_get',
-  'Retrieve the full content of a specific memory by ID. Use after memspec_search when you need the complete body of a result.',
+  'Retrieve the full content of a specific memory by ID, plus its lineage chain (what it supersedes, and what superseded it). Use after memspec_search when you need the complete body of a result or want to trace the history of a knowledge claim.',
   {
     id: z.string().describe('Memory item ID (e.g. ms_01JR...)'),
   },
   async ({ id }) => {
     try {
       const store = new MemspecStore(defaultCwd);
-      const item = store.findById(id);
+      const allItems = store.loadAll();
+      const item = allItems.find((i) => i.id === id) ?? null;
       if (!item) {
         return { content: [{ type: 'text' as const, text: `No memory found with id: ${id}` }], isError: true };
       }
+      const lineage = buildLineage(item, allItems);
+      const payload = {
+        id: item.id,
+        kind: item.kind,
+        type: item.type,
+        state: item.state,
+        title: item.title,
+        verified_with: item.verified_with ?? 'assertion',
+        created: item.created,
+        source: item.source,
+        source_kind: item.source_kind,
+        tags: item.tags,
+        check_by: item.check_by,
+        last_verified: item.last_verified ?? item.created,
+        anchors: item.anchors,
+        supersedes: item.supersedes,
+        superseded_by: item.superseded_by,
+        supersede_reason: item.supersede_reason,
+        lineage,
+        ext: item.ext,
+        body: item.body,
+      };
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({
-            id: item.id,
-            kind: item.kind,
-            type: item.type,
-            state: item.state,
-            title: item.title,
-            verified_with: item.verified_with ?? 'assertion',
-            created: item.created,
-            source: item.source,
-            tags: item.tags,
-            check_by: item.check_by,
-            last_verified: item.last_verified ?? item.created,
-            anchors: item.anchors,
-            ext: item.ext,
-            body: item.body,
-          }, null, 2),
+          text: JSON.stringify(payload, null, 2),
         }],
-        structuredContent: {
-          id: item.id,
-          kind: item.kind,
-          type: item.type,
-          state: item.state,
-          title: item.title,
-          verified_with: item.verified_with ?? 'assertion',
-          created: item.created,
-          source: item.source,
-          tags: item.tags,
-          check_by: item.check_by,
-          last_verified: item.last_verified ?? item.created,
-          anchors: item.anchors,
-          ext: item.ext,
-          body: item.body,
-        },
+        structuredContent: payload,
       };
     } catch (err) {
       return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
@@ -166,44 +155,50 @@ server.tool(
 );
 
 server.tool(
-  'memspec_add',
-  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. Search first to avoid duplicates.',
+  'memspec_remember',
+  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Search first to avoid duplicates.',
   {
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
     body: z.string().optional().describe('Full content/details'),
     source: z.string().optional().describe('Who/what created this memory (defaults to the connected client name; "unknown" is rejected)'),
-    tags: z.string().optional().describe('Comma-separated tags'),
-    decay_after: z.string().optional().describe('ISO timestamp or "never"'),
+    tags: z.array(z.string()).optional().describe('Tags'),
+    anchors: z.array(z.string()).optional().describe('Project-root-relative file paths to anchor the claim to. If the claim describes code, anchor it now.'),
+    check_by: z.string().optional().describe('ISO timestamp or "never" — overrides the type default TTL'),
     store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
   },
-  async ({ type, title, body, source, tags, decay_after, store: storeName }) => {
+  async ({ type, title, body, source, tags, anchors, check_by, store: storeName }) => {
     try {
       const cwd = storeName === 'global' ? homedir() : defaultCwd;
       const resolvedSource = source ?? server.server.getClientVersion()?.name;
-      const result = runAdd(type, title, {
+      const result = runRemember(type, title, {
         cwd,
         body,
         source: resolvedSource,
-        tags,
-        decayAfter: decay_after,
+        tags: tags?.join(','),
+        checkBy: check_by,
+        anchors,
         store: storeName,
       });
 
       let text = result.message;
       if (result.duplicates && result.duplicates.length > 0) {
         const titles = result.duplicates.map((d) => d.title).join(', ');
-        text += `\n\u26a0 Potential duplicates found: ${titles}. Consider using memspec_correct instead.`;
+        text += `\n⚠ Potential duplicates found: ${titles}. Consider memspec_supersede instead.`;
       }
 
       return {
         content: [{ type: 'text' as const, text }],
         structuredContent: {
+          id: result.id,
           type,
           title,
           source: resolvedSource ?? null,
-          tags: tags?.split(',').map((tag) => tag.trim()).filter(Boolean) ?? [],
-          decay_after: decay_after ?? null,
+          tags: tags ?? [],
+          check_by: check_by ?? null,
+          anchors: result.anchors,
+          verified_with: result.verified_with,
+          anchor_warnings: result.anchorWarnings,
           duplicates: result.duplicates ?? null,
         },
       };
@@ -214,18 +209,61 @@ server.tool(
 );
 
 server.tool(
-  'memspec_promote',
-  'Confirm or promote a captured memory. When stabilization is enabled, memories start as captured and need confirmations before becoming active. Call this when you re-encounter a previously captured observation to strengthen it.',
+  'memspec_supersede',
+  'Replace, retract, or merge memory. Body filled = replacement (new active record supersedes the old). Body empty = retraction. merge_from collapses N duplicates into one survivor atomically (use to consolidate near-duplicates surfaced by status). Reason is persisted durably on every record involved.',
   {
-    id: z.string().describe('Memory ID to confirm/promote'),
-    source: z.string().optional().describe('Who is confirming this memory'),
+    id: z.string().describe('Memory ID to supersede (or the survivor id when merging without a replacement body)'),
+    reason: z.string().describe('Why the target is wrong, stale, or being merged. Persisted on every record involved.'),
+    title: z.string().optional().describe('Fresh title for the replacement (only used when body is provided; defaults to the old title)'),
+    body: z.string().optional().describe('Replacement content. If omitted with no merge_from, the target is retracted.'),
+    merge_from: z.array(z.string()).optional().describe('Additional memory ids to collapse into the survivor in a single atomic operation.'),
+    override_operator: z.boolean().optional().describe('Required to supersede operator-sourced records; logged into the persisted reason.'),
+    source: z.string().optional().describe('Who is performing the supersede'),
   },
-  async ({ id, source }) => {
+  async ({ id, reason, title, body, merge_from, override_operator, source }) => {
     try {
-      const result = runPromote(id, { cwd: defaultCwd, source });
+      const result = runSupersede(id, {
+        cwd: defaultCwd,
+        reason,
+        title,
+        body,
+        mergeFrom: merge_from,
+        overrideOperator: override_operator,
+        source,
+      });
       return {
-        content: [{ type: 'text' as const, text: result }],
-        structuredContent: { id, source: source ?? null, result },
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          survivor_id: result.survivor_id,
+          superseded_ids: result.superseded_ids,
+          reason: result.reason,
+          source: source ?? null,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_observe',
+  'Capture a point-in-time observation with hard expiry. Observations index a moment — they do not go stale and do not claim to be current; they simply vanish on expiry. Use for ephemeral context (what a tool returned, what was visible on screen, what a user said in passing). For durable knowledge, use memspec_remember instead.',
+  {
+    text: z.string().describe('Observation text. First line becomes the title; the full text is the body.'),
+    ttl: z.string().optional().describe('Duration before the observation expires (e.g. "7d", "48h", "never"). Defaults to 7d.'),
+  },
+  async ({ text, ttl }) => {
+    try {
+      const resolvedSource = server.server.getClientVersion()?.name ?? 'agent';
+      const result = runObserve({ cwd: defaultCwd, text, ttl, source: resolvedSource });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          id: result.id,
+          expires: result.expires,
+          source: resolvedSource,
+        },
       };
     } catch (err) {
       return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
@@ -235,7 +273,7 @@ server.tool(
 
 server.tool(
   'memspec_verify',
-  'Record that a memory is still true as of now. If the memory has code anchors, checks each anchored file against its recorded blob SHA first — drifted anchors return needs_review without touching the memory. Anchorless memories require evidence text stating what you checked. Clean verification refreshes last_verified, bumps confidence, and resets the decay clock.',
+  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock.',
   {
     id: z.string().describe('Memory ID to verify'),
     evidence: z.string().optional().describe('What you checked to confirm this is still true — required when the memory has no code anchors'),
@@ -262,7 +300,7 @@ server.tool(
 
 server.tool(
   'memspec_anchor',
-  'Link a memory to the source files it depends on. Records the git blob SHA of each file so verify/reconcile/decay can detect when the code a memory describes has changed. Anchoring also asserts the memory is true against the current file state.',
+  'Link a memory to the source files it depends on. Records the git blob SHA of each file so verify/reconcile can detect when the code a memory describes has changed. Anchoring also asserts the memory is true against the current file state.',
   {
     id: z.string().describe('Memory ID to anchor'),
     files: z.array(z.string()).min(1).describe('File paths relative to the project root'),
@@ -287,117 +325,8 @@ server.tool(
 );
 
 server.tool(
-  'memspec_correct',
-  'Fix wrong or stale knowledge. When you discover an existing memory is outdated or incorrect, correct it rather than adding a conflicting duplicate. Optionally provide replacement content.',
-  {
-    id: z.string().describe('Memory ID to correct'),
-    reason: z.string().describe('Why this memory is wrong or stale'),
-    replace: z.string().optional().describe('Replacement content (creates new memory)'),
-    title: z.string().optional().describe('Fresh title for the replacement (defaults to the old title)'),
-    supersede_by: z.string().optional().describe('Mark this memory as corrected by an existing memory ID instead of minting a new one (merges duplicates)'),
-    override_operator: z.boolean().optional().describe('Required to correct operator-sourced records; use only with explicit cause — the override is logged into the correction reason'),
-    source: z.string().optional().describe('Who is making the correction'),
-  },
-  async ({ id, reason, replace, title, supersede_by, override_operator, source }) => {
-    try {
-      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, title, supersedeBy: supersede_by, overrideOperator: override_operator, source });
-      return {
-        content: [{ type: 'text' as const, text: result }],
-        structuredContent: {
-          id,
-          reason,
-          replace: replace ?? null,
-          title: title ?? null,
-          supersede_by: supersede_by ?? null,
-          source: source ?? null,
-        },
-      };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
-    }
-  },
-);
-
-server.tool(
-  'memspec_status',
-  'Check memory store health. Shows counts by type/state, decay candidates, and recent items. Use when unsure if the store is populated or healthy.',
-  {},
-  async () => {
-    try {
-      const store = new MemspecStore(defaultCwd);
-      const items = store.loadAll();
-      const byType: Record<string, number> = {};
-      const byState: Record<string, number> = {};
-
-      for (const item of items) {
-        byState[item.state] = (byState[item.state] ?? 0) + 1;
-        if (item.state === 'active' && item.type) {
-          byType[item.type] = (byType[item.type] ?? 0) + 1;
-        }
-      }
-
-      const result = runStatus({ cwd: defaultCwd });
-      return {
-        content: [{ type: 'text' as const, text: result }],
-        structuredContent: {
-          root: store.root,
-          byType,
-          byState,
-          total: items.length,
-          warnings: store.warnings.length,
-        },
-      };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
-    }
-  },
-);
-
-server.tool(
-  'memspec_validate',
-  'Validate all memory files against the memspec schema. Run before committing to catch broken frontmatter or malformed files.',
-  {},
-  async () => {
-    try {
-      const result = runValidate({ cwd: defaultCwd });
-      return {
-        content: [{ type: 'text' as const, text: result }],
-        structuredContent: {
-          valid: true,
-          summary: result,
-        },
-      };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
-    }
-  },
-);
-
-server.tool(
-  'memspec_decay',
-  'Flag expired memories as stale. Facts expire after 90 days, decisions after 180. Expiry flags — it never deletes: stale items stay searchable, marked for review (verify or correct them). Physical retirement happens via the CLI command memspec sweep, operator-run.',
-  {
-    dry_run: z.boolean().optional().describe('Preview without changes'),
-  },
-  async ({ dry_run }) => {
-    try {
-      const result = runDecay({ cwd: defaultCwd, dryRun: dry_run });
-      return {
-        content: [{ type: 'text' as const, text: result }],
-        structuredContent: {
-          dry_run: dry_run ?? false,
-          summary: result,
-        },
-      };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
-    }
-  },
-);
-
-server.tool(
   'memspec_reconcile',
-  'Find anchored memories whose code has drifted. Compares each active memory\'s code anchors against current file content and reports candidates for review (verify, correct, or re-anchor). Run after landing commits that change system behavior.',
+  'Find anchored memories whose code has drifted. Compares each active memory\'s code anchors against current file content and reports candidates for review (verify, supersede, or re-anchor). Run after landing commits that change system behavior.',
   {
     since_ref: z.string().optional().describe('Git ref to diff from (default: last reconcile checkpoint, fallback HEAD~10)'),
   },
@@ -422,78 +351,16 @@ server.tool(
 );
 
 server.tool(
-  'memspec_consolidate',
-  'Find duplicate or redundant memories that should be merged. Returns groups of similar items. Use memspec_correct to merge them.',
-  {
-    type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
-  },
-  async ({ type }) => {
-    try {
-      const result = runConsolidate({ cwd: defaultCwd, type, json: false });
-      return {
-        content: [{ type: 'text' as const, text: result.message }],
-        structuredContent: {
-          count: result.groups.length,
-          groups: result.groups,
-        },
-      };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
-    }
-  },
-);
-
-server.tool(
-  'memspec_init',
-  'Initialize a memspec store in a project. Creates .memspec/, detects and imports existing memory files (MEMORY.md, memory/, .claude/memory/), and patches AGENTS.md/CLAUDE.md with agent instructions.',
-  {
-    search_engine: z.enum(['fts5', 'hybrid']).optional().describe('Search engine (default fts5). hybrid is experimental/future and requires embeddings config'),
-    embeddings_provider: z.string().optional().describe('openai or ollama (only used with hybrid search -- future feature)'),
-    embeddings_endpoint: z.string().optional().describe('Embedding endpoint URL (future feature)'),
-    embeddings_model: z.string().optional().describe('Embedding model name (future feature)'),
-    embeddings_api_key: z.string().optional().describe('Embedding API key (future feature)'),
-  },
-  async ({ search_engine, embeddings_provider, embeddings_endpoint, embeddings_model, embeddings_api_key }) => {
-    try {
-      const result = await runInit({
-        cwd: defaultCwd,
-        interactive: false,
-        searchEngine: search_engine,
-        embeddingsProvider: embeddings_provider,
-        embeddingsEndpoint: embeddings_endpoint,
-        embeddingsModel: embeddings_model,
-        embeddingsApiKey: embeddings_api_key,
-      });
-      return {
-        content: [{ type: 'text' as const, text: result }],
-        structuredContent: {
-          cwd: defaultCwd ?? process.cwd(),
-          search_engine: search_engine ?? 'fts5',
-          embeddings_provider: embeddings_provider ?? null,
-          embeddings_endpoint: embeddings_endpoint ?? null,
-          embeddings_model: embeddings_model ?? null,
-        },
-      };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
-    }
-  },
-);
-
-server.tool(
-  'memspec_stores',
-  'List configured memory store layers. Shows global, project, and any custom stores with their priority, status, and item counts.',
+  'memspec_status',
+  'Check memory store health. Counts by type/state/witness, stale flags, drifted anchors, declared and inferred conflicts, schema violations, and sweep candidates. Use when unsure if the store is populated or healthy, or after running migrations.',
   {},
   async () => {
     try {
-      const store = new MemspecStore(defaultCwd);
-      const config = loadConfig(store.root);
-      const composite = CompositeStore.fromConfig(config.stores, defaultCwd);
-      const layers = composite.listLayers();
-
+      const { report } = buildStatusReport({ cwd: defaultCwd });
+      const text = runStatus({ cwd: defaultCwd });
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(layers, null, 2) }],
-        structuredContent: { layers },
+        content: [{ type: 'text' as const, text }],
+        structuredContent: report as unknown as Record<string, unknown>,
       };
     } catch (err) {
       return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
