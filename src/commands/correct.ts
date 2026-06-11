@@ -2,6 +2,7 @@ import { ulid } from 'ulid';
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import { MemspecStore } from '../lib/store.js';
+import { DEFAULT_DECAY_DAYS, type MemoryType } from '../lib/types.js';
 
 export interface CorrectOptions {
   cwd?: string;
@@ -11,6 +12,11 @@ export interface CorrectOptions {
   supersedeBy?: string;
   overrideOperator?: boolean;
   source?: string;
+}
+
+function decayDaysFor(type: MemoryType | undefined, root: string): number {
+  if (!type) return DEFAULT_DECAY_DAYS.fact;
+  return getDecayDays(loadConfig(root), type);
 }
 
 export function runCorrect(targetId: string, options: CorrectOptions): string {
@@ -56,10 +62,10 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
       throw new Error(`Supersede target "${options.supersedeBy}" is ${survivor.state}, not active`);
     }
 
-    target.state = 'corrected';
-    target.corrected_by = survivor.id;
-    target.correction_reason = reason;
-    store.moveToArchive(target, 'corrected');
+    target.state = 'superseded';
+    target.superseded_by = survivor.id;
+    target.supersede_reason = reason;
+    store.moveToArchive(target, 'superseded');
 
     return `Superseded ${targetId} → ${survivor.id} (merged into existing memory)\nReason: ${reason}`;
   }
@@ -68,39 +74,38 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
     const newId = `ms_${ulid()}`;
     const now = new Date().toISOString();
 
-    // The replacement is fresh knowledge: its decay clock starts now at the
+    // The replacement is fresh knowledge: its check_by starts now at the
     // type default rather than inheriting whatever was left on the dying record.
-    const config = loadConfig(store.root);
     const expires = new Date();
-    expires.setUTCDate(expires.getUTCDate() + getDecayDays(config, target.type));
+    expires.setUTCDate(expires.getUTCDate() + decayDaysFor(target.type, store.root));
 
     store.writeItem({
       id: newId,
+      kind: 'claim',
       type: target.type,
       state: 'active',
-      confidence: 0.8,
       created: now,
       source,
       tags: target.tags,
-      decay_after: expires.toISOString(),
+      check_by: expires.toISOString(),
       last_verified: now,
-      corrects: target.id,
-      correction_reason: reason,
+      supersedes: [target.id],
+      supersede_reason: reason,
       title: options.title ?? target.title,
       body: options.replace,
     });
 
-    target.state = 'corrected';
-    target.corrected_by = newId;
-    target.correction_reason = reason;
-    store.moveToArchive(target, 'corrected');
+    target.state = 'superseded';
+    target.superseded_by = newId;
+    target.supersede_reason = reason;
+    store.moveToArchive(target, 'superseded');
 
     return `Corrected ${targetId} → ${newId}\nReason: ${reason}`;
   }
 
-  target.state = 'corrected';
-  target.correction_reason = reason;
-  store.moveToArchive(target, 'corrected');
+  target.state = 'superseded';
+  target.supersede_reason = reason;
+  store.moveToArchive(target, 'superseded');
 
   return `Invalidated ${targetId}\nReason: ${reason}`;
 }

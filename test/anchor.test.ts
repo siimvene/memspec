@@ -25,7 +25,7 @@ test('anchor records blob SHAs for existing files', async () => {
 
   const content = await readText(join(target, '.memspec', 'memory', 'facts', `${id}.md`));
   const parsed = matter(content);
-  const anchors = parsed.data.ext.code_anchors as Array<{ file: string; sha: string }>;
+  const anchors = parsed.data.anchors as Array<{ file: string; sha: string }>;
   assert.equal(anchors.length, 1);
   assert.equal(anchors[0].file, 'auth.py');
   assert.match(anchors[0].sha, /^[0-9a-f]{40}$/);
@@ -68,11 +68,11 @@ test('anchor merges by default and replaces with --replace', async () => {
   await runCli(['anchor', id, 'a.ts', '--cwd', target]);
   await runCli(['anchor', id, 'b.ts', '--cwd', target]);
 
-  let anchors = matter(await readText(factPath)).data.ext.code_anchors as Array<{ file: string }>;
+  let anchors = matter(await readText(factPath)).data.anchors as Array<{ file: string }>;
   assert.deepEqual(anchors.map((a) => a.file).sort(), ['a.ts', 'b.ts']);
 
   await runCli(['anchor', id, 'a.ts', '--cwd', target, '--replace']);
-  anchors = matter(await readText(factPath)).data.ext.code_anchors as Array<{ file: string }>;
+  anchors = matter(await readText(factPath)).data.anchors as Array<{ file: string }>;
   assert.deepEqual(anchors.map((a) => a.file), ['a.ts']);
 });
 
@@ -84,11 +84,11 @@ test('re-anchoring the same file updates its SHA', async () => {
   const factPath = join(target, '.memspec', 'memory', 'facts', `${id}.md`);
 
   await runCli(['anchor', id, 'config.ts', '--cwd', target]);
-  const before = matter(await readText(factPath)).data.ext.code_anchors[0].sha;
+  const before = matter(await readText(factPath)).data.anchors[0].sha;
 
   await writeFile(join(target, 'config.ts'), 'v2\n');
   await runCli(['anchor', id, 'config.ts', '--cwd', target]);
-  const after = matter(await readText(factPath)).data.ext.code_anchors;
+  const after = matter(await readText(factPath)).data.anchors;
 
   assert.equal(after.length, 1);
   assert.notEqual(after[0].sha, before);

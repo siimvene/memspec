@@ -54,13 +54,17 @@ export function runAnchor(id: string, files: string[], options: AnchorOptions): 
   ];
 
   const now = new Date().toISOString();
+  // v0.3 stores anchors at the top level; ext.code_anchors is dropped on touch.
   const ext = { ...(item.ext ?? {}) } as Record<string, unknown>;
-  ext.code_anchors = anchors;
+  delete ext.code_anchors;
 
-  // Anchoring asserts the memory is true against current file state.
+  // Anchoring asserts the memory is true against current file state, and the
+  // anchor itself is the witness.
   store.updateItem({
     ...item,
+    anchors,
     last_verified: now,
+    verified_with: 'anchor',
     ext,
   });
 

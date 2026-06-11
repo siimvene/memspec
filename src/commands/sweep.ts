@@ -21,8 +21,8 @@ export async function runSweep(options: SweepOptions): Promise<string> {
   if (options.dryRun) {
     const lines = [`${candidates.length} stale item(s) eligible for retirement:`, ''];
     for (const item of candidates) {
-      lines.push(`[${item.type}] ${item.title}`);
-      lines.push(`  ${item.id} | source: ${item.source} | decay_after: ${item.decay_after}`);
+      lines.push(`[${item.type ?? 'observation'}] ${item.title}`);
+      lines.push(`  ${item.id} | source: ${item.source} | check_by: ${item.check_by}`);
     }
     lines.push('', 'Dry run - no changes made.');
     return lines.join('\n');
@@ -34,8 +34,8 @@ export async function runSweep(options: SweepOptions): Promise<string> {
   try {
     for (const item of candidates) {
       seen++;
-      console.log(`\n[${item.type}] ${item.title}`);
-      console.log(`  ${item.id} | source: ${item.source} | decay_after: ${item.decay_after}`);
+      console.log(`\n[${item.type ?? 'observation'}] ${item.title}`);
+      console.log(`  ${item.id} | source: ${item.source} | check_by: ${item.check_by}`);
       let answer: string;
       try {
         answer = (await rl.question('Retire this item? [y/N/q] ')).trim().toLowerCase();
@@ -44,7 +44,7 @@ export async function runSweep(options: SweepOptions): Promise<string> {
       }
       if (answer === 'q') break;
       if (answer === 'y' || answer === 'yes') {
-        store.moveToArchive(item, 'archived');
+        store.moveToArchive(item, 'retired');
         retired++;
       }
     }

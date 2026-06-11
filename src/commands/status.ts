@@ -15,7 +15,7 @@ export function runStatus(options: StatusOptions): string {
 
   for (const item of items) {
     byState[item.state] = (byState[item.state] ?? 0) + 1;
-    if (item.state === 'active') {
+    if (item.state === 'active' && item.type) {
       byType[item.type] = (byType[item.type] ?? 0) + 1;
     }
   }
@@ -30,7 +30,7 @@ export function runStatus(options: StatusOptions): string {
   lines.push('');
 
   lines.push('By state:');
-  for (const state of ['active', 'captured', 'corrected', 'decayed', 'archived']) {
+  for (const state of ['active', 'superseded', 'retired']) {
     const count = byState[state] ?? 0;
     if (count > 0) lines.push(`  ${state.padEnd(12)} ${String(count).padStart(4)}`);
   }

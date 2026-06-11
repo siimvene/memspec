@@ -11,7 +11,7 @@ export interface DuplicateGroupItem {
   id: string;
   title: string;
   created: string;
-  confidence: number;
+  verified_with: string;
 }
 
 export interface DuplicateGroup {
@@ -52,6 +52,7 @@ export function runConsolidate(options: ConsolidateOptions): ConsolidateResult {
     if (grouped.has(item.id)) continue;
 
     // Search for similar items using the item's title as query
+    if (!item.type) continue;
     const matches = store.search(item.title, {
       types: [item.type],
       limit: 6, // get extra to account for self-match
@@ -64,7 +65,7 @@ export function runConsolidate(options: ConsolidateOptions): ConsolidateResult {
 
     // Build a group: the current item + matching items
     const groupItems: DuplicateGroupItem[] = [
-      { id: item.id, title: item.title, created: item.created, confidence: item.confidence },
+      { id: item.id, title: item.title, created: item.created, verified_with: item.verified_with ?? 'assertion' },
     ];
 
     for (const other of others) {
@@ -72,7 +73,7 @@ export function runConsolidate(options: ConsolidateOptions): ConsolidateResult {
         id: other.id,
         title: other.title,
         created: other.created,
-        confidence: other.confidence,
+        verified_with: other.verified_with ?? 'assertion',
       });
     }
 
@@ -107,7 +108,7 @@ export function runConsolidate(options: ConsolidateOptions): ConsolidateResult {
     const group = groups[i];
     lines.push(`Group ${i + 1} (${group.similarity} similarity):`);
     for (const gi of group.items) {
-      lines.push(`  - [${gi.id}] ${gi.title} (confidence: ${gi.confidence.toFixed(2)}, created: ${gi.created.substring(0, 10)})`);
+      lines.push(`  - [${gi.id}] ${gi.title} (witness: ${gi.verified_with}, created: ${gi.created.substring(0, 10)})`);
     }
     lines.push('');
   }

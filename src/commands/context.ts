@@ -37,19 +37,19 @@ function truncateBody(body: string, max: number = BODY_PREVIEW_CHARS): string {
 }
 
 function rankActive(items: MemoryItem[]): MemoryItem[] {
-  // Recency × confidence as the spec calls for. Decreasing recency factor
-  // by item age, multiplied by confidence so a high-confidence older item
-  // can still beat a low-confidence very recent one.
+  // Recency-by-last-witness as the spec calls for. Phase 5 brings the full
+  // freshness/half-life formula; for now we lean on hyperbolic recency from
+  // last_verified (falling back to created) so re-witnessed items rise.
   const now = Date.now();
   return [...items]
     .map((item) => {
-      const ageMs = Math.max(0, now - Date.parse(item.created));
+      const witnessTs = Date.parse(item.last_verified ?? item.created);
+      const ageMs = Math.max(0, now - witnessTs);
       const ageDays = ageMs / (24 * 60 * 60 * 1000);
       const recency = 1 / (1 + ageDays);
-      const score = recency * Math.max(0.01, item.confidence);
-      return { item, score };
+      return { item, score: recency };
     })
-    .sort((a, b) => b.score - a.score || b.item.confidence - a.item.confidence)
+    .sort((a, b) => b.score - a.score)
     .map(({ item }) => item);
 }
 
@@ -67,7 +67,7 @@ function witnessMarker(item: MemoryItem, now: number): string {
  */
 function formatLine(item: MemoryItem, now: number): string {
   const preview = truncateBody(item.body);
-  const head = `- ${item.id} ${item.type} [${effectiveSourceKind(item)}] ${witnessMarker(item, now)}: ${item.title}`;
+  const head = `- ${item.id} ${item.type ?? 'observation'} [${effectiveSourceKind(item)}] ${witnessMarker(item, now)}: ${item.title}`;
   return preview ? `${head} — ${preview}` : head;
 }
 
@@ -91,7 +91,7 @@ function renderJson(items: MemoryItem[]): string {
       id: item.id,
       type: item.type,
       title: item.title,
-      confidence: item.confidence,
+      verified_with: item.verified_with ?? 'assertion',
       created: item.created,
       tags: item.tags,
       source: item.source,

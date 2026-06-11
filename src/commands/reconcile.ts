@@ -110,7 +110,7 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
 
     candidates.push({
       memory_id: item.id,
-      type: item.type,
+      type: item.type ?? 'observation',
       title: item.title,
       last_verified: item.last_verified ?? null,
       changed_files: drifted.map((a) => {

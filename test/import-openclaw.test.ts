@@ -22,17 +22,17 @@ test('import-openclaw converts an OpenClaw memory bank into memspec items', asyn
   const factsDir = join(target, '.memspec', 'memory', 'facts');
   const decisionsDir = join(target, '.memspec', 'memory', 'decisions');
   const proceduresDir = join(target, '.memspec', 'memory', 'procedures');
-  const observationsDir = join(target, '.memspec', 'observations');
 
   const facts = await readdir(factsDir);
   const decisions = await readdir(decisionsDir);
   const procedures = await readdir(proceduresDir);
-  const observations = await readdir(observationsDir);
 
-  assert.equal(facts.length, 4);
-  assert.equal(decisions.length, 2);
+  // v0.3 drops the captured state — old observations land as active claims of
+  // their classified type. The fixture has one decision-typed observation and
+  // one fact-typed observation, so each grows by one.
+  assert.equal(facts.length, 5);
+  assert.equal(decisions.length, 3);
   assert.equal(procedures.length, 1);
-  assert.equal(observations.length, 2);
 
   const importedDecision = matter(await readText(join(decisionsDir, decisions[0])));
   assert.equal(importedDecision.data.type, 'decision');
@@ -43,14 +43,10 @@ test('import-openclaw converts an OpenClaw memory bank into memspec items', asyn
   );
   assert.ok(importedFactBodies.some((item) => item.content.includes('LIVE on App Store')));
   assert.ok(importedFactBodies.some((item) => item.content.includes('[REDACTED]')));
-
-  const importedObservation = matter(await readText(join(observationsDir, observations[0])));
-  assert.equal(importedObservation.data.state, 'captured');
-  assert.match(importedObservation.content, /verification/i);
+  assert.ok(importedFactBodies.some((item) => /verification/i.test(item.content)));
 
   const status = await runCli(['status', '--cwd', target]);
-  assert.match(status.stdout, /active\s+7/);
-  assert.match(status.stdout, /captured\s+2/);
+  assert.match(status.stdout, /total\s+9/);
 
   const search = await runCli(['search', 'files over db', '--cwd', target, '--profile', 'default']);
   assert.match(search.stdout, /Memory files over DB/);

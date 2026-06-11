@@ -60,7 +60,7 @@ test('sweep retires a stale item on confirmation', async () => {
   const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
   assert.equal(archiveEntries.length, 1);
   const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
-  assert.equal(archived.data.state, 'archived');
+  assert.equal(archived.data.state, 'retired');
 });
 
 test('sweep keeps items when declined', async () => {

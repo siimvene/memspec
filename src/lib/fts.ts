@@ -31,12 +31,11 @@ export class FtsIndex {
   constructor() {
     this.db = new Database(':memory:');
 
-    // Item metadata table for confidence/recency filtering
+    // Item metadata table for type/recency filtering
     this.db.exec(`
       CREATE TABLE items (
         id TEXT PRIMARY KEY,
         type TEXT NOT NULL,
-        confidence REAL NOT NULL,
         created TEXT NOT NULL
       );
     `);
@@ -58,7 +57,7 @@ export class FtsIndex {
    */
   populate(items: MemoryItem[]): void {
     const insertItem = this.db.prepare(
-      'INSERT OR REPLACE INTO items (id, type, confidence, created) VALUES (?, ?, ?, ?)',
+      'INSERT OR REPLACE INTO items (id, type, created) VALUES (?, ?, ?)',
     );
     const insertFts = this.db.prepare(
       'INSERT INTO items_fts (id, title, tags, body) VALUES (?, ?, ?, ?)',
@@ -66,7 +65,8 @@ export class FtsIndex {
 
     const batch = this.db.transaction((items: MemoryItem[]) => {
       for (const item of items) {
-        insertItem.run(item.id, item.type, item.confidence, item.created);
+        // observations have no type; bucket them as 'observation' so type filters work uniformly
+        insertItem.run(item.id, item.type ?? 'observation', item.created);
         insertFts.run(item.id, item.title, item.tags.join(' '), item.body);
       }
     });
@@ -86,20 +86,19 @@ export class FtsIndex {
     const {
       limit = 10,
       types,
-      minConfidence = 0,
     } = options;
 
     const terms = query.trim().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];
 
-    let results = this.runFtsQuery(terms, false, 'AND', types, minConfidence, limit);
+    let results = this.runFtsQuery(terms, false, 'AND', types, limit);
     if (results.length === 0) {
-      results = this.runFtsQuery(terms, true, 'AND', types, minConfidence, limit);
+      results = this.runFtsQuery(terms, true, 'AND', types, limit);
     }
     if (results.length === 0 && terms.length > 1) {
-      results = this.runFtsQuery(terms, false, 'OR', types, minConfidence, limit);
+      results = this.runFtsQuery(terms, false, 'OR', types, limit);
       if (results.length === 0) {
-        results = this.runFtsQuery(terms, true, 'OR', types, minConfidence, limit);
+        results = this.runFtsQuery(terms, true, 'OR', types, limit);
       }
     }
 
@@ -111,7 +110,6 @@ export class FtsIndex {
     prefix: boolean,
     operator: 'AND' | 'OR',
     types: string[] | undefined,
-    minConfidence: number,
     limit: number,
   ): FtsScoredResult[] {
     const ftsTerms = terms.map((t) => {
@@ -128,9 +126,8 @@ export class FtsIndex {
       FROM items_fts
       JOIN items ON items.id = items_fts.id
       WHERE items_fts MATCH ?
-        AND items.confidence >= ?
     `;
-    const params: unknown[] = [matchExpr, minConfidence];
+    const params: unknown[] = [matchExpr];
 
     if (types && types.length > 0) {
       sql += ` AND items.type IN (${types.map(() => '?').join(',')})`;

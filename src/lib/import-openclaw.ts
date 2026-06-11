@@ -80,29 +80,27 @@ function makeItem(params: {
   title: string;
   body: string;
   created: string;
-  decay_after: string;
+  check_by: string;
   source: string;
   tags: string[];
-  confidence?: number;
   ext?: Record<string, unknown>;
 }): DraftMemoryItem {
   return {
     id: `ms_${ulid()}`,
+    kind: 'claim',
     type: params.type,
     state: params.state,
-    confidence: params.confidence ?? 0.85,
     created: params.created,
     source: params.source,
     tags: params.tags,
-    decay_after: params.decay_after,
+    check_by: params.check_by,
     ext: params.ext,
     title: params.title,
     body: params.body,
   };
 }
 
-function decayAfter(type: MemoryType, state: LifecycleState, sourceDate: string, storeRoot: string): string {
-  if (state === 'captured') return 'never';
+function checkByFor(type: MemoryType, sourceDate: string, storeRoot: string): string {
   const config = loadConfig(storeRoot);
   const expires = new Date(sourceDate);
   expires.setUTCDate(expires.getUTCDate() + getDecayDays(config, type));
@@ -129,7 +127,7 @@ function importMemoryMd(sourceRoot: string, store: MemspecStore): DraftMemoryIte
       title: [entity, key].filter(Boolean).join(' '),
       body: redactIfSensitive(key, value),
       created,
-      decay_after: decayAfter('fact', 'active', created, store.root),
+      check_by: checkByFor('fact', created, store.root),
       source: 'openclaw-import',
       tags: [sanitizeTag(entity), sanitizeTag(key || 'fact')].filter(Boolean),
     }));
@@ -143,7 +141,7 @@ function importMemoryMd(sourceRoot: string, store: MemspecStore): DraftMemoryIte
       title: decision,
       body: rationale,
       created,
-      decay_after: decayAfter('decision', 'active', created, store.root),
+      check_by: checkByFor('decision', created, store.root),
       source: 'openclaw-import',
       tags: ['decision'],
     }));
@@ -173,7 +171,7 @@ function importProcedures(sourceRoot: string, store: MemspecStore): DraftMemoryI
       title: extractTitle(content, entry.name.replace(/\.md$/, '')),
       body: content,
       created,
-      decay_after: decayAfter('procedure', 'active', created, store.root),
+      check_by: checkByFor('procedure', created, store.root),
       source: 'openclaw-import',
       tags: ['procedure', sanitizeTag(entry.name.replace(/\.md$/, ''))].filter(Boolean),
     }));
@@ -195,14 +193,13 @@ function importObservations(sourceRoot: string): DraftMemoryItem[] {
     const mappedType = OBSERVATION_TYPE_MAP[rawType] ?? 'fact';
     items.push(makeItem({
       type: mappedType,
-      state: 'captured',
+      state: 'active',
       title: text,
       body: text,
       created: new Date(`${date}T00:00:00Z`).toISOString(),
-      decay_after: 'never',
+      check_by: 'never',
       source: 'openclaw-import',
       tags: ['observation', rawType],
-      confidence: 0.75,
       ext: {
         importance: Number(importance),
         openclaw_type: rawType,
@@ -228,7 +225,7 @@ export function importOpenClawWorkspace(store: MemspecStore, sourceRoot: string)
     facts: imported.filter((item) => item.state === 'active' && item.type === 'fact').length,
     decisions: imported.filter((item) => item.state === 'active' && item.type === 'decision').length,
     procedures: imported.filter((item) => item.state === 'active' && item.type === 'procedure').length,
-    observations: imported.filter((item) => item.state === 'captured').length,
+    observations: 0,
   };
 }
 

@@ -39,13 +39,13 @@ export function findDecayCandidates(items: MemoryItem[], options: DecayScanOptio
   for (const item of items) {
     if (item.state !== 'active') continue;
 
-    if (item.decay_after !== 'never') {
+    if (item.check_by !== 'never') {
       let expiryTime: number;
 
-      if (item.decay_after) {
-        expiryTime = Date.parse(item.decay_after);
+      if (item.check_by) {
+        expiryTime = Date.parse(item.check_by);
       } else {
-        const ttlDays = DEFAULT_DECAY_DAYS[item.type] ?? 90;
+        const ttlDays = item.type ? (DEFAULT_DECAY_DAYS[item.type] ?? 90) : 90;
         expiryTime = Date.parse(item.last_verified ?? item.created) + ttlDays * 24 * 60 * 60 * 1000;
       }
 

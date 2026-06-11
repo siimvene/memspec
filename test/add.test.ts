@@ -31,12 +31,14 @@ test('add creates a fact file with required frontmatter fields', async () => {
   const parsed = matter(content);
 
   assert.match(parsed.data.id, /^ms_[0-9A-HJKMNP-TV-Z]{26}$/);
+  assert.equal(parsed.data.kind, 'claim');
   assert.equal(parsed.data.type, 'fact');
   assert.equal(parsed.data.state, 'active');
   assert.equal(parsed.data.source, 'test');
   assert.deepEqual(parsed.data.tags, ['auth', 'api']);
-  assert.match(parsed.data.decay_after, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(parsed.data.check_by, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(parsed.data.last_verified, parsed.data.created);
+  assert.equal(parsed.data.confidence, undefined, 'v0.3 writer must not emit confidence');
   assert.match(parsed.content, /JWT with refresh tokens/);
 });
 
@@ -64,7 +66,7 @@ test('add accepts never as an explicit decay override', async () => {
 
   const content = await readText(join(decisionsDir, entries[0]));
   const parsed = matter(content);
-  assert.equal(parsed.data.decay_after, 'never');
+  assert.equal(parsed.data.check_by, 'never');
 });
 
 test('add rejects unsupported memory type', async () => {
@@ -179,10 +181,10 @@ profiles:
   const parsed = matter(content);
 
   const created = Date.parse(String(parsed.data.created));
-  const decayAfter = Date.parse(String(parsed.data.decay_after));
+  const checkBy = Date.parse(String(parsed.data.check_by));
   const dayMs = 24 * 60 * 60 * 1000;
 
   assert.ok(Number.isFinite(created));
-  assert.ok(Number.isFinite(decayAfter));
-  assert.ok(decayAfter - created < 2 * dayMs, 'expected config TTL to be near 1 day');
+  assert.ok(Number.isFinite(checkBy));
+  assert.ok(checkBy - created < 2 * dayMs, 'expected config TTL to be near 1 day');
 });

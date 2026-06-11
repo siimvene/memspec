@@ -77,7 +77,7 @@ server.tool(
         id: item.id,
         type: item.type,
         title: item.title,
-        confidence: item.confidence,
+        verified_with: item.verified_with ?? 'assertion',
         created: item.created,
         last_verified: item.last_verified ?? item.created,
         source: item.source,
@@ -127,30 +127,34 @@ server.tool(
           type: 'text' as const,
           text: JSON.stringify({
             id: item.id,
+            kind: item.kind,
             type: item.type,
             state: item.state,
             title: item.title,
-            confidence: item.confidence,
+            verified_with: item.verified_with ?? 'assertion',
             created: item.created,
             source: item.source,
             tags: item.tags,
-            decay_after: item.decay_after,
+            check_by: item.check_by,
             last_verified: item.last_verified ?? item.created,
+            anchors: item.anchors,
             ext: item.ext,
             body: item.body,
           }, null, 2),
         }],
         structuredContent: {
           id: item.id,
+          kind: item.kind,
           type: item.type,
           state: item.state,
           title: item.title,
-          confidence: item.confidence,
+          verified_with: item.verified_with ?? 'assertion',
           created: item.created,
           source: item.source,
           tags: item.tags,
-          decay_after: item.decay_after,
+          check_by: item.check_by,
           last_verified: item.last_verified ?? item.created,
+          anchors: item.anchors,
           ext: item.ext,
           body: item.body,
         },
@@ -246,7 +250,7 @@ server.tool(
           id: result.id,
           status: result.status,
           last_verified: result.last_verified,
-          confidence: result.confidence,
+          verified_with: result.verified_with,
           anchors: result.anchors,
         },
       };
@@ -327,7 +331,7 @@ server.tool(
 
       for (const item of items) {
         byState[item.state] = (byState[item.state] ?? 0) + 1;
-        if (item.state === 'active') {
+        if (item.state === 'active' && item.type) {
           byType[item.type] = (byType[item.type] ?? 0) + 1;
         }
       }

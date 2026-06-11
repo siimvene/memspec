@@ -103,7 +103,7 @@ export class MemspecStore {
   }
 
   private pathForItem(item: MemoryFrontmatter): string {
-    if (item.state === 'captured') {
+    if (item.kind === 'observation' || !item.type) {
       return join(this.observationDir(), `${item.id}.md`);
     }
     return join(this.typeDir(item.type), `${item.id}.md`);
@@ -133,8 +133,8 @@ export class MemspecStore {
         const parsed = matter(raw);
         const data = parsed.data as Record<string, unknown>;
 
-        // Coerce dates before validation
-        for (const key of ['created', 'decay_after', 'last_verified']) {
+        // Coerce dates before validation (both legacy decay_after and v0.3 check_by)
+        for (const key of ['created', 'decay_after', 'check_by', 'last_verified', 'expires']) {
           if (data[key] instanceof Date) {
             data[key] = (data[key] as Date).toISOString();
           }
@@ -163,7 +163,7 @@ export class MemspecStore {
     return this.loadAll().find((item) => item.id === id) ?? null;
   }
 
-  moveToArchive(item: MemoryItem, state: MemoryItem['state'] = 'archived'): void {
+  moveToArchive(item: MemoryItem, state: MemoryItem['state'] = 'retired'): void {
     const archivePath = join(this.root, 'archive', `${item.id}.md`);
     writeFileSync(
       archivePath,
@@ -205,7 +205,7 @@ export class MemspecStore {
 
       const itemMap = new Map(activeItems.map((item) => [item.id, item]));
       const relevanceWeight = ranking?.relevance ?? 1;
-      const confidenceWeight = ranking?.confidence ?? 0;
+      // confidence weight is retained for config compatibility but ignored — the field is gone in v0.3
       const recencyWeight = ranking?.recency ?? 0;
       const now = Date.now();
       const phrase = terms.join(' ');
@@ -233,14 +233,13 @@ export class MemspecStore {
 
         const score =
           ((ftsScore + phraseBonus) * relevanceWeight) +
-          (item.confidence * confidenceWeight) +
           (recency * recencyWeight);
 
         return { item, score };
       }).filter((entry): entry is { item: MemoryItem; score: number } => entry !== null);
 
       return scored
-        .sort((a, b) => b.score - a.score || b.item.confidence - a.item.confidence)
+        .sort((a, b) => b.score - a.score)
         .slice(0, limit)
         .map(({ item }) => item);
     } finally {

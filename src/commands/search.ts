@@ -51,7 +51,7 @@ export function runSearch(query: string, options: SearchOptions): string {
       id: r.id,
       type: r.type,
       title: r.title,
-      confidence: r.confidence,
+      verified_with: r.verified_with ?? 'assertion',
       created: r.created,
       last_verified: r.last_verified ?? r.created,
       tags: r.tags,
@@ -63,7 +63,8 @@ export function runSearch(query: string, options: SearchOptions): string {
   const lines: string[] = [`${results.length} result(s) for "${query}"`, ''];
 
   for (const item of results) {
-    lines.push(`[${item.type}] ${item.title} (${item.confidence.toFixed(2)})${item.stale ? ' [STALE — verify or correct before relying on this]' : ''}`);
+    const witness = item.verified_with ?? (item.anchors && item.anchors.length > 0 ? 'anchor' : 'assertion');
+    lines.push(`[${item.type ?? 'observation'}] ${item.title} (${witness})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) {
       lines.push(`  tags: ${item.tags.join(', ')}`);

@@ -1,6 +1,8 @@
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import { checkAnchors, getCodeAnchors, projectRootForStore, type AnchorStatus } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
+import { effectiveSourceKind } from '../lib/source.js';
+import { DEFAULT_DECAY_DAYS, type VerifiedWith } from '../lib/types.js';
 
 export interface VerifyOptions {
   cwd?: string;
@@ -12,7 +14,7 @@ export interface VerifyResult {
   id: string;
   status: 'verified' | 'verified_inferred' | 'needs_review';
   last_verified: string | null;
-  confidence: number;
+  verified_with: VerifiedWith;
   anchors: AnchorStatus[];
   message: string;
 }
@@ -70,21 +72,21 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
       id,
       status: 'needs_review',
       last_verified: item.last_verified ?? null,
-      confidence: item.confidence,
+      verified_with: item.verified_with ?? 'assertion',
       anchors: statuses,
       message: lines.join('\n'),
     };
   }
 
   const now = new Date().toISOString();
-  const newConfidence = Math.min(1.0, item.confidence + 0.1);
 
-  // Verification resets the decay clock: TTL counts from now, not from creation.
-  let decayAfter = item.decay_after;
-  if (decayAfter !== 'never') {
+  // Verification resets the check_by clock: TTL counts from now, not from creation.
+  let checkBy = item.check_by;
+  if (checkBy !== 'never') {
     const expires = new Date();
-    expires.setUTCDate(expires.getUTCDate() + getDecayDays(config, item.type));
-    decayAfter = expires.toISOString();
+    const days = item.type ? getDecayDays(config, item.type) : DEFAULT_DECAY_DAYS.fact;
+    expires.setUTCDate(expires.getUTCDate() + days);
+    checkBy = expires.toISOString();
   }
 
   const ext = { ...(item.ext ?? {}) } as Record<string, unknown>;
@@ -93,11 +95,17 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   if (options.evidence) lastVerification.evidence = options.evidence;
   ext.last_verification = lastVerification;
 
+  // Witness class: anchors win, else operator-stated evidence, else generic evidence.
+  let verifiedWith: VerifiedWith;
+  if (anchors.length > 0) verifiedWith = 'anchor';
+  else if (options.source && effectiveSourceKind({ source: options.source }) === 'operator') verifiedWith = 'operator';
+  else verifiedWith = 'evidence';
+
   store.updateItem({
     ...item,
-    confidence: newConfidence,
-    decay_after: decayAfter,
+    check_by: checkBy,
     last_verified: now,
+    verified_with: verifiedWith,
     // A successful verify re-witnesses the claim: the stale flag is resolved.
     stale: undefined,
     ext,
@@ -112,8 +120,8 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     id,
     status,
     last_verified: now,
-    confidence: newConfidence,
+    verified_with: verifiedWith,
     anchors: statuses,
-    message: `Verified ${id} (${anchorNote}, confidence: ${newConfidence.toFixed(2)}, next decay: ${decayAfter === 'never' ? 'never' : decayAfter.substring(0, 10)})`,
+    message: `Verified ${id} (${anchorNote}, verified_with: ${verifiedWith}, next check: ${checkBy === 'never' ? 'never' : checkBy.substring(0, 10)})`,
   };
 }

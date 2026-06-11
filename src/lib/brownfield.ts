@@ -25,17 +25,16 @@ function makeItem(params: {
   decayAfter: string;
   source: string;
   tags: string[];
-  confidence?: number;
 }): DraftItem {
   return {
     id: `ms_${ulid()}`,
+    kind: 'claim',
     type: params.type,
     state: params.state,
-    confidence: params.confidence ?? 0.8,
     created: params.created,
     source: params.source,
     tags: params.tags,
-    decay_after: params.decayAfter,
+    check_by: params.decayAfter,
     title: params.title,
     body: params.body,
   };
@@ -95,14 +94,13 @@ function importObservations(filePath: string): DraftItem[] {
     const type: MemoryType = rawType === 'decision' ? 'decision' : 'fact';
     items.push(makeItem({
       type,
-      state: 'captured',
+      state: 'active',
       title: text,
       body: text,
       created: new Date(`${date}T00:00:00Z`).toISOString(),
       decayAfter: 'never',
       source: 'brownfield-import',
       tags: ['observation', sanitizeTag(rawType)],
-      confidence: Number(importance) >= 7 ? 0.85 : 0.75,
     }));
   }
 
@@ -165,7 +163,6 @@ function importMemoryMd(filePath: string, storeRoot: string): DraftItem[] {
       decayAfter: decayAfterFor('fact', storeRoot),
       source: 'brownfield-import',
       tags: ['lesson'],
-      confidence: 0.85,
     }));
   }
 
@@ -319,7 +316,7 @@ export function importBrownfield(projectRoot: string, store: MemspecStore): Brow
       facts: allItems.filter((i) => i.type === 'fact' && i.state === 'active').length,
       decisions: allItems.filter((i) => i.type === 'decision' && i.state === 'active').length,
       procedures: allItems.filter((i) => i.type === 'procedure' && i.state === 'active').length,
-      observations: allItems.filter((i) => i.state === 'captured').length,
+      observations: 0,
     },
   };
 }
