@@ -28,11 +28,14 @@ export function parseMemoryFile(content: string, filePath: string): MemoryItem {
     confidence: data.confidence,
     created: data.created,
     source: data.source,
+    source_kind: data.source_kind,
     tags: data.tags,
     decay_after: data.decay_after,
+    stale: data.stale,
     last_verified: data.last_verified,
     corrects: data.corrects,
     corrected_by: data.corrected_by,
+    correction_reason: data.correction_reason,
     ext: data.ext,
     title,
     body: body.trim(),
@@ -52,9 +55,12 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
     decay_after: item.decay_after,
   };
 
+  if (item.source_kind) frontmatter.source_kind = item.source_kind;
+  if (item.stale) frontmatter.stale = item.stale;
   if (item.last_verified) frontmatter.last_verified = item.last_verified;
   if (item.corrects) frontmatter.corrects = item.corrects;
   if (item.corrected_by) frontmatter.corrected_by = item.corrected_by;
+  if (item.correction_reason) frontmatter.correction_reason = item.correction_reason;
   if (item.ext && Object.keys(item.ext).length > 0) frontmatter.ext = item.ext;
 
   // Strip leading heading if it matches the title to avoid duplication
