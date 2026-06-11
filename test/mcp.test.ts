@@ -131,25 +131,19 @@ test('mcp server lists all memspec tools over stdio', async () => {
     const toolNames = tools.map((tool) => tool.name).sort();
 
     assert.deepEqual(toolNames, [
-      'memspec_add',
       'memspec_anchor',
-      'memspec_consolidate',
-      'memspec_correct',
-      'memspec_decay',
       'memspec_get',
-      'memspec_init',
-      'memspec_promote',
+      'memspec_observe',
       'memspec_reconcile',
+      'memspec_remember',
       'memspec_search',
       'memspec_status',
-      'memspec_stores',
-      'memspec_validate',
+      'memspec_supersede',
       'memspec_verify',
     ]);
 
-    const initTool = tools.find((tool) => tool.name === 'memspec_init');
-    assert.ok(initTool?.description?.includes('existing memory files'));
-    assert.ok(initTool?.description?.includes('AGENTS.md'));
+    const rememberTool = tools.find((tool) => tool.name === 'memspec_remember');
+    assert.ok(rememberTool?.description?.includes('anchor it now'));
 
     const searchTool = tools.find((tool) => tool.name === 'memspec_search');
     assert.ok(searchTool?.description?.includes('before answering'));

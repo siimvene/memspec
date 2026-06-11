@@ -20,8 +20,10 @@ test('validate succeeds on a valid initialized store with one memory item', asyn
     'test',
   ]);
 
+  // v0.3: validate is deprecated; it still reports schema status as a shim.
   const result = await runCli(['validate', '--cwd', target]);
   assert.match(result.stdout, /memspec file\(s\) valid/);
+  assert.match(result.stdout, /deprecated in v0\.3/);
 });
 
 test('validate fails on malformed frontmatter and reports the file', async () => {

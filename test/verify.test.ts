@@ -80,7 +80,7 @@ test('verify with changed anchor returns needs_review and leaves memory untouche
     (error: Error & { stdout?: string }) => {
       assert.match(error.stdout ?? '', /NEEDS REVIEW/);
       assert.match(error.stdout ?? '', /changed: auth\.py/);
-      assert.match(error.stdout ?? '', /memspec correct/);
+      assert.match(error.stdout ?? '', /memspec supersede/);
       return true;
     },
   );
