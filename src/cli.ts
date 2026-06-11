@@ -101,8 +101,9 @@ program
   .option('--check-by <value>', 'ISO timestamp or "never"')
   .option('--anchor <file...>', 'project-root-relative file paths to anchor this claim to')
   .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
+  .option('--pin', 'always surface this claim in boot context (operator-only; CLI flag, not on the MCP surface)')
   .action((type: string, title: string, options: {
-    cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string;
+    cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
   }) => {
     if (options.store === 'global') {
       options.cwd = homedir();
@@ -115,6 +116,7 @@ program
       checkBy: options.checkBy,
       anchors: options.anchor,
       store: options.store,
+      pin: options.pin,
     });
     console.log(result.message);
     if (result.duplicates && result.duplicates.length > 0) {

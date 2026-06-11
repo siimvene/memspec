@@ -16,6 +16,8 @@ export interface RememberOptions {
   /** File paths to anchor the claim to, resolved against the project root. */
   anchors?: string[];
   store?: string;
+  /** Operator-only (CLI flag, deliberately absent from the MCP surface): always surface in boot context. */
+  pin?: boolean;
 }
 
 export interface DuplicateMatch {
@@ -150,6 +152,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
 
   if (anchorResolution.anchors.length > 0) {
     itemData.anchors = anchorResolution.anchors;
+  }
+
+  if (options.pin) {
+    itemData.pinned = true;
   }
 
   const filePath = store.writeItem(itemData);
