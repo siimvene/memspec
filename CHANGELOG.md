@@ -39,11 +39,33 @@ writer emits v0.3 only.
 - **`memspec promote` deprecated.** The stabilization gate is gone in v0.3;
   the command stays on the CLI surface as a deprecation message until the
   Phase 3 tool-surface cut.
+- **MCP tool surface cut to 9 (Phase 3).** Renamed: `add` →
+  `memspec_remember` (anchors inline at write time, witness recorded as
+  `anchor` / `operator` / `assertion` based on what's present), `correct` →
+  `memspec_supersede` (now with `merge_from` for N→1 atomic collapse, `body`
+  empty = retraction, `body` filled = replacement). New: `memspec_observe`
+  (hard expiry, default 7d, no type/source classification — observations
+  are agent-only by definition). Kept: `memspec_search`, `memspec_get`
+  (adds lineage chain in response — walks `supersedes` backward and
+  `superseded_by` forward), `memspec_verify` (anchorless requires
+  evidence, as in v0.2), `memspec_anchor`, `memspec_reconcile`,
+  `memspec_status` (absorbs `validate` schema check; adds conflict report,
+  sweep candidates, witness counts). Removed from MCP: `memspec_add`,
+  `memspec_correct`, `memspec_promote`, `memspec_consolidate`,
+  `memspec_validate`, `memspec_decay`, `memspec_init`, `memspec_stores`.
+- **Lazy stale flagging.** `store.loadActive()` now adds `stale: true` in
+  memory for items past `check_by` without mutating the file — the flag
+  shows up in search, sweep, and status without a separate `memspec decay`
+  invocation. Persisted stale flags are still respected and cleared by
+  `verify`. The `memspec decay` CLI is a deprecation shim that surfaces
+  expired and drifted items read-only.
+- **CLI deprecations.** `memspec validate` and `memspec consolidate` print
+  a deprecation banner and point at the new surface (`status` for both;
+  `supersede --merge-from` for the merge half of `consolidate`). They still
+  report results so scripts limp through one release; the commands and the
+  MCP-equivalent tools are gone in v0.4.
 
 ### Deferred to 0.3 (later phases — not in this slice)
-- MCP tool surface reduction and renames (Phase 3 —
-  `remember`/`supersede`/`observe`; drop `promote`, `consolidate`,
-  `validate`, `decay`, `init`, `stores` from MCP).
 - Search rebuild — single search path, per-set BM25 normalization, optional
   bodies in budget, witness/stale/conflict fields, `usage.jsonl` writes,
   mtime-cached on-disk FTS index (Phase 4).

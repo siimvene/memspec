@@ -29,51 +29,54 @@ Run `memspec search <topic>` before falling back to inference from repo structur
 A recorded decision, fact, or procedure outweighs what the codebase appears to suggest — the memory captures *why*, the code only shows *what*.
 
 ### When to write memories
-After these events, write or correct memories immediately — don't defer to session end:
-- **Fixed a bug** → write/correct the relevant `fact` about how the system works
-- **Changed architecture or configuration** → correct stale `decision`/`fact`, write new ones
+After these events, write or supersede memories immediately — don't defer to session end:
+- **Fixed a bug** → write/supersede the relevant `fact` about how the system works
+- **Changed architecture or configuration** → supersede stale `decision`/`fact`, write new ones
 - **Established a workflow** (deploy, test, debug sequence) → write a `procedure`
 - **Discovered something non-obvious** about the codebase → write a `fact`
 - **Made a design choice** between alternatives → write a `decision` with rationale
 
-Use `memspec add <type> "<title>" --body "<content>" --source <agent> --tags <tags>`.
-`--source` is required and may not be "unknown" — identify yourself.
-Use `memspec correct <id> --reason "<why>" --replace "<new content>" [--title "<new title>"]`
-for stale memories; the reason is persisted on both records, so make it one a future agent
-can act on. If the corrected content no longer fits the old title, pass `--title`.
-To merge a duplicate into an existing memory instead of minting a new one:
-`memspec correct <dup-id> --reason "duplicate of <id>" --supersede-by <id>`.
+Use `memspec remember <type> "<title>" --body "<content>" --source <agent> --tags <tags>`.
+`--source` is required and may not be "unknown" — identify yourself. If the claim
+describes code, anchor it in the same call: `--anchor src/foo.ts --anchor src/bar.ts`.
+Use `memspec supersede <id> --reason "<why>" --body "<new content>" [--title "<new title>"]`
+for stale memories; the reason is persisted on every record involved, so make it one a future
+agent can act on. If the new content no longer fits the old title, pass `--title`.
+To merge duplicates into one survivor: `memspec supersede <survivor-id> --reason "..."
+--merge-from <dup1>,<dup2>` (collapses N → 1 atomically).
+For a clean retraction (no replacement): `memspec supersede <id> --reason "..."`.
 
 ### Code-anchored verification
 Facts about code state ("auth is a mockup", "the app has 7 screens") go stale the moment
-the code changes — calendar decay fires too late. Anchor them to the files they describe:
-- After writing a code-state `fact`, run `memspec anchor <id> <files...>` to link it to its source files.
+the code changes — calendar TTL fires too late. Anchor them to the files they describe:
+- Anchor at write time: `memspec remember fact "..." --source ... --anchor src/foo.ts`.
+- For existing memories, run `memspec anchor <id> <files...>` to link to source files.
 - After committing changes, run `memspec reconcile` — it lists memories whose anchored files changed.
-- Resolve each candidate: `memspec verify <id>` (still true), `memspec correct <id> --reason ... --replace ...`
+- Resolve each candidate: `memspec verify <id>` (still true), `memspec supersede <id> --reason ... --body ...`
   (now wrong), or `memspec anchor <id> <files...>` (still true against the new code; re-baseline).
 - When you re-confirm any memory is still accurate, record it with `memspec verify <id>` — this refreshes
-  its freshness signal and resets the decay clock. Re-verification that isn't recorded is invisible.
+  its freshness signal and resets the check_by clock. Re-verification that isn't recorded is invisible.
 - Verifying a memory with no anchors requires `--evidence "what you checked"`. A bare self-verify
   is rejected — state the evidence or anchor the memory.
 
 ### Flags are work orders
 - A search result or status entry marked **stale**: the TTL passed without re-verification.
   Re-check it against the world before relying on it, then `memspec verify` (with evidence)
-  or `memspec correct` it. Stale items are never auto-deleted; resolving the flag is your job.
+  or `memspec supersede` it. Stale items are never auto-deleted; resolving the flag is your job.
 - A verify that returns **needs_review** (anchor drift, or "anchor in repo X, fetch to verify"):
-  read the changed files, then verify, correct, or re-anchor. The memory is left untouched
+  read the changed files, then verify, supersede, or re-anchor. The memory is left untouched
   until you act.
-- A record with `source_kind: operator` is operator-stated knowledge. Correcting it requires
+- A record with `source_kind: operator` is operator-stated knowledge. Superseding it requires
   `--override-operator` — use it only with explicit cause, and say so in the reason.
 - Physical removal is `memspec sweep`, an operator-run CLI command. Don't try to delete
-  memories yourself; flag them via correction instead.
+  memories yourself; supersede or retract instead.
 
 ### Memory hygiene
-- **Search before adding.** Run `memspec search <topic>` first. If a similar memory exists and is wrong,
-  `memspec correct` it; if it exists and is right, `memspec verify` it — don't add a duplicate.
-- **Don't ask permission** to write, correct, verify, or decay memories. Memory upkeep is the agent's job;
+- **Search before remembering.** Run `memspec search <topic>` first. If a similar memory exists and is wrong,
+  `memspec supersede` it; if it exists and is right, `memspec verify` it — don't add a duplicate.
+- **Don't ask permission** to write, supersede, or verify memories. Memory upkeep is the agent's job;
   asking is friction. The bar is: would a future agent starting cold benefit?
-- **Run `memspec status` periodically** and review stale and anchor-drifted items it reports.
+- **Run `memspec status` periodically** and review stale items, anchor drift, conflicts, and sweep candidates.
 
 ### Guidelines
 - Only write knowledge that helps a future agent starting cold. No session transcripts.

@@ -341,11 +341,30 @@ Agent reads and writes markdown files in `.memspec/`. No server, no dependencies
 
 ### 8.2 MCP Server
 
-Optional MCP server exposing:
-- `memspec.observe` — submit an observation (accepts free text, returns ID)
-- `memspec.query` — retrieval with context, types, token budget, profile
-- `memspec.correct` — signal a correction (target ID, reason, optional replacement)
-- `memspec.search` — raw search (keyword or semantic, returns unranked results)
+Optional MCP server. v0.3 exposes nine tools:
+
+- `memspec_search` — ranked retrieval with optional type filter and profile
+- `memspec_get` — fetch a memory by id with its lineage chain (ancestors via
+  `supersedes`, descendants via `superseded_by`)
+- `memspec_remember` — write a new claim; anchors may be supplied inline so
+  code-state facts are anchored at write time
+- `memspec_supersede` — replace, retract, or merge a memory.
+  `body` filled → replacement (new active record). `body` empty → retraction.
+  `merge_from` collapses N duplicates into one survivor atomically. Reason is
+  persisted on every record involved.
+- `memspec_observe` — point-in-time observation with hard expiry (default 7d)
+- `memspec_verify` — re-witness a claim; anchorless verification requires
+  evidence
+- `memspec_anchor` — link a claim to source files (records git blob SHAs)
+- `memspec_reconcile` — list anchored claims whose files have drifted
+- `memspec_status` — store health: counts by type/state/witness, stale,
+  drifted anchors, declared and inferred conflicts, schema violations,
+  sweep candidates
+
+CLI-only surface (off the MCP tool list, by design):
+`memspec init`, `memspec sweep`, `memspec stores`, `memspec migrate`,
+plus deprecation shims for `add`, `correct`, `promote`, `consolidate`,
+`validate`, `decay` carried for one release.
 
 ### 8.3 CLI
 
