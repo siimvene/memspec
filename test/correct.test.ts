@@ -62,6 +62,40 @@ test('correct with --replace creates a new active item and marks old as correcte
   assert.ok(archived.data.corrected_by);
 });
 
+test('correct persists the reason to both records', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await addAndGetId(target);
+
+  await runCli([
+    'correct', id,
+    '--reason', 'Migrated to OAuth',
+    '--replace', 'Now uses OAuth2 with PKCE',
+    '--cwd', target,
+    '--source', 'test',
+  ]);
+
+  const factEntries = await readdir(join(target, '.memspec', 'memory', 'facts'));
+  const replacement = matter(await readText(join(target, '.memspec', 'memory', 'facts', factEntries[0])));
+  assert.equal(replacement.data.correction_reason, 'Migrated to OAuth');
+
+  const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
+  const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
+  assert.equal(archived.data.correction_reason, 'Migrated to OAuth');
+});
+
+test('correct without replacement persists the reason on the archived record', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await addAndGetId(target);
+
+  await runCli(['correct', id, '--reason', 'No longer true', '--cwd', target]);
+
+  const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
+  const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
+  assert.equal(archived.data.correction_reason, 'No longer true');
+});
+
 test('correct fails on nonexistent ID', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);

@@ -37,18 +37,21 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
       decay_after: target.decay_after,
       last_verified: now,
       corrects: target.id,
+      correction_reason: options.reason,
       title: target.title,
       body: options.replace,
     });
 
     target.state = 'corrected';
     target.corrected_by = newId;
+    target.correction_reason = options.reason;
     store.moveToArchive(target, 'corrected');
 
     return `Corrected ${targetId} → ${newId}\nReason: ${options.reason}`;
   }
 
   target.state = 'corrected';
+  target.correction_reason = options.reason;
   store.moveToArchive(target, 'corrected');
 
   return `Invalidated ${targetId}\nReason: ${options.reason}`;
