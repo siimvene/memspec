@@ -201,6 +201,34 @@ test('correct rejects --replace combined with --supersede-by', async () => {
   );
 });
 
+test('correct refuses operator-sourced records without --override-operator', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  await runCli(['add', 'fact', 'Operator truth', '--cwd', target, '--body', 'Stated by Siim', '--source', 'human:siim']);
+  const entries = await readdir(join(target, '.memspec', 'memory', 'facts'));
+  const id = matter(await readText(join(target, '.memspec', 'memory', 'facts', entries[0]))).data.id;
+
+  await assert.rejects(
+    () => runCli(['correct', id, '--reason', 'agent disagrees', '--cwd', target]),
+    (error: Error & { stderr?: string }) => {
+      assert.match(`${error.message}\n${error.stderr ?? ''}`, /--override-operator/);
+      return true;
+    },
+  );
+
+  // Untouched without the flag.
+  const stillThere = await readdir(join(target, '.memspec', 'memory', 'facts'));
+  assert.equal(stillThere.length, 1);
+
+  // With the flag it proceeds, and the override is logged into the reason.
+  await runCli(['correct', id, '--reason', 'confirmed with operator', '--override-operator', '--cwd', target]);
+  const archiveEntries = await readdir(join(target, '.memspec', 'archive'));
+  const archived = matter(await readText(join(target, '.memspec', 'archive', archiveEntries[0])));
+  assert.equal(archived.data.state, 'corrected');
+  assert.match(String(archived.data.correction_reason), /confirmed with operator/);
+  assert.match(String(archived.data.correction_reason), /--override-operator used/);
+});
+
 test('correct fails on nonexistent ID', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);

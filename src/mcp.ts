@@ -290,11 +290,12 @@ server.tool(
     replace: z.string().optional().describe('Replacement content (creates new memory)'),
     title: z.string().optional().describe('Fresh title for the replacement (defaults to the old title)'),
     supersede_by: z.string().optional().describe('Mark this memory as corrected by an existing memory ID instead of minting a new one (merges duplicates)'),
+    override_operator: z.boolean().optional().describe('Required to correct operator-sourced records; use only with explicit cause — the override is logged into the correction reason'),
     source: z.string().optional().describe('Who is making the correction'),
   },
-  async ({ id, reason, replace, title, supersede_by, source }) => {
+  async ({ id, reason, replace, title, supersede_by, override_operator, source }) => {
     try {
-      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, title, supersedeBy: supersede_by, source });
+      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, title, supersedeBy: supersede_by, overrideOperator: override_operator, source });
       return {
         content: [{ type: 'text' as const, text: result }],
         structuredContent: {

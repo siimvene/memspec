@@ -154,9 +154,10 @@ program
   .option('--replace <text>', 'replacement content')
   .option('--title <text>', 'fresh title for the replacement (defaults to the old title)')
   .option('--supersede-by <id>', 'mark this memory as corrected by an existing memory instead of minting a new one')
+  .option('--override-operator', 'required to correct operator-sourced records; logged into the correction reason')
   .option('--source <source>', 'corrector identifier')
   .action((id: string, options: {
-    cwd?: string; reason: string; replace?: string; title?: string; supersedeBy?: string; source?: string;
+    cwd?: string; reason: string; replace?: string; title?: string; supersedeBy?: string; overrideOperator?: boolean; source?: string;
   }) => {
     console.log(runCorrect(id, options));
   });
