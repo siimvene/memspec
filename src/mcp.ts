@@ -8,15 +8,13 @@ import { runAnchor } from './commands/anchor.js';
 import { runObserve } from './commands/observe.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runRemember } from './commands/remember.js';
-import { runSearch } from './commands/search.js';
+import { searchPayload, type SearchResult } from './commands/search.js';
 import { buildStatusReport, runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
 import { runVerify } from './commands/verify.js';
 import { homedir } from 'node:os';
-import { loadConfig, getProfile } from './lib/config.js';
 import { buildLineage } from './lib/lineage.js';
 import { MemspecStore } from './lib/store.js';
-import { MEMORY_TYPES, type MemoryType } from './lib/types.js';
 
 const { values } = parseArgs({
   options: { cwd: { type: 'string' } },
@@ -31,72 +29,54 @@ const server = new McpServer({
   version: '0.3.0',
 });
 
-function previewFromBody(body: string): string {
-  const lines = body.split('\n').filter((line) => !line.startsWith('#'));
-  return lines.join(' ').trim().slice(0, 160);
-}
-
-function resolveSearchType(type?: string): MemoryType[] | undefined {
-  if (!type) return undefined;
-  if ((MEMORY_TYPES as readonly string[]).includes(type)) {
-    return [type as MemoryType];
+function renderSearchText(payload: { query: string; results: SearchResult[] }): string {
+  if (payload.results.length === 0) return `No results for "${payload.query}"`;
+  const lines: string[] = [`${payload.results.length} result(s) for "${payload.query}"`, ''];
+  for (const item of payload.results) {
+    const conflictTag = item.conflicts_with.length > 0 ? ` [CONFLICTS WITH ${item.conflicts_with.join(', ')}]` : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${conflictTag}`);
+    lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
+    if (item.tags.length > 0) lines.push(`  tags: ${item.tags.join(', ')}`);
+    if (item.body !== undefined) {
+      lines.push(`  ${item.body.split('\n').filter((l) => !l.startsWith('#')).join(' ').trim()}`);
+    } else if (item.preview) {
+      lines.push(`  ${item.preview.slice(0, 120)}`);
+    }
+    lines.push('');
   }
-  return undefined;
+  return lines.join('\n');
 }
 
 // --- Tools (v0.3 surface — 9 tools) ---
 
 server.tool(
   'memspec_search',
-  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query.',
+  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set).',
   {
     query: z.string().describe('Search terms'),
     type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
     limit: z.number().min(1).max(50).optional().describe('Max results (default 10)'),
     profile: z.string().optional().describe('Retrieval profile name from config'),
+    full: z.boolean().optional().describe('Include each result body inline (token-budgeted). Defaults to previews only.'),
   },
-  async ({ query, type, limit, profile }) => {
+  async ({ query, type, limit, profile, full }) => {
     try {
-      const store = new MemspecStore(defaultCwd);
-      const config = loadConfig(store.root);
-      const profileName = profile ?? 'default';
-      const retrieval = getProfile(config, profileName);
-      const results = store.search(query, {
-        limit: limit ?? 10,
-        types: resolveSearchType(type) ??
-          retrieval.types?.filter((item): item is MemoryType => (MEMORY_TYPES as readonly string[]).includes(item)),
-        minConfidence: retrieval.min_confidence ?? 0,
-        ranking: retrieval.ranking,
-      });
-
-      const payload = results.map((item) => ({
-        id: item.id,
-        type: item.type,
-        title: item.title,
-        verified_with: item.verified_with ?? 'assertion',
-        created: item.created,
-        last_verified: item.last_verified ?? item.created,
-        source: item.source,
-        tags: item.tags,
-        stale: item.stale ?? false,
-        preview: previewFromBody(item.body),
-      }));
-
-      const result = runSearch(query, {
+      const payload = searchPayload(query, {
         cwd: defaultCwd,
         type,
         limit: limit?.toString(),
         profile,
-        json: true,
+        full,
       });
 
       return {
-        content: [{ type: 'text' as const, text: result }],
+        content: [{ type: 'text' as const, text: renderSearchText(payload) }],
         structuredContent: {
-          query,
-          profile: profileName,
-          count: payload.length,
-          results: payload,
+          query: payload.query,
+          profile: payload.profile,
+          count: payload.count,
+          full: payload.full,
+          results: payload.results,
         },
       };
     } catch (err) {

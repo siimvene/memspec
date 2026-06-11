@@ -220,8 +220,9 @@ program
   .option('--profile <name>', 'retrieval profile', 'default')
   .option('--limit <n>', 'max results', '10')
   .option('--json', 'output as JSON')
+  .option('--full', 'include full body content (token-budgeted)')
   .action((query: string, options: {
-    cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean;
+    cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean; full?: boolean;
   }) => {
     console.log(runSearch(query, options));
   });

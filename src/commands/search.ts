@@ -1,6 +1,6 @@
 import { getProfile, loadConfig } from '../lib/config.js';
-import { MemspecStore } from '../lib/store.js';
-import { MEMORY_TYPES, type MemoryType } from '../lib/types.js';
+import { MemspecStore, type StoreSearchOptions } from '../lib/store.js';
+import { MEMORY_TYPES, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 
 export interface SearchOptions {
   cwd?: string;
@@ -8,7 +8,42 @@ export interface SearchOptions {
   limit?: string;
   json?: boolean;
   profile?: string;
+  full?: boolean;
 }
+
+/**
+ * One result row, shared by every search consumer (CLI text, CLI JSON,
+ * MCP structuredContent). The single search payload is the contract.
+ */
+export interface SearchResult {
+  id: string;
+  type: MemoryType | 'observation';
+  title: string;
+  verified_with: VerifiedWith;
+  created: string;
+  last_verified: string;
+  source: string;
+  tags: string[];
+  stale: boolean;
+  conflicts_with: string[];
+  preview: string;
+  body?: string; // present only when full=true and within the budget
+}
+
+export interface SearchPayload {
+  query: string;
+  profile: string;
+  count: number;
+  full: boolean;
+  results: SearchResult[];
+}
+
+/**
+ * Token budget for full bodies — chars/4 heuristic, no tokenizer dependency.
+ * Matches the heuristic used in context.ts for consistency.
+ */
+const FULL_BODY_TOKEN_BUDGET = 2000;
+const PREVIEW_CHARS = 160;
 
 function assertMemoryType(input: string): MemoryType {
   if ((MEMORY_TYPES as readonly string[]).includes(input)) {
@@ -22,7 +57,71 @@ function parseProfileTypes(types?: string[]): MemoryType[] | undefined {
   return types.filter((type): type is MemoryType => (MEMORY_TYPES as readonly string[]).includes(type));
 }
 
-export function runSearch(query: string, options: SearchOptions): string {
+function previewFromBody(body: string, limit = PREVIEW_CHARS): string {
+  const lines = body.split('\n').filter((line) => !line.startsWith('#'));
+  return lines.join(' ').replace(/\s+/g, ' ').trim().slice(0, limit);
+}
+
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function witnessOf(item: MemoryItem): VerifiedWith {
+  if (item.verified_with) return item.verified_with;
+  if (item.anchors && item.anchors.length > 0) return 'anchor';
+  return 'assertion';
+}
+
+/**
+ * Cheap pairwise conflict surface within a result set: declared conflicts_with
+ * is honoured directly; same-type, same-tag, overlapping-title pairs that aren't
+ * already declared get added so the LLM sees the contradiction even if no
+ * supersede has landed yet. Not a replacement for status conflicts — just the
+ * "is this result set internally consistent?" pass.
+ */
+function annotateConflicts(items: MemoryItem[]): Map<string, string[]> {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const out = new Map<string, Set<string>>();
+  for (const item of items) {
+    out.set(item.id, new Set(item.conflicts_with ?? []));
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const a = items[i];
+    if (!a.type) continue;
+    for (let j = i + 1; j < items.length; j++) {
+      const b = items[j];
+      if (!b.type) continue;
+      if (a.type !== b.type) continue;
+      // share at least one tag
+      if (a.tags.length === 0 || b.tags.length === 0) continue;
+      const sharedTag = a.tags.some((t) => b.tags.includes(t));
+      if (!sharedTag) continue;
+      // title token overlap >= 2 — cheap stand-in for semantic overlap
+      const tokensA = new Set(a.title.toLowerCase().split(/\s+/).filter((t) => t.length > 3));
+      const tokensB = new Set(b.title.toLowerCase().split(/\s+/).filter((t) => t.length > 3));
+      let overlap = 0;
+      for (const t of tokensA) if (tokensB.has(t)) overlap++;
+      if (overlap < 2) continue;
+      out.get(a.id)!.add(b.id);
+      out.get(b.id)!.add(a.id);
+    }
+  }
+
+  const result = new Map<string, string[]>();
+  for (const [id, set] of out) {
+    // Only retain conflicts pointing at items the consumer will actually see.
+    const filtered = [...set].filter((cid) => byId.has(cid) || (items.find((i) => i.id === id)?.conflicts_with ?? []).includes(cid));
+    result.set(id, filtered);
+  }
+  return result;
+}
+
+/**
+ * Single search entry point. Both CLI and MCP read from this payload — no
+ * second `store.search` call to keep them in sync.
+ */
+export function searchPayload(query: string, options: SearchOptions): SearchPayload {
   const store = new MemspecStore(options.cwd);
   const config = loadConfig(store.root);
   const profileName = options.profile ?? 'default';
@@ -35,43 +134,94 @@ export function runSearch(query: string, options: SearchOptions): string {
 
   const explicitType = options.type ? assertMemoryType(options.type) : undefined;
   const types = explicitType ? [explicitType] : parseProfileTypes(profile.types);
-  const results = store.search(query, {
+  const storeOptions: StoreSearchOptions = {
     limit,
     types,
     minConfidence: profile.min_confidence ?? 0,
     ranking: profile.ranking,
+  };
+  const items = store.search(query, storeOptions);
+
+  const conflicts = annotateConflicts(items);
+  const full = options.full === true;
+  let budgetUsed = 0;
+
+  const results: SearchResult[] = items.map((item) => {
+    const result: SearchResult = {
+      id: item.id,
+      type: item.type ?? 'observation',
+      title: item.title,
+      verified_with: witnessOf(item),
+      created: item.created,
+      last_verified: item.last_verified ?? item.created,
+      source: item.source,
+      tags: item.tags,
+      stale: item.stale ?? false,
+      conflicts_with: conflicts.get(item.id) ?? [],
+      preview: previewFromBody(item.body),
+    };
+
+    if (full) {
+      const cost = estimateTokens(item.body);
+      if (budgetUsed + cost <= FULL_BODY_TOKEN_BUDGET) {
+        result.body = item.body;
+        budgetUsed += cost;
+      }
+    }
+
+    return result;
   });
 
-  if (results.length === 0) {
-    return `No results for "${query}"`;
+  return {
+    query,
+    profile: profileName,
+    count: results.length,
+    full,
+    results,
+  };
+}
+
+/**
+ * CLI text/JSON formatter. Reads the same payload the MCP returns, so the
+ * structured shape and the text rendering can never drift.
+ */
+export function runSearch(query: string, options: SearchOptions): string {
+  const payload = searchPayload(query, options);
+
+  if (payload.results.length === 0) {
+    return options.json ? '[]' : `No results for "${query}"`;
   }
 
   if (options.json) {
-    return JSON.stringify(results.map((r) => ({
+    return JSON.stringify(payload.results.map((r) => ({
       id: r.id,
       type: r.type,
       title: r.title,
-      verified_with: r.verified_with ?? 'assertion',
+      verified_with: r.verified_with,
       created: r.created,
-      last_verified: r.last_verified ?? r.created,
+      last_verified: r.last_verified,
       tags: r.tags,
       source: r.source,
-      stale: r.stale ?? false,
+      stale: r.stale,
+      conflicts_with: r.conflicts_with,
+      ...(r.body !== undefined ? { body: r.body } : {}),
     })), null, 2);
   }
 
-  const lines: string[] = [`${results.length} result(s) for "${query}"`, ''];
+  const lines: string[] = [`${payload.results.length} result(s) for "${query}"`, ''];
 
-  for (const item of results) {
-    const witness = item.verified_with ?? (item.anchors && item.anchors.length > 0 ? 'anchor' : 'assertion');
-    lines.push(`[${item.type ?? 'observation'}] ${item.title} (${witness})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}`);
+  for (const item of payload.results) {
+    const conflictTag = item.conflicts_with.length > 0 ? ` [CONFLICTS WITH ${item.conflicts_with.join(', ')}]` : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${conflictTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) {
       lines.push(`  tags: ${item.tags.join(', ')}`);
     }
-    const bodyLines = item.body.split('\n').filter((l) => !l.startsWith('#'));
-    const preview = bodyLines.slice(0, 2).join(' ').trim().substring(0, 120);
-    if (preview) lines.push(`  ${preview}`);
+    if (item.body !== undefined) {
+      lines.push(`  ${item.body.split('\n').filter((l) => !l.startsWith('#')).join(' ').trim()}`);
+    } else if (item.preview) {
+      lines.push(`  ${item.preview.slice(0, 120)}`);
+    }
     lines.push('');
   }
 
