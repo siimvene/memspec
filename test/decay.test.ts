@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import { makeTempProject, readText, runCli } from './helpers.js';
 
-test('decay moves expired items into archive with decayed state', async () => {
+test('decay flags expired items stale instead of archiving', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
@@ -23,22 +23,28 @@ test('decay moves expired items into archive with decayed state', async () => {
   ]);
 
   const result = await runCli(['decay', '--cwd', target]);
-  assert.match(result.stdout, /Decayed 1 item/);
+  assert.match(result.stdout, /Flagged 1 item\(s\) stale/);
+  assert.match(result.stdout, /memspec sweep/);
 
+  // Flag, not delete: the item stays active in place, nothing is archived.
   const proceduresDir = join(target, '.memspec', 'memory', 'procedures');
-  assert.equal((await readdir(proceduresDir)).length, 0);
+  const entries = await readdir(proceduresDir);
+  assert.equal(entries.length, 1);
 
-  const archiveDir = join(target, '.memspec', 'archive');
-  const archiveEntries = await readdir(archiveDir);
-  assert.equal(archiveEntries.length, 1);
+  const flagged = matter(await readText(join(proceduresDir, entries[0])));
+  assert.equal(flagged.data.state, 'active');
+  assert.equal(flagged.data.stale, true);
 
-  const archivedContent = await readText(join(archiveDir, archiveEntries[0]));
-  const archived = matter(archivedContent);
-  assert.equal(archived.data.state, 'decayed');
-  assert.match(archived.content, /Restart gateway/);
+  assert.equal((await readdir(join(target, '.memspec', 'archive'))).length, 0);
+
+  // Search still returns it, carrying the stale flag.
+  const search = await runCli(['search', 'gateway', '--cwd', target, '--json']);
+  const results = JSON.parse(search.stdout);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].stale, true);
 });
 
-test('decay --archive moves expired items into archive with archived state', async () => {
+test('decay is idempotent on already-flagged items', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
@@ -55,14 +61,30 @@ test('decay --archive moves expired items into archive with archived state', asy
     '2000-01-01T00:00:00.000Z',
   ]);
 
-  const result = await runCli(['decay', '--cwd', target, '--archive']);
-  assert.match(result.stdout, /Archived 1 item/);
+  await runCli(['decay', '--cwd', target]);
+  const second = await runCli(['decay', '--cwd', target]);
+  assert.match(second.stdout, /Flagged 0 item\(s\) stale/);
+  assert.match(second.stdout, /1 item\(s\) were already flagged/);
+});
 
-  const archiveDir = join(target, '.memspec', 'archive');
-  const [entry] = await readdir(archiveDir);
-  const archivedContent = await readText(join(archiveDir, entry));
-  const archived = matter(archivedContent);
-  assert.equal(archived.data.state, 'archived');
+test('verify clears the stale flag', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  await runCli([
+    'add', 'fact', 'Still true fact', '--cwd', target,
+    '--body', 'Holds up', '--source', 'test',
+    '--decay-after', '2000-01-01T00:00:00.000Z',
+  ]);
+  await runCli(['decay', '--cwd', target]);
+
+  const factsDir = join(target, '.memspec', 'memory', 'facts');
+  const [entry] = await readdir(factsDir);
+  const id = entry.replace(/\.md$/, '');
+  assert.equal(matter(await readText(join(factsDir, entry))).data.stale, true);
+
+  await runCli(['verify', id, '--cwd', target, '--evidence', 're-checked, still true']);
+  const after = matter(await readText(join(factsDir, entry))).data;
+  assert.equal(after.stale, undefined);
 });
 
 test('decay surfaces anchor drift but never archives drifted items', async () => {
@@ -100,7 +122,7 @@ test('decay surfaces anchor drift but never archives drifted items', async () =>
   assert.match(status.stdout, /1 item\(s\) with anchor drift/);
 });
 
-test('expired items decay even when also anchored', async () => {
+test('expired items are flagged even when also anchored', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await writeFile(join(target, 'lib.ts'), 'v1\n');
@@ -117,7 +139,7 @@ test('expired items decay even when also anchored', async () => {
   await writeFile(join(target, 'lib.ts'), 'v2\n');
 
   const result = await runCli(['decay', '--cwd', target]);
-  assert.match(result.stdout, /Decayed 1 item/);
+  assert.match(result.stdout, /Flagged 1 item\(s\) stale/);
   assert.doesNotMatch(result.stdout, /anchor drift/);
-  assert.equal((await readdir(factsDir)).length, 0);
+  assert.equal((await readdir(factsDir)).length, 1);
 });

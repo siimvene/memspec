@@ -82,6 +82,7 @@ server.tool(
         last_verified: item.last_verified ?? item.created,
         source: item.source,
         tags: item.tags,
+        stale: item.stale ?? false,
         preview: previewFromBody(item.body),
       }));
 
@@ -370,19 +371,17 @@ server.tool(
 
 server.tool(
   'memspec_decay',
-  'Clean up expired memories. Facts decay after 90 days, decisions after 180. Use dry_run to preview, or archive to move expired items out of the active set.',
+  'Flag expired memories as stale. Facts expire after 90 days, decisions after 180. Expiry flags — it never deletes: stale items stay searchable, marked for review (verify or correct them). Physical retirement happens via the CLI command memspec sweep, operator-run.',
   {
     dry_run: z.boolean().optional().describe('Preview without changes'),
-    archive: z.boolean().optional().describe('Move to archive instead of marking decayed'),
   },
-  async ({ dry_run, archive }) => {
+  async ({ dry_run }) => {
     try {
-      const result = runDecay({ cwd: defaultCwd, dryRun: dry_run, archive });
+      const result = runDecay({ cwd: defaultCwd, dryRun: dry_run });
       return {
         content: [{ type: 'text' as const, text: result }],
         structuredContent: {
           dry_run: dry_run ?? false,
-          archive: archive ?? false,
           summary: result,
         },
       };

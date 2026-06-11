@@ -98,6 +98,8 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     confidence: newConfidence,
     decay_after: decayAfter,
     last_verified: now,
+    // A successful verify re-witnesses the claim: the stale flag is resolved.
+    stale: undefined,
     ext,
   });
 

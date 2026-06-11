@@ -172,11 +172,10 @@ program
 
 program
   .command('decay')
-  .description('Apply TTL decay to expired items')
+  .description('Flag items past TTL as stale (flag, not delete — retire via memspec sweep)')
   .option('--cwd <path>', 'project root')
   .option('--dry-run', 'preview without changes')
-  .option('--archive', 'move to archive instead of marking decayed')
-  .action((options: { cwd?: string; dryRun?: boolean; archive?: boolean }) => {
+  .action((options: { cwd?: string; dryRun?: boolean }) => {
     console.log(runDecay(options));
   });
 
