@@ -11,6 +11,7 @@ import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runInit } from './commands/init.js';
+import { runMigrate } from './commands/migrate.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
@@ -237,6 +238,28 @@ program
       const rw = layer.writable ? 'rw' : 'ro';
       console.log(`  ${layer.name} [${rw}] (priority ${layer.priority}) — ${layer.path} (${status})`);
     }
+  });
+
+program
+  .command('migrate')
+  .description('One-shot v0.2 -> v0.3 migration of a memspec store (idempotent; dry-run by default)')
+  .option('--cwd <path>', 'project root')
+  .option('--apply', 'write changes (dry-run is the default)')
+  .option('--override <pair...>', 'override source_kind for a source string: source=operator|agent|import')
+  .action((options: { cwd?: string; apply?: boolean; override?: string[] }) => {
+    const sourceOverrides: Record<string, 'operator' | 'agent' | 'import'> = {};
+    for (const pair of options.override ?? []) {
+      const idx = pair.lastIndexOf('=');
+      if (idx === -1) throw new Error(`--override expects source=tier; got "${pair}"`);
+      const source = pair.slice(0, idx);
+      const tier = pair.slice(idx + 1) as 'operator' | 'agent' | 'import';
+      if (!['operator', 'agent', 'import'].includes(tier)) {
+        throw new Error(`--override tier must be operator | agent | import; got "${tier}"`);
+      }
+      sourceOverrides[source] = tier;
+    }
+    const result = runMigrate({ cwd: options.cwd, apply: options.apply, sourceOverrides });
+    console.log(result.message);
   });
 
 program
