@@ -206,27 +206,42 @@ A retrieval query contains:
 A retrieval response is an ordered list of memory items, ranked by relevance, truncated to the token budget. The response format is implementation-defined but MUST include for each item:
 - The memory content
 - The memory type
-- The confidence score
+- The witness class (`verified_with`) and the stale flag, if set
+- Known `conflicts_with` edges (including edges to non-returned claims, with their titles inline)
 - The creation date
 
 ### 5.3 Ranking
 
-Items are ranked by a weighted combination of:
-- **Relevance**: Semantic or keyword similarity to the query context
-- **Confidence**: The memory's confidence score
-- **Recency**: How recently the memory was created or confirmed
-
-Default weights: relevance 0.4, confidence 0.3, recency 0.3. Implementations MAY allow custom weights via retrieval profiles.
+Query results are ranked by **relevance** (keyword/BM25 similarity, normalized per result set; optionally reranked by embeddings in hybrid mode) combined with **witness recency** (how recently the claim was last verified). Confidence is gone in v0.3 — trust is communicated through the witness class, not folded into the rank. Result hits are appended to a local usage log (`usage.jsonl`), which feeds the boot-context usage boost (§5.5).
 
 ### 5.4 Retrieval Profiles
 
 A retrieval profile is a named configuration that adjusts retrieval behavior for a specific use case. Profiles configure:
 - `max_tokens`: Token budget
 - `types`: Which memory types to include
-- `min_confidence`: Minimum confidence threshold
-- `ranking`: Weight overrides for relevance, confidence, recency
+- `ranking`: Weight overrides
 
-Implementations MUST support at least a `default` profile. Additional profiles are optional.
+Implementations MUST support at least a `default` profile. Additional profiles are optional. The pre-0.3 `min_confidence` knob is accepted but is a no-op.
+
+### 5.5 Boot Context (Session-Start Injection)
+
+The no-query boot path (`memspec context`) renders the working set for session-start injection. Three sections, in order:
+
+1. **Needs attention** (cap 3) — claims flagged `stale` or with drifted anchors. Each line carries the id, type, a ⚠ marker, what is wrong, and the scripted next move (`→ verify | supersede`, plus `anchor` when drift names a file). Flagged claims beyond the cap stay in the working set carrying their ⚠ marker.
+2. **Pinned** (cap 5) — operator-pinned claims, bypassing ranking; ordered by last-verified descending. Overflow pins fall back into the working set.
+3. **Working set** — everything else, ranked by:
+
+```
+score       = type_weight × freshness × usage_boost
+type_weight : decision 1.0, procedure 0.9, fact 0.8
+freshness   = exp(-ln2 × days_since_last_verified / halflife)
+              halflife: decision 180d, procedure 90d, fact 45d
+usage_boost = 1 + 0.25 × log2(1 + retrievals_last_30d)
+```
+
+Freshness clocks from `last_verified`, not `created` — a re-witnessed old claim is fresh.
+
+Every line carries the claim's id, type, source-kind tag, witness marker (`⚓` anchored / `✓Nd` verified N days ago / `⚠` stale), title, and a preview ≤120 chars, so every booted memory is immediately actionable without a re-search. All sections spend from one token budget (default 2000, hard cap 20 items total), greedy fill in section order. The header reports the active-claim count and attention count and points at `memspec_status`.
 
 ---
 
@@ -361,19 +376,28 @@ Optional MCP server. v0.3 exposes nine tools:
   drifted anchors, declared and inferred conflicts, schema violations,
   sweep candidates
 
+MCP deprecation aliases, carried for one release (removed in v0.4):
+`memspec_add` forwards to `memspec_remember`; `memspec_correct` forwards to
+`memspec_supersede`. Every alias response carries
+`_deprecated: "use memspec_<new>; will be removed in v0.4"` and the server
+logs a warning to stderr. The six deleted tools (`promote`, `consolidate`,
+`validate`, `decay`, `init`, `stores`) have no successor and no alias.
+
 CLI-only surface (off the MCP tool list, by design):
 `memspec init`, `memspec sweep`, `memspec stores`, `memspec migrate`,
-plus deprecation shims for `add`, `correct`, `promote`, `consolidate`,
+plus CLI deprecation shims for `add`, `correct`, `promote`, `consolidate`,
 `validate`, `decay` carried for one release.
 
 ### 8.3 CLI
 
-Optional command-line interface:
-- `memspec observe "{text}"` — submit observation
-- `memspec query "{context}"` — retrieve relevant memories
-- `memspec correct {id} --reason "{reason}" --replace "{new content}"`
-- `memspec search "{query}"` — raw search
-- `memspec status` — summary of memory store (counts by type/state, recent activity)
+Optional command-line interface (primary v0.3 commands):
+- `memspec remember {type} "{title}" --source {who} [--anchor {files...}] [--pin] [--check-by {ts|never}]`
+- `memspec observe "{text}" [--ttl {dur}]` — point-in-time observation with hard expiry
+- `memspec supersede {id} --reason "{reason}" [--body "{new content}"] [--title] [--merge-from {ids}] [--override-operator]`
+- `memspec verify {id} [--evidence "{what you checked}"]`
+- `memspec anchor {id} {files...}` / `memspec reconcile [--since {ref}]`
+- `memspec search "{query}"` / `memspec context [--query] [--budget]`
+- `memspec status` — the single maintenance readout
 
 ---
 
@@ -399,11 +423,6 @@ profiles:
   default:
     max_tokens: 2000
     types: [fact, decision, procedure]
-    min_confidence: 0.7
-    ranking:
-      relevance: 0.4
-      confidence: 0.3
-      recency: 0.3
 
 # Index (optional)
 index:
@@ -461,6 +480,12 @@ Agents don't reliably perform deferred tasks. A generic "review memories before 
 ---
 
 ## 11. Stabilization Gate
+
+> **Removed in v0.3.** The gate produced `captured` records that needed
+> `promote`; the v0.3 reader collapses legacy `captured` items straight to
+> `active` on load and `memspec promote` is a deprecation stub (gone in
+> v0.4). The `stabilization` config block is accepted but inert. This
+> section is retained for historical reference only.
 
 ### 11.1 Purpose
 
@@ -639,13 +664,19 @@ An implementation MAY additionally:
 ```markdown
 ---
 id: ms_01HXK7Y3P5QZJKM8N4R2T6W9VB
+kind: claim
 type: fact
 state: active
-confidence: 0.9
 created: 2026-04-04T10:30:00Z
 source: claude-code
+source_kind: agent
 tags: [auth, api]
-decay_after: 2026-07-03T10:30:00Z
+check_by: 2026-07-03T10:30:00Z
+last_verified: 2026-04-04T10:30:00Z
+verified_with: anchor
+anchors:
+  - file: src/auth/jwt.ts
+    sha: 3f1d2c8a9b7e6f5d4c3b2a1908f7e6d5c4b3a291
 ---
 
 # API authentication uses JWT with short-lived tokens
@@ -659,13 +690,16 @@ The token service is in `src/auth/jwt.ts`.
 ```markdown
 ---
 id: ms_01HXK8A2R7BMCN5P3Q4Y6Z1WXD
+kind: claim
 type: decision
 state: active
-confidence: 0.85
 created: 2026-04-03T14:00:00Z
 source: human:siim
+source_kind: operator
 tags: [api, architecture]
-decay_after: 2026-10-03T14:00:00Z
+check_by: 2026-10-03T14:00:00Z
+last_verified: 2026-04-03T14:00:00Z
+verified_with: operator
 ---
 
 # Chose REST over GraphQL for the public API
@@ -678,19 +712,23 @@ GraphQL adds complexity without clear benefit for this audience.
 - gRPC: good performance, but poor browser/agent support
 ```
 
-### Correction
+### Supersession
 
 ```markdown
 ---
 id: ms_01HXM2B4K8DNFP6R9S3V5X7YZA
+kind: claim
 type: fact
 state: active
-confidence: 0.9
 created: 2026-04-10T09:00:00Z
 source: claude-code
+source_kind: agent
 tags: [auth, api]
-decay_after: 2026-07-10T09:00:00Z
-corrects: ms_01HXK7Y3P5QZJKM8N4R2T6W9VB
+check_by: 2026-07-10T09:00:00Z
+last_verified: 2026-04-10T09:00:00Z
+verified_with: assertion
+supersedes: [ms_01HXK7Y3P5QZJKM8N4R2T6W9VB]
+supersede_reason: Security review flagged CLI token storage; JWT replaced by OAuth2 PKCE
 ---
 
 # API authentication uses OAuth2 with PKCE

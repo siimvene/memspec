@@ -5,83 +5,50 @@ Add this block to the repo's `AGENTS.md`, `CLAUDE.md`, or equivalent instruction
 ```markdown
 ## Memory (Memspec)
 
-This project uses Memspec for structured memory. `.memspec/` is the canonical store for durable project knowledge.
-Memspec is agent-operated, not human-curated with agent access.
+This project uses Memspec. `.memspec/` is the canonical store of project knowledge:
+claims (facts, decisions, procedures) paired with the evidence that last attested them.
+You operate it; the human doesn't curate it.
 
-### On session start
-In Claude Code (and any harness supporting `SessionStart` hooks), the relevant active memories
-are auto-injected at session start via `memspec context` — you should already see them.
-As a fallback, run `memspec search` for context relevant to the task. Prefer active memories
-over stale assumptions.
-
-If the `memspec` command is not found (not on PATH) and no `memspec_*` MCP tools are available,
-the CLI is still usable: it is a Node tool — run `npm link` in the memspec checkout to expose
-`memspec`/`memspec-mcp`, or invoke it directly as `node <memspec-repo>/dist/cli.js <command>`.
-Do not conclude the tool is missing without checking these.
+### Session start
+Active memories are auto-injected via the session hook. Every line has an id — you can
+`memspec_verify`, `memspec_supersede`, or `memspec_anchor` it directly. If a "Needs
+attention" section appears, resolve those items when your work touches their subject.
+Fallback if no hook ran: `memspec_search` the task topic.
 
 ### Retrieve before assuming
-Before acting on an assumption about how this project works, search memspec. This applies to:
-- **Operational knowledge** — deploy steps, server addresses, credential paths, established workflows
-- **Architectural decisions** — tech stack choices, API design patterns, component boundaries, data models
-- **Project conventions** — naming, file structure, testing strategy, code style rationale
+Before acting on an assumption about how this project works — deploys, architecture,
+conventions — `memspec_search` it. A recorded claim outweighs what the code appears
+to suggest: the claim records *why*, code only shows *what*. Heed the witness shown
+with each result: an anchored claim verified yesterday and a never-rechecked assertion
+deserve different weight.
 
-Run `memspec search <topic>` before falling back to inference from repo structure or generic heuristics.
-A recorded decision, fact, or procedure outweighs what the codebase appears to suggest — the memory captures *why*, the code only shows *what*.
+### When to write
+Write at the event, not at session end:
+- Fixed a bug → `memspec_supersede` the claim that was wrong (or `memspec_remember` what you learned)
+- Changed architecture/config → supersede stale claims, remember new ones
+- Established a workflow → remember a `procedure`
+- Discovered something non-obvious → remember a `fact`
+- Chose between alternatives → remember a `decision` with the rationale
+- Noticed something point-in-time, not yet durable → `memspec_observe` it
 
-### When to write memories
-After these events, write or supersede memories immediately — don't defer to session end:
-- **Fixed a bug** → write/supersede the relevant `fact` about how the system works
-- **Changed architecture or configuration** → supersede stale `decision`/`fact`, write new ones
-- **Established a workflow** (deploy, test, debug sequence) → write a `procedure`
-- **Discovered something non-obvious** about the codebase → write a `fact`
-- **Made a design choice** between alternatives → write a `decision` with rationale
-
-Use `memspec remember <type> "<title>" --body "<content>" --source <agent> --tags <tags>`.
-`--source` is required and may not be "unknown" — identify yourself. If the claim
-describes code, anchor it in the same call: `--anchor src/foo.ts --anchor src/bar.ts`.
-Use `memspec supersede <id> --reason "<why>" --body "<new content>" [--title "<new title>"]`
-for stale memories; the reason is persisted on every record involved, so make it one a future
-agent can act on. If the new content no longer fits the old title, pass `--title`.
-To merge duplicates into one survivor: `memspec supersede <survivor-id> --reason "..."
---merge-from <dup1>,<dup2>` (collapses N → 1 atomically).
-For a clean retraction (no replacement): `memspec supersede <id> --reason "..."`.
-
-### Code-anchored verification
-Facts about code state ("auth is a mockup", "the app has 7 screens") go stale the moment
-the code changes — calendar TTL fires too late. Anchor them to the files they describe:
-- Anchor at write time: `memspec remember fact "..." --source ... --anchor src/foo.ts`.
-- For existing memories, run `memspec anchor <id> <files...>` to link to source files.
-- After committing changes, run `memspec reconcile` — it lists memories whose anchored files changed.
-- Resolve each candidate: `memspec verify <id>` (still true), `memspec supersede <id> --reason ... --body ...`
-  (now wrong), or `memspec anchor <id> <files...>` (still true against the new code; re-baseline).
-- When you re-confirm any memory is still accurate, record it with `memspec verify <id>` — this refreshes
-  its freshness signal and resets the check_by clock. Re-verification that isn't recorded is invisible.
-- Verifying a memory with no anchors requires `--evidence "what you checked"`. A bare self-verify
-  is rejected — state the evidence or anchor the memory.
+If a claim describes code, pass `anchors` in the same `memspec_remember` call.
+If `remember` refuses your write as a near-duplicate, that's the system working:
+verify the match if it's right, supersede it if it's wrong. Use `force: true` only
+when the claims are genuinely distinct.
 
 ### Flags are work orders
-- A search result or status entry marked **stale**: the TTL passed without re-verification.
-  Re-check it against the world before relying on it, then `memspec verify` (with evidence)
-  or `memspec supersede` it. Stale items are never auto-deleted; resolving the flag is your job.
-- A verify that returns **needs_review** (anchor drift, or "anchor in repo X, fetch to verify"):
-  read the changed files, then verify, supersede, or re-anchor. The memory is left untouched
-  until you act.
-- A record with `source_kind: operator` is operator-stated knowledge. Superseding it requires
-  `--override-operator` — use it only with explicit cause, and say so in the reason.
-- Physical removal is `memspec sweep`, an operator-run CLI command. Don't try to delete
-  memories yourself; supersede or retract instead.
+- A result marked **stale** or **drifted**: re-check it against the world before relying
+  on it, then `memspec_verify` (with evidence) or `memspec_supersede`. Unrecorded
+  re-verification is invisible.
+- A result marked **conflicting**: do not silently pick a side. Resolve it — supersede
+  the wrong one (or merge with `merge_from`), verify the right one — then proceed.
+- After committing code changes, run `memspec_reconcile` and resolve its candidates.
 
-### Memory hygiene
-- **Search before remembering.** Run `memspec search <topic>` first. If a similar memory exists and is wrong,
-  `memspec supersede` it; if it exists and is right, `memspec verify` it — don't add a duplicate.
-- **Don't ask permission** to write, supersede, or verify memories. Memory upkeep is the agent's job;
-  asking is friction. The bar is: would a future agent starting cold benefit?
-- **Run `memspec status` periodically** and review stale items, anchor drift, conflicts, and sweep candidates.
-
-### Guidelines
-- Only write knowledge that helps a future agent starting cold. No session transcripts.
-- If the store is thin, persist stable facts and decisions you discover while scanning the repo.
-- If you discover memory drift, correct the stale memory — don't leave both versions active.
-- Never store secrets in memory files.
-- When classifying, ask: does a future agent need this to understand *why* (decision), to *do something* (procedure), or to know *what's true* (fact)?
+### Boundaries
+- Don't ask permission for memory upkeep — write, supersede, verify, anchor freely.
+  The bar: would a future agent starting cold benefit?
+- Claims marked `[op]` are operator-sourced. Superseding one requires
+  `override_operator: true` — use it only with explicit cause, and say so in the reason.
+- Knowledge only. No session transcripts, no secrets, nothing point-in-time as a claim
+  (that's what `observe` is for).
 ```

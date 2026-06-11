@@ -2,6 +2,18 @@
 
 Portable, file-canonical memory for AI agents.
 
+## What's new in v0.3
+
+v0.3 ("witnessed claims") replaces confidence scores with evidence: every claim
+carries how it was last witnessed (`anchor`, `operator`, `evidence`, or
+`assertion`), conflicts are first-class edges, and the boot context opens with
+a "Needs attention" maintenance queue. It is a breaking release — MCP tools
+were renamed (`memspec_add` → `memspec_remember`, `memspec_correct` →
+`memspec_supersede`, with deprecation aliases through v0.3) and six tools were
+deleted, schema fields were renamed, and a one-shot `memspec migrate` command
+upgrades existing stores. See [MIGRATION-v0.3.md](MIGRATION-v0.3.md) for the
+upgrade path and [CHANGELOG.md](CHANGELOG.md) for the full list of changes.
+
 ## The Problem
 
 AI coding agents wake up with amnesia. Every session starts cold — no memory of what was decided, what failed, what the project's tribal knowledge says. Teams solve this with scattered markdown files, prompt stuffing, or bespoke database-backed memory services that create vendor lock-in and operational overhead.
@@ -84,11 +96,11 @@ observe → classify → [active] → stale flag → sweep → archive
                         └─────────────┘
 ```
 
-- **captured** → raw observation, not yet classified
-- **active** → classified, available for retrieval, ranked by confidence
-- **active + stale** → TTL expired; still retrievable, flagged for re-verification or correction
-- **corrected** → superseded by newer knowledge, pointer to replacement and durable reason preserved
-- **archived** → retired via operator-run `memspec sweep`; retained in git history
+- **observation** → point-in-time note with hard expiry, not yet (and maybe never) a claim
+- **active** → a live claim, available for retrieval, ranked by witness freshness and usage
+- **active + stale** → `check_by` passed; still retrievable, flagged for re-verification or supersession
+- **superseded** → replaced by newer knowledge, pointer to replacement and durable reason preserved
+- **retired** → removed via operator-run `memspec sweep`; retained in git history
 
 No transition requires human approval. Corrections create new memories and link back to what they replaced. The full evolution is in git.
 
@@ -101,7 +113,7 @@ No transition requires human approval. Corrections create new memories and link 
 | procedure | 90 days |
 | observation | 7 days |
 
-Per-item overrides via `decay_after` in frontmatter. Use `never` for genuinely permanent knowledge.
+Per-item overrides via `check_by` in frontmatter. Use `never` for genuinely permanent knowledge.
 
 ### Code-anchored verification
 
@@ -110,22 +122,23 @@ the moment the auth implementation ships, not 90 days later. Memspec closes that
 three operations:
 
 - **`memspec anchor <id> <files...>`** links a memory to the files it depends on, recording
-  each file's git blob SHA (`ext.code_anchors`). Anchoring asserts the memory is true against
-  the current file state.
+  each file's git blob SHA in the `anchors` frontmatter field. Anchoring asserts the memory is
+  true against the current file state.
 - **`memspec verify <id>`** records "this memory is still true as of now." If the memory has
   anchors, each anchored file is checked first — drifted anchors return `needs_review` without
   touching the memory. Anchorless memories require `--evidence "what you checked"`; a bare
-  self-verify is rejected. A clean verify refreshes `last_verified`, bumps confidence, resets
-  the decay clock, and clears any stale flag.
+  self-verify is rejected. A clean verify refreshes `last_verified`, records the witness in
+  `verified_with`, resets the `check_by` clock, and clears any stale flag.
   Anchors may reference files in another repo (`repo` field on the anchor); if that repo isn't
   checked out next to the project (or under `anchors.repo_search_paths` in `config.yaml`),
   verify flags the memory for review instead of failing.
 - **`memspec reconcile`** scans all anchored memories for drift (including uncommitted edits)
   and reports candidates for review. Run it after landing commits; resolve each candidate with
-  `verify` (still true), `correct` (now wrong), or `anchor` (still true, re-baseline).
+  `verify` (still true), `supersede` (now wrong), or `anchor` (still true, re-baseline).
 
-`memspec decay` and `memspec status` surface anchor drift alongside TTL expiry, but drifted
-memories are never auto-archived — code change is a signal for review, not deletion.
+`memspec status` and the boot context's "Needs attention" section surface anchor drift
+alongside stale flags, but drifted memories are never auto-archived — code change is a signal
+for review, not deletion.
 
 ## Install
 
@@ -178,43 +191,42 @@ The agent uses these commands (via shell, MCP, or programmatic access) as part o
 
 ```bash
 # Learn something → write it down
-memspec add fact "API uses JWT" \
+memspec remember fact "API uses JWT" \
   --body "JWT with 15min expiry and refresh tokens" \
   --source agent --tags auth,api
 
-memspec add decision "REST over GraphQL" \
+memspec remember decision "REST over GraphQL" \
   --body "REST for simplicity — most consumers are CLI tools" \
-  --source agent --decay-after never
+  --source agent --check-by never
 
-memspec add procedure "Deploy bot" \
-  --body "SSH to server, git pull, pm2 restart" \
-  --source agent --tags deploy
+# A claim about code? Anchor it in the same call.
+memspec remember fact "Auth is still a mockup" \
+  --body "login() returns a hardcoded session" \
+  --source agent --anchor src/auth/login.ts
 
 # Need context → search for it
 memspec search "auth"
 memspec search "deploy" --type procedure --json
 
-# Knowledge is stale → correct it (the reason is persisted on both records)
-memspec correct ms_01HXK... --reason "Migrated to OAuth" \
-  --replace "Now uses OAuth2 with PKCE" \
+# Knowledge is stale → supersede it (the reason is persisted on every record involved)
+memspec supersede ms_01HXK... --reason "Migrated to OAuth" \
+  --body "Now uses OAuth2 with PKCE" \
   --title "Auth uses OAuth2 PKCE"
 
-# Found a duplicate → merge it into the survivor instead of minting a third copy
-memspec correct ms_01HXJ... --reason "Duplicate of ms_01HXK..." \
-  --supersede-by ms_01HXK...
+# Found duplicates → merge them into the survivor instead of minting a third copy
+memspec supersede ms_01HXK... --reason "Duplicates of the surviving claim" \
+  --merge-from ms_01HXJ...,ms_01HXI...
 
 # Still true → say how you know (required when the memory has no code anchors)
 memspec verify ms_01HXK... --evidence "checked src/auth/oauth.ts, PKCE flow present"
 
-# Housekeeping (agent runs periodically; decay flags stale, never deletes)
+# Housekeeping readout (schema check, stale flags, drift, conflicts, sweep candidates)
 memspec status
-memspec validate
-memspec decay --dry-run
 ```
 
-`--source` is required on `add` (the MCP server defaults it to the connected client name), and
-correcting an operator-sourced record (`source_kind: operator`) requires `--override-operator` —
-the override is logged into the correction reason.
+`--source` is required on `remember` (the MCP server defaults it to the connected client name), and
+superseding an operator-sourced record (`source_kind: operator`) requires `--override-operator` —
+the override is logged into the persisted reason.
 
 No human in the loop for day-to-day memory operations. The agent decides what to remember, when to search, and when knowledge has gone stale. The human sees the results in git.
 
@@ -254,9 +266,9 @@ memspec-mcp
 memspec-mcp --cwd /path/to/project
 ```
 
-Exposed tools: `memspec_search`, `memspec_get`, `memspec_add`, `memspec_promote`, `memspec_verify`, `memspec_anchor`, `memspec_correct`, `memspec_reconcile`, `memspec_consolidate`, `memspec_status`, `memspec_validate`, `memspec_decay`, `memspec_init`, `memspec_stores`
+Exposed tools: `memspec_search`, `memspec_get`, `memspec_remember`, `memspec_supersede`, `memspec_observe`, `memspec_verify`, `memspec_anchor`, `memspec_reconcile`, `memspec_status` — plus deprecation aliases `memspec_add` and `memspec_correct` that forward to the renamed tools (removed in v0.4).
 
-`memspec sweep` is deliberately CLI-only — physical removal of memories is an operator act, not an agent surface.
+`memspec init`, `memspec sweep`, `memspec stores`, and `memspec migrate` are deliberately CLI-only — store creation and physical removal are operator acts, not an agent surface.
 
 ### Host Registration
 
@@ -300,24 +312,24 @@ memspec init --cwd ~/.memspec
   config.yaml          # Search engine, embeddings, decay rules
 ```
 
-Each memory is a markdown file with YAML frontmatter (id, type, state, confidence, source, tags, timestamps, decay rules). Human-readable, git-diffable, greppable.
+Each memory is a markdown file with YAML frontmatter (id, kind, type, state, source, source_kind, verified_with, tags, timestamps, check_by, anchors). Human-readable, git-diffable, greppable.
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `memspec init` | Create `.memspec/` and configure search engine |
-| `memspec add <type> <title> --source <who>` | Add a fact, decision, or procedure (`--source` required) |
+| `memspec remember <type> <title> --source <who> [--anchor <files...>] [--pin] [--check-by <ts\|never>]` | Record a fact, decision, or procedure (`--source` required; anchors inline; `--pin` is operator-only) |
+| `memspec observe <text> [--ttl <dur>]` | Capture a point-in-time observation with hard expiry (default 7d) |
 | `memspec search <query>` | Search active memories (stale items are returned flagged) |
 | `memspec context [--format] [--query] [--type]` | Emit a token-budgeted memory summary for agent context injection |
-| `memspec correct <id> --reason "..." [--replace] [--title] [--supersede-by <id>] [--override-operator]` | Correct, retitle, or merge a memory; reason persisted on both records |
+| `memspec supersede <id> --reason "..." [--body] [--title] [--merge-from <ids>] [--override-operator]` | Replace, retract, or merge memory; reason persisted on every record involved |
 | `memspec verify <id> [--evidence "..."]` | Record that a memory is still true; checks code anchors, requires evidence when anchorless |
 | `memspec anchor <id> <files...> [--replace]` | Link a memory to the files it depends on |
 | `memspec reconcile [--since <ref>] [--json]` | Find anchored memories whose code has drifted |
-| `memspec status` | Store summary (counts, decay warnings, anchor drift, recent items) |
-| `memspec decay [--dry-run]` | Flag items past TTL as stale (never deletes); reports anchor drift |
+| `memspec status` | The single maintenance readout (counts, witness classes, stale flags, anchor drift, conflicts, schema violations, sweep candidates) |
 | `memspec sweep [--dry-run]` | Interactively retire stale-flagged items (the only removal path) |
-| `memspec validate` | Check all memory files against schema |
+| `memspec migrate [--apply] [--override source=tier]` | One-shot v0.2 → v0.3 store migration (idempotent; dry-run by default) |
 
 ## Session-start context injection
 

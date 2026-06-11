@@ -1,10 +1,49 @@
 # Changelog
 
-## 0.3.0 — in progress
+## 0.3.0 — 2026-06-11
 
 Witnessed claims, full slice. Schema rename, confidence retirement, dual-mode
-reader, one-shot migrate CLI. Reader accepts v0.2 records for one version;
-writer emits v0.3 only.
+reader, one-shot migrate CLI, search rebuild, boot context rewrite. Reader
+accepts v0.2 records for one version; writer emits v0.3 only. Supersedes the
+v0.2 "first slice" conceptually — same problem space, breaking redesign.
+
+**Upgrading from v0.2 or earlier? Read [MIGRATION-v0.3.md](MIGRATION-v0.3.md).**
+
+### ⚠ Breaking changes
+
+- **MCP tools renamed.** `memspec_add` → `memspec_remember`,
+  `memspec_correct` → `memspec_supersede`. Deprecation aliases answer under
+  the old names for this release only (see below); they are removed in v0.4.
+- **Six MCP tools deleted with no successor:** `memspec_promote`,
+  `memspec_consolidate`, `memspec_validate`, `memspec_decay`,
+  `memspec_init`, `memspec_stores`. Schema checking lives in
+  `memspec_status`; merging lives in `memspec_supersede` + `merge_from`;
+  stale flagging is automatic at read time; `init`/`stores` are CLI-only.
+- **Schema field renames** (writer emits v0.3 only; reader is dual-mode for
+  one version): `decay_after` → `check_by`, `corrects` → `supersedes`
+  (string → array), `corrected_by` → `superseded_by`, `correction_reason` →
+  `supersede_reason`, `ext.code_anchors` → top-level `anchors`.
+- **State enum collapsed** to `active | superseded | retired`; the old
+  `captured | corrected | decayed | archived` values are normalized on read.
+- **`confidence` deleted.** Legacy values move to `ext.legacy_confidence`
+  and are used nowhere; the `min_confidence` profile knob is a no-op.
+- **Dedup refuses.** `remember` reports near-duplicates and points at
+  `supersede` instead of silently writing a conflicting twin.
+- **Anchorless `verify` requires evidence.** A bare self-verify is rejected.
+- **Operator records are protected.** Superseding a claim with effective
+  `source_kind: operator` requires `override_operator: true`, and the
+  override is logged into the persisted reason.
+- **`source` is required** on every write; `"unknown"` is rejected. The MCP
+  server defaults to the connected client name.
+- **Boot context format changed.** New header
+  (`## Project memory — N active claims, M need attention …`), new
+  `Needs attention` / `Pinned` / `Working set` sections, ids and witness
+  markers on every line. Anything parsing the old render will break.
+- **CLI deprecations:** `memspec add`, `memspec correct`,
+  `memspec validate`, `memspec consolidate`, `memspec decay`,
+  `memspec promote` print deprecation banners and limp through one release;
+  all are gone in v0.4. `memspec migrate` files relocate to their v0.3 home
+  (active claims to `memory/{type}s/`, superseded/retired to `archive/`).
 
 ### Done
 - **Schema rename.** `decay_after` → `check_by`, `corrects`/`corrected_by` →
@@ -65,16 +104,37 @@ writer emits v0.3 only.
   report results so scripts limp through one release; the commands and the
   MCP-equivalent tools are gone in v0.4.
 
-### Deferred to 0.3 (later phases — not in this slice)
-- Search rebuild — single search path, per-set BM25 normalization, optional
-  bodies in budget, witness/stale/conflict fields, `usage.jsonl` writes,
-  mtime-cached on-disk FTS index (Phase 4).
-- Boot context renderer rewrite — per-type freshness half-lives, usage
-  boost, pinned and needs-attention sections, witness markers in every line
-  (Phase 5).
-- Config (`~/.memspec/config.yaml`), dream/digest scripts, `CLAUDE.md` and
-  `AGENTS-ADDON.md` rewrite (Phase 6).
-- Run migrate on the live `~/.memspec/` store (Phase 7 — Siim-supervised).
+- **Search rebuilt (Phase 4).** Single execution path, per-set BM25
+  normalization, mtime-cached on-disk FTS index, `usage.jsonl` writes on
+  result hits (feeds the boot ranking's usage boost). Results carry
+  witness, stale, and conflict fields; `full=true` returns bodies inline
+  under a token budget.
+- **Boot context rewritten (Phase 5).** Ranking is
+  `type_weight × freshness × usage_boost` with per-type half-lives
+  (decision 180d, procedure 90d, fact 45d) clocked from `last_verified`.
+  New sections above the working set: `Needs attention` (cap 3 — stale
+  claims and drifted anchors, each with a scripted next move) and `Pinned`
+  (cap 5, operator-only via the new `memspec remember --pin` CLI flag,
+  deliberately absent from MCP). All sections spend from one 2000-token
+  budget; the header carries store size and attention count.
+- **`AGENTS-ADDON.md` rewritten.** Half the length — every instruction the
+  tools now enforce was deleted; what remains is judgment the tools can't
+  have, plus the conflict-resolution script that was missing.
+
+### Deprecation aliases (removed in v0.4)
+
+`memspec@0.2.0` is live on npm, so the renamed MCP primitives keep
+answering under their old names for one minor version: `memspec_add`
+forwards to `memspec_remember`, `memspec_correct` to `memspec_supersede`
+(`replace` → `body`; `supersede_by` → merge into the named survivor).
+Every shim response carries
+`_deprecated: "use memspec_<new>; will be removed in v0.4"` plus a
+DEPRECATED text block, and the server logs a warning to stderr. The six
+deleted tools have no successor and no shim.
+
+### Not in this release
+- Migrating the operator's live `~/.memspec/` store (Phase 7 — manual,
+  operator-supervised; see MIGRATION-v0.3.md for the procedure).
 
 ## 0.2.0 — Witnessed Claims, first slice
 
