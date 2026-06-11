@@ -228,13 +228,16 @@ export class MemspecStore {
       const now = Date.now();
       const phrase = terms.join(' ');
 
-      const scored = matches.map(({ id, bm25Score }) => {
+      // Pre-pass: collect raw FTS + phrase scores so we can normalize per-set
+      // before the weighted combination. Raw BM25 sits in the 3–15 range
+      // unbounded; without normalization the relevance weight is the only
+      // dial that ever moves the ranking. Per-set normalization makes the
+      // profile ranking ratios (relevance vs recency) actually apply.
+      const rawScored = matches.map(({ id, bm25Score }) => {
         const item = itemMap.get(id);
         if (!item) return null;
 
-        // FTS5 rank: bm25() returns negative values, so invert it.
         const ftsScore = -bm25Score;
-
         const titleLower = item.title.toLowerCase();
         const tagsLower = item.tags.join(' ').toLowerCase();
         const bodyLower = item.body.toLowerCase();
@@ -244,17 +247,23 @@ export class MemspecStore {
           else if (tagsLower.includes(phrase)) phraseBonus = 4;
           else if (bodyLower.includes(phrase)) phraseBonus = 3;
         }
+        const rawRelevance = ftsScore + phraseBonus;
 
         const ageMs = Math.max(0, now - Date.parse(item.created));
         const ageDays = ageMs / (24 * 60 * 60 * 1000);
         const recency = 1 / (1 + ageDays);
 
-        const score =
-          ((ftsScore + phraseBonus) * relevanceWeight) +
-          (recency * recencyWeight);
+        return { item, rawRelevance, recency };
+      }).filter((entry): entry is { item: MemoryItem; rawRelevance: number; recency: number } => entry !== null);
 
-        return { item, score };
-      }).filter((entry): entry is { item: MemoryItem; score: number } => entry !== null);
+      // Per-set relevance normalization → [0, 1]. recency is already in [0, 1].
+      const maxRelevance = rawScored.reduce((m, r) => Math.max(m, r.rawRelevance), 0);
+      const denom = maxRelevance > 0 ? maxRelevance : 1;
+
+      const scored = rawScored.map(({ item, rawRelevance, recency }) => ({
+        item,
+        score: (rawRelevance / denom) * relevanceWeight + recency * recencyWeight,
+      }));
 
       return scored
         .sort((a, b) => b.score - a.score)
