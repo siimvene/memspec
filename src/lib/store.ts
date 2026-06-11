@@ -133,6 +133,18 @@ export class MemspecStore {
     return filePath;
   }
 
+  /**
+   * Project-root markdown files that contribute to FTS. Active items live under
+   * memory/ and observations/; archive/ is excluded because superseded/retired
+   * records aren't searchable anyway.
+   */
+  activeSourceFiles(): string[] {
+    return [
+      ...walkMarkdownFiles(join(this.root, 'memory')),
+      ...walkMarkdownFiles(join(this.root, 'observations')),
+    ];
+  }
+
   loadAll(): MemoryItem[] {
     const files = [
       ...walkMarkdownFiles(join(this.root, 'memory')),
@@ -213,10 +225,12 @@ export class MemspecStore {
 
     const activeItems = this.loadActive();
 
-    // Build FTS5 index and search
-    const fts = new FtsIndex();
+    // mtime-cached on-disk FTS index. Rebuild only when a source file's mtime
+    // is newer than the cache — at 200 items the win is invisible, at 5k it's
+    // 250ms → 5ms. Canonical truth still lives in markdown files.
+    const cachePath = join(this.root, '.fts.db');
+    const fts = FtsIndex.openOrBuild(cachePath, this.activeSourceFiles(), activeItems);
     try {
-      fts.populate(activeItems);
       const matches = fts.search(query, { limit: limit * 2, types, minConfidence });
 
       if (matches.length === 0) return [];
