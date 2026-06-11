@@ -7,6 +7,22 @@ import { validateFrontmatter } from './schema.js';
 import type { MemoryFrontmatter, MemoryItem, MemoryType } from './types.js';
 import matter from 'gray-matter';
 
+/**
+ * v0.3: items past check_by are stale at read time, even when the on-disk
+ * frontmatter hasn't been touched yet. The flag is computed lazily so callers
+ * (search, sweep, status) see the current state without a separate decay run.
+ * Files are never mutated here — physical retirement is still `memspec sweep`.
+ */
+function withLazyStale(item: MemoryItem): MemoryItem {
+  if (item.stale) return item;
+  if (item.check_by === 'never' || !item.check_by) return item;
+  if (item.kind === 'observation') return item;
+  const expiry = Date.parse(item.check_by);
+  if (Number.isNaN(expiry)) return item;
+  if (Date.now() <= expiry) return item;
+  return { ...item, stale: true };
+}
+
 function walkMarkdownFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
 
@@ -156,7 +172,9 @@ export class MemspecStore {
   }
 
   loadActive(): MemoryItem[] {
-    return this.loadAll().filter((item) => item.state === 'active');
+    return this.loadAll()
+      .filter((item) => item.state === 'active')
+      .map((item) => withLazyStale(item));
   }
 
   findById(id: string): MemoryItem | null {
