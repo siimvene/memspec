@@ -152,9 +152,10 @@ program
   .requiredOption('--reason <text>', 'why this is wrong or stale')
   .option('--cwd <path>', 'project root')
   .option('--replace <text>', 'replacement content')
+  .option('--title <text>', 'fresh title for the replacement (defaults to the old title)')
   .option('--source <source>', 'corrector identifier')
   .action((id: string, options: {
-    cwd?: string; reason: string; replace?: string; source?: string;
+    cwd?: string; reason: string; replace?: string; title?: string; source?: string;
   }) => {
     console.log(runCorrect(id, options));
   });

@@ -123,6 +123,26 @@ test('correct resets the replacement decay clock to the type default', async () 
   assert.ok(Math.abs(decayAfter - expected) < 2 * dayMs, 'decay clock should reset to the 90d fact default');
 });
 
+test('correct --title gives the replacement a fresh title', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await addAndGetId(target);
+
+  await runCli([
+    'correct', id,
+    '--reason', 'Migrated to OAuth',
+    '--replace', 'Now uses OAuth2 with PKCE',
+    '--title', 'Auth uses OAuth2 PKCE',
+    '--cwd', target,
+    '--source', 'test',
+  ]);
+
+  const factEntries = await readdir(join(target, '.memspec', 'memory', 'facts'));
+  const content = await readText(join(target, '.memspec', 'memory', 'facts', factEntries[0]));
+  assert.match(content, /# Auth uses OAuth2 PKCE/);
+  assert.doesNotMatch(content, /# Old auth/);
+});
+
 test('correct fails on nonexistent ID', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);

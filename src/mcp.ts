@@ -288,17 +288,19 @@ server.tool(
     id: z.string().describe('Memory ID to correct'),
     reason: z.string().describe('Why this memory is wrong or stale'),
     replace: z.string().optional().describe('Replacement content (creates new memory)'),
+    title: z.string().optional().describe('Fresh title for the replacement (defaults to the old title)'),
     source: z.string().optional().describe('Who is making the correction'),
   },
-  async ({ id, reason, replace, source }) => {
+  async ({ id, reason, replace, title, source }) => {
     try {
-      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, source });
+      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, title, source });
       return {
         content: [{ type: 'text' as const, text: result }],
         structuredContent: {
           id,
           reason,
           replace: replace ?? null,
+          title: title ?? null,
           source: source ?? null,
         },
       };

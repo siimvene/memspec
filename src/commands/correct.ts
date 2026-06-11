@@ -6,6 +6,7 @@ export interface CorrectOptions {
   cwd?: string;
   reason: string;
   replace?: string;
+  title?: string;
   source?: string;
 }
 
@@ -45,7 +46,7 @@ export function runCorrect(targetId: string, options: CorrectOptions): string {
       last_verified: now,
       corrects: target.id,
       correction_reason: options.reason,
-      title: target.title,
+      title: options.title ?? target.title,
       body: options.replace,
     });
 
