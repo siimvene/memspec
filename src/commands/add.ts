@@ -1,5 +1,6 @@
 import { ulid } from 'ulid';
 import { getDecayDays, loadConfig } from '../lib/config.js';
+import { inferSourceKind } from '../lib/source.js';
 import { MemspecStore } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryType } from '../lib/types.js';
 
@@ -49,6 +50,14 @@ function parseTags(raw?: string): string[] {
 
 export function runAdd(typeInput: string, title: string, options: AddOptions): AddResult {
   const type = assertMemoryType(typeInput);
+
+  const source = options.source?.trim();
+  if (!source || source.toLowerCase() === 'unknown') {
+    throw new Error(
+      'source is required and may not be "unknown" — pass --source <who-is-writing> (e.g. --source human:siim, --source claude-code)',
+    );
+  }
+
   const store = new MemspecStore(options.cwd);
   store.init();
 
@@ -84,7 +93,8 @@ export function runAdd(typeInput: string, title: string, options: AddOptions): A
     state,
     confidence,
     created,
-    source: options.source ?? 'unknown',
+    source,
+    source_kind: inferSourceKind(source),
     tags: parseTags(options.tags),
     decay_after: toDecayAfter(type, decayDays, options.decayAfter),
     last_verified: created,

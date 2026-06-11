@@ -82,6 +82,7 @@ server.tool(
         last_verified: item.last_verified ?? item.created,
         source: item.source,
         tags: item.tags,
+        stale: item.stale ?? false,
         preview: previewFromBody(item.body),
       }));
 
@@ -167,7 +168,7 @@ server.tool(
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
     body: z.string().optional().describe('Full content/details'),
-    source: z.string().optional().describe('Who/what created this memory'),
+    source: z.string().optional().describe('Who/what created this memory (defaults to the connected client name; "unknown" is rejected)'),
     tags: z.string().optional().describe('Comma-separated tags'),
     decay_after: z.string().optional().describe('ISO timestamp or "never"'),
     store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
@@ -175,10 +176,11 @@ server.tool(
   async ({ type, title, body, source, tags, decay_after, store: storeName }) => {
     try {
       const cwd = storeName === 'global' ? homedir() : defaultCwd;
+      const resolvedSource = source ?? server.server.getClientVersion()?.name;
       const result = runAdd(type, title, {
         cwd,
         body,
-        source,
+        source: resolvedSource,
         tags,
         decayAfter: decay_after,
         store: storeName,
@@ -195,7 +197,7 @@ server.tool(
         structuredContent: {
           type,
           title,
-          source: source ?? 'unknown',
+          source: resolvedSource ?? null,
           tags: tags?.split(',').map((tag) => tag.trim()).filter(Boolean) ?? [],
           decay_after: decay_after ?? null,
           duplicates: result.duplicates ?? null,
@@ -229,10 +231,10 @@ server.tool(
 
 server.tool(
   'memspec_verify',
-  'Record that a memory is still true as of now. If the memory has code anchors, checks each anchored file against its recorded blob SHA first — drifted anchors return needs_review without touching the memory. Clean verification refreshes last_verified, bumps confidence, and resets the decay clock.',
+  'Record that a memory is still true as of now. If the memory has code anchors, checks each anchored file against its recorded blob SHA first — drifted anchors return needs_review without touching the memory. Anchorless memories require evidence text stating what you checked. Clean verification refreshes last_verified, bumps confidence, and resets the decay clock.',
   {
     id: z.string().describe('Memory ID to verify'),
-    evidence: z.string().optional().describe('Free-text reason/source for the verification'),
+    evidence: z.string().optional().describe('What you checked to confirm this is still true — required when the memory has no code anchors'),
     source: z.string().optional().describe('Who is verifying'),
   },
   async ({ id, evidence, source }) => {
@@ -287,17 +289,22 @@ server.tool(
     id: z.string().describe('Memory ID to correct'),
     reason: z.string().describe('Why this memory is wrong or stale'),
     replace: z.string().optional().describe('Replacement content (creates new memory)'),
+    title: z.string().optional().describe('Fresh title for the replacement (defaults to the old title)'),
+    supersede_by: z.string().optional().describe('Mark this memory as corrected by an existing memory ID instead of minting a new one (merges duplicates)'),
+    override_operator: z.boolean().optional().describe('Required to correct operator-sourced records; use only with explicit cause — the override is logged into the correction reason'),
     source: z.string().optional().describe('Who is making the correction'),
   },
-  async ({ id, reason, replace, source }) => {
+  async ({ id, reason, replace, title, supersede_by, override_operator, source }) => {
     try {
-      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, source });
+      const result = runCorrect(id, { cwd: defaultCwd, reason, replace, title, supersedeBy: supersede_by, overrideOperator: override_operator, source });
       return {
         content: [{ type: 'text' as const, text: result }],
         structuredContent: {
           id,
           reason,
           replace: replace ?? null,
+          title: title ?? null,
+          supersede_by: supersede_by ?? null,
           source: source ?? null,
         },
       };
@@ -364,19 +371,17 @@ server.tool(
 
 server.tool(
   'memspec_decay',
-  'Clean up expired memories. Facts decay after 90 days, decisions after 180. Use dry_run to preview, or archive to move expired items out of the active set.',
+  'Flag expired memories as stale. Facts expire after 90 days, decisions after 180. Expiry flags — it never deletes: stale items stay searchable, marked for review (verify or correct them). Physical retirement happens via the CLI command memspec sweep, operator-run.',
   {
     dry_run: z.boolean().optional().describe('Preview without changes'),
-    archive: z.boolean().optional().describe('Move to archive instead of marking decayed'),
   },
-  async ({ dry_run, archive }) => {
+  async ({ dry_run }) => {
     try {
-      const result = runDecay({ cwd: defaultCwd, dryRun: dry_run, archive });
+      const result = runDecay({ cwd: defaultCwd, dryRun: dry_run });
       return {
         content: [{ type: 'text' as const, text: result }],
         structuredContent: {
           dry_run: dry_run ?? false,
-          archive: archive ?? false,
           summary: result,
         },
       };

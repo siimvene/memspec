@@ -72,13 +72,63 @@ test('add rejects unsupported memory type', async () => {
   await runCli(['init', '--cwd', target]);
 
   await assert.rejects(
-    () => runCli(['add', 'rule', 'No secrets', '--cwd', target]),
+    () => runCli(['add', 'rule', 'No secrets', '--cwd', target, '--source', 'test']),
     (error: Error & { stderr?: string }) => {
       const output = `${error.message}\n${error.stderr ?? ''}`;
       assert.match(output, /Unsupported memory type/);
       return true;
     },
   );
+});
+
+test('add rejects missing source', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  await assert.rejects(
+    () => runCli(['add', 'fact', 'Sourceless', '--cwd', target]),
+    (error: Error & { stderr?: string }) => {
+      const output = `${error.message}\n${error.stderr ?? ''}`;
+      assert.match(output, /--source/);
+      return true;
+    },
+  );
+});
+
+test('add rejects source "unknown"', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  await assert.rejects(
+    () => runCli(['add', 'fact', 'Anonymous', '--cwd', target, '--source', 'unknown']),
+    (error: Error & { stderr?: string }) => {
+      const output = `${error.message}\n${error.stderr ?? ''}`;
+      assert.match(output, /source is required and may not be "unknown"/);
+      return true;
+    },
+  );
+
+  const factsDir = join(target, '.memspec', 'memory', 'facts');
+  assert.equal((await readdir(factsDir)).length, 0, 'rejected add must not write a file');
+});
+
+test('add infers source_kind from the source string', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  await runCli(['add', 'fact', 'Operator fact', '--cwd', target, '--source', 'human:siim']);
+  await runCli(['add', 'fact', 'Agent fact', '--cwd', target, '--source', 'claude-code']);
+
+  const factsDir = join(target, '.memspec', 'memory', 'facts');
+  const entries = await readdir(factsDir);
+  const kinds = new Map<string, string>();
+  for (const entry of entries) {
+    const parsed = matter(await readText(join(factsDir, entry)));
+    kinds.set(parsed.data.source, parsed.data.source_kind);
+  }
+
+  assert.equal(kinds.get('human:siim'), 'operator');
+  assert.equal(kinds.get('claude-code'), 'agent');
 });
 
 test('add uses decay defaults from config.yaml', async () => {

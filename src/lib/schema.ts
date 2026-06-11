@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LIFECYCLE_STATES, MEMORY_TYPES, type MemoryFrontmatter } from './types.js';
+import { LIFECYCLE_STATES, MEMORY_TYPES, SOURCE_KINDS, type MemoryFrontmatter } from './types.js';
 
 export const memoryFrontmatterSchema = z.object({
   id: z.string().regex(/^ms_[A-Z0-9]{26}$/, 'ID must be ms_ followed by a 26-char ULID'),
@@ -11,17 +11,20 @@ export const memoryFrontmatterSchema = z.object({
     'Must be a valid ISO 8601 date',
   ),
   source: z.string().min(1),
+  source_kind: z.enum(SOURCE_KINDS).optional(),
   tags: z.array(z.string()).default([]),
   decay_after: z.string().refine(
     (s) => s === 'never' || !isNaN(Date.parse(s)),
     'Must be ISO 8601 date or "never"',
   ),
+  stale: z.boolean().optional(),
   last_verified: z.string().refine(
     (s) => !isNaN(Date.parse(s)),
     'Must be a valid ISO 8601 date',
   ).optional(),
   corrects: z.string().optional(),
   corrected_by: z.string().optional(),
+  correction_reason: z.string().optional(),
   ext: z.record(z.string(), z.unknown()).optional(),
 });
 

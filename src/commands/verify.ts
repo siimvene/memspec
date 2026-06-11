@@ -28,22 +28,44 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
 
   const projectRoot = projectRootForStore(store.root);
   const anchors = getCodeAnchors(item);
-  const statuses = checkAnchors(projectRoot, anchors);
-  const drifted = statuses.filter((a) => a.status !== 'unchanged');
 
-  if (drifted.length > 0) {
+  // An anchorless verify has no mechanical witness — without evidence text it
+  // is the system trusting its own output. Refuse it.
+  if (anchors.length === 0 && !options.evidence?.trim()) {
+    throw new Error(
+      `${id} has no code anchors — anchorless verification requires --evidence "what you checked". ` +
+      'State the evidence, or anchor the memory to the files it depends on.',
+    );
+  }
+
+  const config = loadConfig(store.root);
+  const statuses = checkAnchors(projectRoot, anchors, { repoSearchPaths: config.anchors?.repo_search_paths });
+  const unavailable = statuses.filter((a) => a.status === 'repo_unavailable');
+  const drifted = statuses.filter((a) => a.status === 'changed' || a.status === 'missing');
+
+  if (drifted.length > 0 || unavailable.length > 0) {
     const lines = [
-      `${id} NEEDS REVIEW — ${drifted.length} of ${statuses.length} anchored file(s) changed since last verification:`,
+      `${id} NEEDS REVIEW — ${drifted.length + unavailable.length} of ${statuses.length} anchored file(s) could not be verified:`,
     ];
+    for (const a of unavailable) {
+      lines.push(`  anchor in repo ${a.repo}, fetch to verify: ${a.file}`);
+    }
     for (const a of drifted) {
       lines.push(`  ${a.status === 'missing' ? 'missing' : 'changed'}: ${a.file}`);
     }
-    lines.push(
-      '',
-      'Memory left untouched. Review the changed files, then either:',
-      `  memspec correct ${id} --reason "..." --replace "..."   # if the memory is now wrong`,
-      `  memspec anchor ${id} ${drifted.map((a) => a.file).join(' ')}   # if still true, re-baseline the anchors`,
-    );
+    lines.push('', 'Memory left untouched.');
+    if (drifted.length > 0) {
+      lines.push(
+        'Review the changed files, then either:',
+        `  memspec correct ${id} --reason "..." --replace "..."   # if the memory is now wrong`,
+        `  memspec anchor ${id} ${drifted.map((a) => a.file).join(' ')}   # if still true, re-baseline the anchors`,
+      );
+    }
+    if (unavailable.length > 0) {
+      lines.push(
+        `Check out the missing repo(s) next to this project (or add anchors.repo_search_paths to config.yaml), then re-run verify.`,
+      );
+    }
     return {
       id,
       status: 'needs_review',
@@ -55,7 +77,6 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   }
 
   const now = new Date().toISOString();
-  const config = loadConfig(store.root);
   const newConfidence = Math.min(1.0, item.confidence + 0.1);
 
   // Verification resets the decay clock: TTL counts from now, not from creation.
@@ -77,6 +98,8 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     confidence: newConfidence,
     decay_after: decayAfter,
     last_verified: now,
+    // A successful verify re-witnesses the claim: the stale flag is resolved.
+    stale: undefined,
     ext,
   });
 

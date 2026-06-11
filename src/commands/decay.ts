@@ -5,7 +5,6 @@ import { findDecayCandidates } from '../lib/decay.js';
 export interface DecayOptions {
   cwd?: string;
   dryRun?: boolean;
-  archive?: boolean;
 }
 
 export function runDecay(options: DecayOptions): string {
@@ -22,7 +21,7 @@ export function runDecay(options: DecayOptions): string {
   } else {
     lines.push(`${expired.length} item(s) past TTL:`, '');
     for (const c of expired) {
-      lines.push(`[${c.item.type}] ${c.item.title}`);
+      lines.push(`[${c.item.type}] ${c.item.title}${c.item.stale ? ' (already flagged stale)' : ''}`);
       lines.push(`  ${c.item.id} - ${c.reason}`);
     }
   }
@@ -44,22 +43,20 @@ export function runDecay(options: DecayOptions): string {
     return lines.join('\n');
   }
 
-  let decayed = 0;
-  let archived = 0;
-
-  for (const c of expired) {
-    if (options.archive) {
-      store.moveToArchive(c.item, 'archived');
-      archived++;
-    } else {
-      store.moveToArchive(c.item, 'decayed');
-      decayed++;
-    }
+  // Expiry flags, never deletes: stale items stay active and searchable,
+  // marked for review. Physical retirement is `memspec sweep`, operator-run.
+  const fresh = expired.filter((c) => !c.item.stale);
+  for (const c of fresh) {
+    c.item.stale = true;
+    store.updateItem(c.item);
   }
 
   lines.push('');
-  if (decayed > 0) lines.push(`Decayed ${decayed} item(s).`);
-  if (archived > 0) lines.push(`Archived ${archived} item(s).`);
+  lines.push(`Flagged ${fresh.length} item(s) stale.`);
+  if (expired.length > fresh.length) {
+    lines.push(`${expired.length - fresh.length} item(s) were already flagged.`);
+  }
+  lines.push('Stale items stay searchable; run `memspec sweep` to retire them interactively.');
 
   return lines.join('\n');
 }

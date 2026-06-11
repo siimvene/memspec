@@ -62,7 +62,7 @@ That architecture exists for one reason: long-lived project memory should be por
 - **Files are truth.** The derived index is disposable and rebuildable from files. If the index disappears, you lose speed, not data.
 - **Three memory types.** Facts, decisions, and procedures. That's the universal vocabulary every agent understands. Richer categorization uses the extension model, not new core types.
 - **Self-correction over curation.** Agents write, correct, and expire memories autonomously. When knowledge goes stale, the agent supersedes it — the old memory links to the replacement, and the evolution is traceable in git history. No human review queue.
-- **Decay is a feature.** Every memory has a TTL. Facts go stale as code changes. Procedures drift as tooling evolves. Forcing re-verification keeps memory honest.
+- **Decay is a flag, not a delete.** Every memory has a TTL, but expiry marks it `stale` rather than removing it — stale items stay searchable, carrying the flag so agents re-verify or correct before relying on them. Physical removal is `memspec sweep`, operator-approved, one prompt per item.
 - **Zero-infrastructure default.** `npm install` and `memspec init` — that's it. No accounts, no API keys, no hosted services. Works offline, works on any platform Node runs on.
 
 ## Memory Types
@@ -78,17 +78,17 @@ Observations that don't fit these types stay as raw observations until they do, 
 ## Memory Lifecycle
 
 ```
-observe → classify → [active] → decay → archive
+observe → classify → [active] → stale flag → sweep → archive
                         ↑            │
-                        │ correction  │
+                        │ correction / verify
                         └─────────────┘
 ```
 
 - **captured** → raw observation, not yet classified
 - **active** → classified, available for retrieval, ranked by confidence
-- **corrected** → superseded by newer knowledge, pointer to replacement preserved
-- **decayed** → TTL expired, removed from active retrieval
-- **archived** → retained in git history only
+- **active + stale** → TTL expired; still retrievable, flagged for re-verification or correction
+- **corrected** → superseded by newer knowledge, pointer to replacement and durable reason preserved
+- **archived** → retired via operator-run `memspec sweep`; retained in git history
 
 No transition requires human approval. Corrections create new memories and link back to what they replaced. The full evolution is in git.
 
@@ -114,8 +114,12 @@ three operations:
   the current file state.
 - **`memspec verify <id>`** records "this memory is still true as of now." If the memory has
   anchors, each anchored file is checked first — drifted anchors return `needs_review` without
-  touching the memory. A clean verify refreshes `last_verified`, bumps confidence, and resets
-  the decay clock.
+  touching the memory. Anchorless memories require `--evidence "what you checked"`; a bare
+  self-verify is rejected. A clean verify refreshes `last_verified`, bumps confidence, resets
+  the decay clock, and clears any stale flag.
+  Anchors may reference files in another repo (`repo` field on the anchor); if that repo isn't
+  checked out next to the project (or under `anchors.repo_search_paths` in `config.yaml`),
+  verify flags the memory for review instead of failing.
 - **`memspec reconcile`** scans all anchored memories for drift (including uncommitted edits)
   and reports candidates for review. Run it after landing commits; resolve each candidate with
   `verify` (still true), `correct` (now wrong), or `anchor` (still true, re-baseline).
@@ -190,15 +194,27 @@ memspec add procedure "Deploy bot" \
 memspec search "auth"
 memspec search "deploy" --type procedure --json
 
-# Knowledge is stale → correct it
+# Knowledge is stale → correct it (the reason is persisted on both records)
 memspec correct ms_01HXK... --reason "Migrated to OAuth" \
-  --replace "Now uses OAuth2 with PKCE"
+  --replace "Now uses OAuth2 with PKCE" \
+  --title "Auth uses OAuth2 PKCE"
 
-# Housekeeping (agent runs periodically)
+# Found a duplicate → merge it into the survivor instead of minting a third copy
+memspec correct ms_01HXJ... --reason "Duplicate of ms_01HXK..." \
+  --supersede-by ms_01HXK...
+
+# Still true → say how you know (required when the memory has no code anchors)
+memspec verify ms_01HXK... --evidence "checked src/auth/oauth.ts, PKCE flow present"
+
+# Housekeeping (agent runs periodically; decay flags stale, never deletes)
 memspec status
 memspec validate
 memspec decay --dry-run
 ```
+
+`--source` is required on `add` (the MCP server defaults it to the connected client name), and
+correcting an operator-sourced record (`source_kind: operator`) requires `--override-operator` —
+the override is logged into the correction reason.
 
 No human in the loop for day-to-day memory operations. The agent decides what to remember, when to search, and when knowledge has gone stale. The human sees the results in git.
 
@@ -238,7 +254,9 @@ memspec-mcp
 memspec-mcp --cwd /path/to/project
 ```
 
-Exposed tools: `memspec_search`, `memspec_get`, `memspec_add`, `memspec_promote`, `memspec_correct`, `memspec_status`, `memspec_validate`, `memspec_decay`, `memspec_init`, `memspec_stores`
+Exposed tools: `memspec_search`, `memspec_get`, `memspec_add`, `memspec_promote`, `memspec_verify`, `memspec_anchor`, `memspec_correct`, `memspec_reconcile`, `memspec_consolidate`, `memspec_status`, `memspec_validate`, `memspec_decay`, `memspec_init`, `memspec_stores`
+
+`memspec sweep` is deliberately CLI-only — physical removal of memories is an operator act, not an agent surface.
 
 ### Host Registration
 
@@ -289,15 +307,16 @@ Each memory is a markdown file with YAML frontmatter (id, type, state, confidenc
 | Command | Description |
 |---------|-------------|
 | `memspec init` | Create `.memspec/` and configure search engine |
-| `memspec add <type> <title>` | Add a fact, decision, or procedure |
-| `memspec search <query>` | Search active memories |
+| `memspec add <type> <title> --source <who>` | Add a fact, decision, or procedure (`--source` required) |
+| `memspec search <query>` | Search active memories (stale items are returned flagged) |
 | `memspec context [--format] [--query] [--type]` | Emit a token-budgeted memory summary for agent context injection |
-| `memspec correct <id> --reason "..."` | Correct or invalidate a memory |
-| `memspec verify <id> [--evidence "..."]` | Record that a memory is still true; checks code anchors |
+| `memspec correct <id> --reason "..." [--replace] [--title] [--supersede-by <id>] [--override-operator]` | Correct, retitle, or merge a memory; reason persisted on both records |
+| `memspec verify <id> [--evidence "..."]` | Record that a memory is still true; checks code anchors, requires evidence when anchorless |
 | `memspec anchor <id> <files...> [--replace]` | Link a memory to the files it depends on |
 | `memspec reconcile [--since <ref>] [--json]` | Find anchored memories whose code has drifted |
 | `memspec status` | Store summary (counts, decay warnings, anchor drift, recent items) |
-| `memspec decay [--dry-run] [--archive]` | Apply TTL rules to expired items; reports anchor drift |
+| `memspec decay [--dry-run]` | Flag items past TTL as stale (never deletes); reports anchor drift |
+| `memspec sweep [--dry-run]` | Interactively retire stale-flagged items (the only removal path) |
 | `memspec validate` | Check all memory files against schema |
 
 ## Session-start context injection

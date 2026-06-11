@@ -1,11 +1,19 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { CodeAnchor, MemoryItem } from './types.js';
 
 export interface AnchorStatus extends CodeAnchor {
   currentSha: string | null; // null when the file is missing or unreadable
-  status: 'unchanged' | 'changed' | 'missing';
+  // repo_unavailable: the anchor names a repo that is not checked out here —
+  // the claim cannot be witnessed locally, only flagged for review.
+  status: 'unchanged' | 'changed' | 'missing' | 'repo_unavailable';
+}
+
+export interface AnchorCheckOptions {
+  /** Directories searched (after the project root's parent) for cross-repo anchor checkouts. */
+  repoSearchPaths?: string[];
 }
 
 /** Project root for a store rooted at <project>/.memspec */
@@ -52,10 +60,38 @@ export function getCodeAnchors(item: MemoryItem): CodeAnchor[] {
   );
 }
 
+function expandHome(path: string): string {
+  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+}
+
+/** Locate a cross-repo anchor's checkout: sibling of the project root first, then configured search paths. */
+function resolveRepoRoot(projectRoot: string, repo: string, searchPaths: string[]): string | null {
+  const candidates = [
+    resolve(projectRoot, '..', repo),
+    ...searchPaths.map((path) => resolve(expandHome(path), repo)),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      // keep looking
+    }
+  }
+  return null;
+}
+
 /** Compare each anchor's recorded SHA against the file's current content. */
-export function checkAnchors(projectRoot: string, anchors: CodeAnchor[]): AnchorStatus[] {
+export function checkAnchors(projectRoot: string, anchors: CodeAnchor[], options: AnchorCheckOptions = {}): AnchorStatus[] {
   return anchors.map((anchor) => {
-    const currentSha = blobSha(resolve(projectRoot, anchor.file));
+    let root = projectRoot;
+    if (anchor.repo) {
+      const repoRoot = resolveRepoRoot(projectRoot, anchor.repo, options.repoSearchPaths ?? []);
+      if (!repoRoot) {
+        return { ...anchor, currentSha: null, status: 'repo_unavailable' as const };
+      }
+      root = repoRoot;
+    }
+    const currentSha = blobSha(resolve(root, anchor.file));
     const status: AnchorStatus['status'] =
       currentSha === null ? 'missing' : currentSha === anchor.sha ? 'unchanged' : 'changed';
     return { ...anchor, currentSha, status };

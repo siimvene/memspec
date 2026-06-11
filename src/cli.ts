@@ -14,6 +14,7 @@ import { runInit } from './commands/init.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
+import { runSweep } from './commands/sweep.js';
 import { runValidate } from './commands/validate.js';
 import { runVerify } from './commands/verify.js';
 import { loadConfig } from './lib/config.js';
@@ -63,7 +64,7 @@ program
   .argument('<title>', 'memory title')
   .option('--cwd <path>', 'project root')
   .option('--body <text>', 'memory body')
-  .option('--source <source>', 'creator identifier')
+  .requiredOption('--source <source>', 'creator identifier (required; "unknown" is rejected)')
   .option('--tags <tags>', 'comma-separated tags')
   .option('--decay-after <value>', 'ISO timestamp or "never"')
   .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
@@ -152,9 +153,12 @@ program
   .requiredOption('--reason <text>', 'why this is wrong or stale')
   .option('--cwd <path>', 'project root')
   .option('--replace <text>', 'replacement content')
+  .option('--title <text>', 'fresh title for the replacement (defaults to the old title)')
+  .option('--supersede-by <id>', 'mark this memory as corrected by an existing memory instead of minting a new one')
+  .option('--override-operator', 'required to correct operator-sourced records; logged into the correction reason')
   .option('--source <source>', 'corrector identifier')
   .action((id: string, options: {
-    cwd?: string; reason: string; replace?: string; source?: string;
+    cwd?: string; reason: string; replace?: string; title?: string; supersedeBy?: string; overrideOperator?: boolean; source?: string;
   }) => {
     console.log(runCorrect(id, options));
   });
@@ -169,12 +173,20 @@ program
 
 program
   .command('decay')
-  .description('Apply TTL decay to expired items')
+  .description('Flag items past TTL as stale (flag, not delete — retire via memspec sweep)')
   .option('--cwd <path>', 'project root')
   .option('--dry-run', 'preview without changes')
-  .option('--archive', 'move to archive instead of marking decayed')
-  .action((options: { cwd?: string; dryRun?: boolean; archive?: boolean }) => {
+  .action((options: { cwd?: string; dryRun?: boolean }) => {
     console.log(runDecay(options));
+  });
+
+program
+  .command('sweep')
+  .description('Interactively retire stale-flagged items (operator-run; the only path that removes memories)')
+  .option('--cwd <path>', 'project root')
+  .option('--dry-run', 'list candidates without prompting')
+  .action(async (options: { cwd?: string; dryRun?: boolean }) => {
+    console.log(await runSweep(options));
   });
 
 program

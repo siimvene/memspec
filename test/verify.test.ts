@@ -32,6 +32,25 @@ test('verify without anchors refreshes last_verified and decay clock', async () 
   assert.equal(after.ext.last_verification.evidence, 'checked manually');
 });
 
+test('verify rejects anchorless calls without evidence', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await addFact(target, 'Unwitnessed fact');
+  const factPath = join(target, '.memspec', 'memory', 'facts', `${id}.md`);
+  const before = await readText(factPath);
+
+  await assert.rejects(
+    () => runCli(['verify', id, '--cwd', target]),
+    (error: Error & { stderr?: string }) => {
+      assert.match(`${error.message}\n${error.stderr ?? ''}`, /requires --evidence/);
+      return true;
+    },
+  );
+
+  const after = await readText(factPath);
+  assert.equal(after, before, 'rejected verify must not mutate the memory file');
+});
+
 test('verify with unchanged anchors passes', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
@@ -89,6 +108,54 @@ test('verify with missing anchored file returns needs_review', async () => {
   );
 });
 
+test('verify flags repo-qualified anchor for review when the repo is not checked out', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await addFact(target, 'Cross-repo fact');
+  const factPath = join(target, '.memspec', 'memory', 'facts', `${id}.md`);
+
+  const parsed = matter(await readText(factPath));
+  parsed.data.ext = { code_anchors: [{ file: 'src/auth.ts', sha: 'deadbeef', repo: 'other-service' }] };
+  await writeFile(factPath, matter.stringify(parsed.content, parsed.data));
+  const before = await readText(factPath);
+
+  await assert.rejects(
+    () => runCli(['verify', id, '--cwd', target]),
+    (error: Error & { stdout?: string }) => {
+      assert.match(error.stdout ?? '', /NEEDS REVIEW/);
+      assert.match(error.stdout ?? '', /anchor in repo other-service, fetch to verify/);
+      return true;
+    },
+  );
+
+  const after = await readText(factPath);
+  assert.equal(after, before, 'repo_unavailable must not mutate the memory file');
+});
+
+test('verify resolves repo-qualified anchors against a sibling checkout', async () => {
+  const base = await makeTempProject();
+  const { mkdir } = await import('node:fs/promises');
+  const project = join(base, 'project');
+  const sibling = join(base, 'other-service');
+  await mkdir(project, { recursive: true });
+  await mkdir(sibling, { recursive: true });
+  await writeFile(join(sibling, 'auth.ts'), 'argon2id\n');
+
+  await runCli(['init', '--cwd', project]);
+  const id = await addFact(project, 'Sibling repo fact');
+  const factPath = join(project, '.memspec', 'memory', 'facts', `${id}.md`);
+
+  const { blobSha } = await import('../src/lib/anchors.js');
+  const sha = blobSha(join(sibling, 'auth.ts'));
+  const parsed = matter(await readText(factPath));
+  parsed.data.ext = { code_anchors: [{ file: 'auth.ts', sha, repo: 'other-service' }] };
+  await writeFile(factPath, matter.stringify(parsed.content, parsed.data));
+
+  const result = await runCli(['verify', id, '--cwd', project]);
+  assert.match(result.stdout, /Verified/);
+  assert.match(result.stdout, /1 anchor\(s\) unchanged/);
+});
+
 test('verify rejects non-active memories', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
@@ -115,7 +182,7 @@ test('verify keeps decay_after never untouched', async () => {
   const [entry] = await readdir(decisionsDir);
   const id = entry.replace(/\.md$/, '');
 
-  await runCli(['verify', id, '--cwd', target]);
+  await runCli(['verify', id, '--cwd', target, '--evidence', 'still locked in']);
 
   const after = matter(await readText(join(decisionsDir, entry))).data;
   assert.equal(after.decay_after, 'never');

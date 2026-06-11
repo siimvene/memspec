@@ -1,4 +1,6 @@
+import { getCodeAnchors } from '../lib/anchors.js';
 import { loadConfig } from '../lib/config.js';
+import { effectiveSourceKind } from '../lib/source.js';
 import { MemspecStore } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType } from '../lib/types.js';
 
@@ -13,7 +15,7 @@ export interface ContextOptions {
 
 const DEFAULT_BUDGET_TOKENS = 2000;
 const HARD_LIMIT = 20;
-const BODY_PREVIEW_CHARS = 200;
+const BODY_PREVIEW_CHARS = 120;
 
 function assertMemoryType(input: string): MemoryType {
   if ((MEMORY_TYPES as readonly string[]).includes(input)) {
@@ -51,18 +53,33 @@ function rankActive(items: MemoryItem[]): MemoryItem[] {
     .map(({ item }) => item);
 }
 
+/** Witness marker: anchored claims show the anchor; everything else shows verification age. */
+function witnessMarker(item: MemoryItem, now: number): string {
+  if (getCodeAnchors(item).length > 0) return '⚓';
+  const verified = Date.parse(item.last_verified ?? item.created);
+  const days = Math.max(0, Math.floor((now - verified) / (24 * 60 * 60 * 1000)));
+  return `✓${days}d`;
+}
+
+/**
+ * One booted memory per line, with its id so it is immediately actionable
+ * (verify/correct/anchor without a re-search to recover the handle).
+ */
+function formatLine(item: MemoryItem, now: number): string {
+  const preview = truncateBody(item.body);
+  const head = `- ${item.id} ${item.type} [${effectiveSourceKind(item)}] ${witnessMarker(item, now)}: ${item.title}`;
+  return preview ? `${head} — ${preview}` : head;
+}
+
 function renderMarkdown(items: MemoryItem[]): string {
   if (items.length === 0) {
     return '## Active project memory\n\n_No active memories._\n';
   }
 
+  const now = Date.now();
   const lines: string[] = ['## Active project memory', ''];
   for (const item of items) {
-    lines.push(`- **${item.title}** _(${item.type})_`);
-    const preview = truncateBody(item.body);
-    if (preview) {
-      lines.push(`  ${preview}`);
-    }
+    lines.push(formatLine(item, now));
   }
   lines.push('');
   return lines.join('\n');
@@ -90,11 +107,11 @@ function selectWithinBudget(items: MemoryItem[], budgetTokens: number, hardLimit
   // each item by rendering it through the same body-truncation path used by
   // the markdown formatter.
   const selected: MemoryItem[] = [];
+  const now = Date.now();
   let used = estimateTokens('## Active project memory\n\n');
   for (const item of items) {
     if (selected.length >= hardLimit) break;
-    const preview = truncateBody(item.body);
-    const cost = estimateTokens(`- **${item.title}** _(${item.type})_\n  ${preview}\n`);
+    const cost = estimateTokens(`${formatLine(item, now)}\n`);
     if (used + cost > budgetTokens && selected.length > 0) break;
     selected.push(item);
     used += cost;

@@ -4,6 +4,9 @@ export type MemoryType = typeof MEMORY_TYPES[number];
 export const LIFECYCLE_STATES = ['captured', 'active', 'corrected', 'decayed', 'archived'] as const;
 export type LifecycleState = typeof LIFECYCLE_STATES[number];
 
+export const SOURCE_KINDS = ['operator', 'agent', 'import'] as const;
+export type SourceKind = typeof SOURCE_KINDS[number];
+
 export interface MemoryFrontmatter {
   id: string;
   type: MemoryType;
@@ -11,11 +14,14 @@ export interface MemoryFrontmatter {
   confidence: number;
   created: string;
   source: string;
+  source_kind?: SourceKind; // trust tier inferred from source at write time
   tags: string[];
   decay_after: string; // ISO 8601 or "never"
+  stale?: boolean; // set by decay when TTL passes; cleared by verify; removal only via sweep
   last_verified?: string; // ISO 8601 — when this memory was last confirmed true (defaults to created)
   corrects?: string;
   corrected_by?: string;
+  correction_reason?: string; // why this record was corrected (on the archived original) or created (on the replacement)
   /**
    * Recommended ext field conventions:
    * - ext.confirmations: number — times this memory has been independently confirmed
@@ -37,6 +43,7 @@ export interface MemoryFrontmatter {
 export interface CodeAnchor {
   file: string; // path relative to the project root (POSIX separators)
   sha: string;  // git blob SHA of file content at anchor time
+  repo?: string; // when set, `file` lives in another repo checked out next to this project (or under a configured search path)
 }
 
 export interface MemoryItem extends MemoryFrontmatter {

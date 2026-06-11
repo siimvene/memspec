@@ -19,10 +19,26 @@ test('context returns markdown section listing active memories', async () => {
 
   const result = await runCli(['context', '--cwd', target]);
   assert.match(result.stdout, /## Active project memory/);
-  assert.match(result.stdout, /\*\*Auth uses JWT\*\* _\(fact\)_/);
-  assert.match(result.stdout, /\*\*Chose REST\*\* _\(decision\)_/);
-  assert.match(result.stdout, /JWT with 15min expiry/);
-  assert.match(result.stdout, /REST over GraphQL/);
+  // Each line carries id, type, source kind, and a witness marker so booted
+  // memories are immediately actionable.
+  assert.match(result.stdout, /- ms_[0-9A-HJKMNP-TV-Z]{26} fact \[agent\] ✓0d: Auth uses JWT — JWT with 15min expiry/);
+  assert.match(result.stdout, /- ms_[0-9A-HJKMNP-TV-Z]{26} decision \[agent\] ✓0d: Chose REST — REST over GraphQL/);
+});
+
+test('context marks anchored memories with the anchor witness', async () => {
+  const { writeFile } = await import('node:fs/promises');
+  const { readdir } = await import('node:fs/promises');
+  const { join: joinPath } = await import('node:path');
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target, '--no-install-hooks']);
+  await writeFile(joinPath(target, 'auth.py'), 'argon2id\n');
+  await runCli(['add', 'fact', 'Anchored fact', '--cwd', target, '--body', 'auth backend', '--source', 'test']);
+  const entries = await readdir(joinPath(target, '.memspec', 'memory', 'facts'));
+  const id = entries[0].replace(/\.md$/, '');
+  await runCli(['anchor', id, 'auth.py', '--cwd', target]);
+
+  const result = await runCli(['context', '--cwd', target]);
+  assert.match(result.stdout, /\[agent\] ⚓: Anchored fact/);
 });
 
 test('context --format json emits an array of items', async () => {
