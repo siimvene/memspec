@@ -134,6 +134,57 @@ server.tool(
   },
 );
 
+interface RememberArgs {
+  type: 'fact' | 'decision' | 'procedure';
+  title: string;
+  body?: string;
+  source?: string;
+  tags?: string[];
+  anchors?: string[];
+  check_by?: string;
+  store?: string;
+}
+
+async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName }: RememberArgs) {
+  try {
+    const cwd = storeName === 'global' ? homedir() : defaultCwd;
+    const resolvedSource = source ?? server.server.getClientVersion()?.name;
+    const result = runRemember(type, title, {
+      cwd,
+      body,
+      source: resolvedSource,
+      tags: tags?.join(','),
+      checkBy: check_by,
+      anchors,
+      store: storeName,
+    });
+
+    let text = result.message;
+    if (result.duplicates && result.duplicates.length > 0) {
+      const titles = result.duplicates.map((d) => d.title).join(', ');
+      text += `\n⚠ Potential duplicates found: ${titles}. Consider memspec_supersede instead.`;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text }],
+      structuredContent: {
+        id: result.id,
+        type,
+        title,
+        source: resolvedSource ?? null,
+        tags: tags ?? [],
+        check_by: check_by ?? null,
+        anchors: result.anchors,
+        verified_with: result.verified_with,
+        anchor_warnings: result.anchorWarnings,
+        duplicates: result.duplicates ?? null,
+      } as Record<string, unknown>,
+    };
+  } catch (err) {
+    return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+  }
+}
+
 server.tool(
   'memspec_remember',
   'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Search first to avoid duplicates.',
@@ -147,46 +198,43 @@ server.tool(
     check_by: z.string().optional().describe('ISO timestamp or "never" — overrides the type default TTL'),
     store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
   },
-  async ({ type, title, body, source, tags, anchors, check_by, store: storeName }) => {
-    try {
-      const cwd = storeName === 'global' ? homedir() : defaultCwd;
-      const resolvedSource = source ?? server.server.getClientVersion()?.name;
-      const result = runRemember(type, title, {
-        cwd,
-        body,
-        source: resolvedSource,
-        tags: tags?.join(','),
-        checkBy: check_by,
-        anchors,
-        store: storeName,
-      });
-
-      let text = result.message;
-      if (result.duplicates && result.duplicates.length > 0) {
-        const titles = result.duplicates.map((d) => d.title).join(', ');
-        text += `\n⚠ Potential duplicates found: ${titles}. Consider memspec_supersede instead.`;
-      }
-
-      return {
-        content: [{ type: 'text' as const, text }],
-        structuredContent: {
-          id: result.id,
-          type,
-          title,
-          source: resolvedSource ?? null,
-          tags: tags ?? [],
-          check_by: check_by ?? null,
-          anchors: result.anchors,
-          verified_with: result.verified_with,
-          anchor_warnings: result.anchorWarnings,
-          duplicates: result.duplicates ?? null,
-        },
-      };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
-    }
-  },
+  handleRemember,
 );
+
+interface SupersedeArgs {
+  id: string;
+  reason: string;
+  title?: string;
+  body?: string;
+  merge_from?: string[];
+  override_operator?: boolean;
+  source?: string;
+}
+
+async function handleSupersede({ id, reason, title, body, merge_from, override_operator, source }: SupersedeArgs) {
+  try {
+    const result = runSupersede(id, {
+      cwd: defaultCwd,
+      reason,
+      title,
+      body,
+      mergeFrom: merge_from,
+      overrideOperator: override_operator,
+      source,
+    });
+    return {
+      content: [{ type: 'text' as const, text: result.message }],
+      structuredContent: {
+        survivor_id: result.survivor_id,
+        superseded_ids: result.superseded_ids,
+        reason: result.reason,
+        source: source ?? null,
+      } as Record<string, unknown>,
+    };
+  } catch (err) {
+    return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+  }
+}
 
 server.tool(
   'memspec_supersede',
@@ -200,30 +248,7 @@ server.tool(
     override_operator: z.boolean().optional().describe('Required to supersede operator-sourced records; logged into the persisted reason.'),
     source: z.string().optional().describe('Who is performing the supersede'),
   },
-  async ({ id, reason, title, body, merge_from, override_operator, source }) => {
-    try {
-      const result = runSupersede(id, {
-        cwd: defaultCwd,
-        reason,
-        title,
-        body,
-        mergeFrom: merge_from,
-        overrideOperator: override_operator,
-        source,
-      });
-      return {
-        content: [{ type: 'text' as const, text: result.message }],
-        structuredContent: {
-          survivor_id: result.survivor_id,
-          superseded_ids: result.superseded_ids,
-          reason: result.reason,
-          source: source ?? null,
-        },
-      };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
-    }
-  },
+  handleSupersede,
 );
 
 server.tool(
@@ -345,6 +370,77 @@ server.tool(
     } catch (err) {
       return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
     }
+  },
+);
+
+// --- Deprecation shims (v0.2 names; removed in v0.4) ---
+//
+// Real v0.2 installs exist on npm. The renamed primitives keep answering
+// under their old names for one minor version, marked deprecated in every
+// response. Deleted tools (promote, consolidate, validate, decay, init,
+// stores) have no successor and get no shim.
+
+type ToolResult = Awaited<ReturnType<typeof handleRemember>>;
+
+function markDeprecated(result: ToolResult, oldName: string, newName: string): ToolResult {
+  // console.warn goes to stderr — stdout belongs to the stdio transport.
+  console.warn(`[memspec] ${oldName} is deprecated; use ${newName}. The alias will be removed in v0.4.`);
+  const deprecation = `use ${newName}; will be removed in v0.4`;
+  if (result.structuredContent) {
+    result.structuredContent._deprecated = deprecation;
+  }
+  result.content = [
+    ...result.content,
+    { type: 'text' as const, text: `⚠ DEPRECATED: ${oldName} — ${deprecation}.` },
+  ];
+  return result;
+}
+
+server.tool(
+  'memspec_add',
+  'DEPRECATED — renamed to memspec_remember in v0.3; this alias will be removed in v0.4. Records new project knowledge.',
+  {
+    type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
+    title: z.string().describe('Short title for the memory'),
+    body: z.string().optional().describe('Full content/details'),
+    source: z.string().optional().describe('Who/what created this memory (defaults to the connected client name; "unknown" is rejected)'),
+    tags: z.string().optional().describe('Comma-separated tags'),
+    decay_after: z.string().optional().describe('ISO timestamp or "never" (maps to check_by)'),
+    store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
+  },
+  async ({ type, title, body, source, tags, decay_after, store: storeName }) => {
+    const result = await handleRemember({
+      type,
+      title,
+      body,
+      source,
+      tags: tags ? tags.split(',').map((t) => t.trim()).filter(Boolean) : undefined,
+      check_by: decay_after,
+      store: storeName,
+    });
+    return markDeprecated(result, 'memspec_add', 'memspec_remember');
+  },
+);
+
+server.tool(
+  'memspec_correct',
+  'DEPRECATED — renamed to memspec_supersede in v0.3; this alias will be removed in v0.4. Fixes wrong or stale knowledge.',
+  {
+    id: z.string().describe('Memory ID to correct'),
+    reason: z.string().describe('Why this memory is wrong or stale'),
+    replace: z.string().optional().describe('Replacement content (maps to body)'),
+    title: z.string().optional().describe('Fresh title for the replacement (defaults to the old title)'),
+    supersede_by: z.string().optional().describe('Mark this memory as corrected by an existing memory ID (maps to a merge into that survivor)'),
+    override_operator: z.boolean().optional().describe('Required to correct operator-sourced records; logged into the persisted reason'),
+    source: z.string().optional().describe('Who is making the correction'),
+  },
+  async ({ id, reason, replace, title, supersede_by, override_operator, source }) => {
+    // v0.2 supersede_by = "an existing record replaces this one" — in v0.3
+    // terms that's a merge with the existing record as survivor.
+    const result = supersede_by
+      ? await handleSupersede({ id: supersede_by, reason, merge_from: [id], override_operator, source })
+      : await handleSupersede({ id, reason, title, body: replace, override_operator, source });
+    return markDeprecated(result, 'memspec_correct', 'memspec_supersede');
   },
 );
 
