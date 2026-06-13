@@ -6,6 +6,10 @@ Memspec is a specification for managing living project knowledge in AI agent wor
 
 This document is the portable specification. It is implementation-agnostic — any system that conforms to this spec is Memspec-compatible, regardless of language, storage backend, or agent runtime.
 
+### Relationship to OKF
+
+Google Cloud's [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) shares Memspec's file surface — markdown body, YAML frontmatter, directory-of-files, no SDK. It standardizes the *static* half of agent knowledge: catalogs of external assets (tables, metrics, runbooks, API endpoints) authored by enrichment agents or humans. Memspec covers the *working-memory* half: claims an agent writes about its own decisions, fixes, and discoveries during work, with first-class lifecycle — witness, supersession, conflict edges, drift detection. A Memspec memory is structurally a valid OKF concept (its `type` is one of `fact`, `decision`, or `procedure`). The formats are complementary, not competing.
+
 ### Changes in v0.3 (Witnessed Claims, full slice)
 
 v0.3 completes the witnessed-claims model: every memory is a claim paired with the evidence that last attested it, and the read surface shows the witness in words rather than as a number.
