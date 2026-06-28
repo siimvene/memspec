@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { runAnchor } from './commands/anchor.js';
+import { EXPORT_FORMATS, runExport, type ExportFormat } from './commands/export.js';
 import { runObserve } from './commands/observe.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runRelate, relationTypeSchema } from './commands/relate.js';
@@ -414,6 +415,37 @@ server.tool(
           type: result.type,
           added: result.added,
           total_edges_of_type: result.total_edges_of_type,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_export',
+  'Export the active memory graph (nodes + edges) in JSONL, GraphML, or DOT for visualisation or graph-based reasoning. Returns the serialised graph as a single string. JSONL is line-delimited JSON (one object per node or edge); GraphML opens in Gephi/yEd; DOT renders via graphviz. Active records only unless include_superseded is set.',
+  {
+    format: z.enum(EXPORT_FORMATS).describe('Output format: jsonl | graphml | dot'),
+    include_superseded: z.boolean().optional().describe('Include superseded records and supersedes edges (default false; active subgraph only)'),
+    types: z.array(z.enum(['fact', 'decision', 'procedure'])).optional().describe('Subset of memory types to include (default: all three; observations are always excluded)'),
+  },
+  async ({ format, include_superseded, types }) => {
+    try {
+      const out = runExport({
+        cwd: defaultCwd,
+        format: format as ExportFormat,
+        includeSuperseded: include_superseded,
+        types,
+      });
+      return {
+        content: [{ type: 'text' as const, text: out }],
+        structuredContent: {
+          format,
+          include_superseded: include_superseded === true,
+          types: types ?? ['fact', 'decision', 'procedure'],
+          output: out,
         },
       };
     } catch (err) {

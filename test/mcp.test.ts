@@ -130,11 +130,12 @@ test('mcp server lists all memspec tools over stdio', async () => {
     }).tools ?? []);
     const toolNames = tools.map((tool) => tool.name).sort();
 
-    // v0.3 surface (9 tools) + v0.4 memspec_relate + 2 deprecation shims.
+    // v0.3 surface (9 tools) + v0.4 memspec_relate + memspec_export + 2 deprecation shims.
     assert.deepEqual(toolNames, [
       'memspec_add',
       'memspec_anchor',
       'memspec_correct',
+      'memspec_export',
       'memspec_get',
       'memspec_observe',
       'memspec_reconcile',

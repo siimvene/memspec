@@ -10,6 +10,7 @@ import { runCorrect } from './commands/correct.js';
 import { runObserve } from './commands/observe.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
+import { EXPORT_FORMATS, parseTypesArg, runExport, type ExportFormat } from './commands/export.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runRelate, RELATION_TYPES, type RelationType } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
@@ -396,6 +397,26 @@ program
   .action((options: { cwd?: string; type?: string; json?: boolean }) => {
     const result = runConsolidate(options);
     console.log(result.message);
+  });
+
+program
+  .command('export')
+  .description('Export the memory graph (nodes + edges) as JSONL, GraphML, or DOT to stdout')
+  .requiredOption('--format <format>', `output format: ${EXPORT_FORMATS.join(' | ')}`)
+  .option('--cwd <path>', 'project root')
+  .option('--include-superseded', 'include superseded records (active-only by default)')
+  .option('--types <types>', 'comma-separated subset of fact,decision,procedure (default: all three)')
+  .action((options: { cwd?: string; format: string; includeSuperseded?: boolean; types?: string }) => {
+    if (!(EXPORT_FORMATS as readonly string[]).includes(options.format)) {
+      throw new Error(`--format must be one of: ${EXPORT_FORMATS.join(' | ')} (got "${options.format}")`);
+    }
+    const out = runExport({
+      cwd: options.cwd,
+      format: options.format as ExportFormat,
+      includeSuperseded: options.includeSuperseded,
+      types: parseTypesArg(options.types),
+    });
+    process.stdout.write(out);
   });
 
 try {
