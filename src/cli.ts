@@ -11,6 +11,7 @@ import { runObserve } from './commands/observe.js';
 import { runPromote } from './commands/promote.js';
 import { runDecay } from './commands/decay.js';
 import { runReconcile } from './commands/reconcile.js';
+import { runRelate, RELATION_TYPES, type RelationType } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
 import { runInit } from './commands/init.js';
 import { runMigrate } from './commands/migrate.js';
@@ -102,8 +103,12 @@ program
   .option('--anchor <file...>', 'project-root-relative file paths to anchor this claim to')
   .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
   .option('--pin', 'always surface this claim in boot context (operator-only; CLI flag, not on the MCP surface)')
+  .option('--refines <id...>', 'memory id this record refines/elaborates on (parent stays valid; repeatable)')
+  .option('--supports <id...>', 'memory id this record provides evidence for (repeatable)')
+  .option('--depends-on <id...>', 'memory id this record presupposes (knowledge or chronological dependency; repeatable)')
   .action((type: string, title: string, options: {
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
+    refines?: string[]; supports?: string[]; dependsOn?: string[];
   }) => {
     if (options.store === 'global') {
       options.cwd = homedir();
@@ -117,6 +122,9 @@ program
       anchors: options.anchor,
       store: options.store,
       pin: options.pin,
+      refines: options.refines,
+      supports: options.supports,
+      dependsOn: options.dependsOn,
     });
     console.log(result.message);
     if (result.duplicates && result.duplicates.length > 0) {
@@ -151,6 +159,26 @@ program
       mergeFrom,
       overrideOperator: options.overrideOperator,
       source: options.source,
+    });
+    console.log(result.message);
+  });
+
+program
+  .command('relate')
+  .description('Wire a typed edge from one memory to another (refines | supports | depends_on | conflicts_with)')
+  .requiredOption('--from <id>', 'memory id the edge originates from (the edge is written into this record)')
+  .requiredOption('--to <id>', 'memory id the edge points at')
+  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | conflicts_with')
+  .option('--cwd <path>', 'project root')
+  .action((options: { cwd?: string; from: string; to: string; type: string }) => {
+    if (!(RELATION_TYPES as readonly string[]).includes(options.type)) {
+      throw new Error(`--type must be one of: ${RELATION_TYPES.join(' | ')} (got "${options.type}")`);
+    }
+    const result = runRelate({
+      cwd: options.cwd,
+      from: options.from,
+      to: options.to,
+      type: options.type as RelationType,
     });
     console.log(result.message);
   });

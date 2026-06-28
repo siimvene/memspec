@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { runAnchor } from './commands/anchor.js';
 import { runObserve } from './commands/observe.js';
 import { runReconcile } from './commands/reconcile.js';
+import { runRelate, relationTypeSchema } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
 import { searchPayload, type SearchResult } from './commands/search.js';
 import { buildStatusReport, runStatus } from './commands/status.js';
@@ -117,6 +118,10 @@ server.tool(
         supersedes: item.supersedes,
         superseded_by: item.superseded_by,
         supersede_reason: item.supersede_reason,
+        conflicts_with: item.conflicts_with ?? [],
+        refines: item.refines ?? [],
+        supports: item.supports ?? [],
+        depends_on: item.depends_on ?? [],
         lineage,
         ext: item.ext,
         body: item.body,
@@ -143,9 +148,12 @@ interface RememberArgs {
   anchors?: string[];
   check_by?: string;
   store?: string;
+  refines?: string[];
+  supports?: string[];
+  depends_on?: string[];
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on }: RememberArgs) {
   try {
     const cwd = storeName === 'global' ? homedir() : defaultCwd;
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
@@ -157,6 +165,9 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       checkBy: check_by,
       anchors,
       store: storeName,
+      refines,
+      supports,
+      dependsOn: depends_on,
     });
 
     let text = result.message;
@@ -197,6 +208,9 @@ server.tool(
     anchors: z.array(z.string()).optional().describe('Project-root-relative file paths to anchor the claim to. If the claim describes code, anchor it now.'),
     check_by: z.string().optional().describe('ISO timestamp or "never" — overrides the type default TTL'),
     store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
+    refines: z.array(z.string()).optional().describe('Memory ids this record refines (forms a typed edge to each target; parent stays valid)'),
+    supports: z.array(z.string()).optional().describe('Memory ids this record supports (forms a typed edge — evidence backing the target)'),
+    depends_on: z.array(z.string()).optional().describe('Memory ids this record depends on (forms a typed edge — presupposes the target)'),
   },
   handleRemember,
 );
@@ -366,6 +380,33 @@ server.tool(
       return {
         content: [{ type: 'text' as const, text }],
         structuredContent: report as unknown as Record<string, unknown>,
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_relate',
+  'Wire a typed edge from one memory to another without rewriting either record. Edge types: refines (this elaborates the target; parent stays valid), supports (this is evidence for the target), depends_on (this presupposes the target), conflicts_with (declared contradiction). Dedupes silently; replaying the same call is a no-op.',
+  {
+    from: z.string().describe('Memory id the edge originates from (the edge is written into this record)'),
+    to: z.string().describe('Memory id the edge points at'),
+    type: relationTypeSchema.describe('Edge type: refines | supports | depends_on | conflicts_with'),
+  },
+  async ({ from, to, type }) => {
+    try {
+      const result = runRelate({ cwd: defaultCwd, from, to, type });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          from_id: result.from_id,
+          to_id: result.to_id,
+          type: result.type,
+          added: result.added,
+          total_edges_of_type: result.total_edges_of_type,
+        },
       };
     } catch (err) {
       return { content: [{ type: 'text' as const, text: String(err) }], isError: true };

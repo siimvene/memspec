@@ -18,6 +18,10 @@ export interface RememberOptions {
   store?: string;
   /** Operator-only (CLI flag, deliberately absent from the MCP surface): always surface in boot context. */
   pin?: boolean;
+  /** v0.4 typed relations — ids this record refines/supports/depends-on (forms a typed edge to each target). */
+  refines?: string[];
+  supports?: string[];
+  dependsOn?: string[];
 }
 
 export interface DuplicateMatch {
@@ -157,6 +161,28 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   if (options.pin) {
     itemData.pinned = true;
   }
+
+  // v0.4 typed relations — dedupe inline so a single call can't write the same
+  // edge twice. Empty arrays stay omitted (matches conflicts_with parity).
+  const dedupe = (ids: string[] | undefined): string[] | undefined => {
+    if (!ids || ids.length === 0) return undefined;
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const id of ids) {
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    }
+    return out.length > 0 ? out : undefined;
+  };
+
+  const refines = dedupe(options.refines);
+  if (refines) itemData.refines = refines;
+  const supports = dedupe(options.supports);
+  if (supports) itemData.supports = supports;
+  const dependsOn = dedupe(options.dependsOn);
+  if (dependsOn) itemData.depends_on = dependsOn;
 
   const filePath = store.writeItem(itemData);
 

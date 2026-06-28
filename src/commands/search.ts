@@ -27,6 +27,10 @@ export interface SearchResult {
   tags: string[];
   stale: boolean;
   conflicts_with: string[];
+  /** v0.4 typed relation edges — ids of records this hit refines/supports/depends on. */
+  refines: string[];
+  supports: string[];
+  depends_on: string[];
   preview: string;
   body?: string; // present only when full=true and within the budget
 }
@@ -159,6 +163,9 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
       tags: item.tags,
       stale: item.stale ?? false,
       conflicts_with: conflicts.get(item.id) ?? [],
+      refines: item.refines ?? [],
+      supports: item.supports ?? [],
+      depends_on: item.depends_on ?? [],
       preview: previewFromBody(item.body),
     };
 
@@ -209,6 +216,9 @@ export function runSearch(query: string, options: SearchOptions): string {
       source: r.source,
       stale: r.stale,
       conflicts_with: r.conflicts_with,
+      refines: r.refines,
+      supports: r.supports,
+      depends_on: r.depends_on,
       ...(r.body !== undefined ? { body: r.body } : {}),
     })), null, 2);
   }
