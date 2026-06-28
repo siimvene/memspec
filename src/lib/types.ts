@@ -47,6 +47,9 @@ export interface MemoryFrontmatter {
   superseded_by?: string; // id of the record that replaced this one (renamed from corrected_by)
   supersede_reason?: string; // durable reason — renamed from correction_reason
   conflicts_with?: string[]; // explicit conflict edges to other memory ids
+  refines?: string[]; // ids this record refines/elaborates on (parent stays valid)
+  supports?: string[]; // ids this record provides evidence for
+  depends_on?: string[]; // ids this record presupposes (knowledge or chronological dependency)
   expires?: string; // observations only — hard expiry (ISO 8601)
   /**
    * Recommended ext field conventions:

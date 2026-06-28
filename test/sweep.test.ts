@@ -11,9 +11,9 @@ async function setupStaleFact(target: string): Promise<void> {
   // v0.3: lazy stale flagging means a past check_by is enough — no explicit
   // decay step needed for sweep to see the item as a retirement candidate.
   await runCli([
-    'add', 'fact', 'Old port', '--cwd', target,
+    'remember', 'fact', 'Old port', '--cwd', target,
     '--body', 'Service listens on 7779', '--source', 'test',
-    '--decay-after', '2000-01-01T00:00:00.000Z',
+    '--check-by', '2000-01-01T00:00:00.000Z',
   ]);
 }
 

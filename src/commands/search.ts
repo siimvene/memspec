@@ -1,4 +1,5 @@
 import { getProfile, loadConfig } from '../lib/config.js';
+import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { MemspecStore, type StoreSearchOptions } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits } from '../lib/usage.js';
@@ -27,6 +28,10 @@ export interface SearchResult {
   tags: string[];
   stale: boolean;
   conflicts_with: string[];
+  /** v0.4 typed relation edges — ids of records this hit refines/supports/depends on. */
+  refines: string[];
+  supports: string[];
+  depends_on: string[];
   preview: string;
   body?: string; // present only when full=true and within the budget
 }
@@ -95,15 +100,9 @@ function annotateConflicts(items: MemoryItem[]): Map<string, string[]> {
       if (!b.type) continue;
       if (a.type !== b.type) continue;
       // share at least one tag
-      if (a.tags.length === 0 || b.tags.length === 0) continue;
-      const sharedTag = a.tags.some((t) => b.tags.includes(t));
-      if (!sharedTag) continue;
+      if (sharedTagCount(a.tags, b.tags) === 0) continue;
       // title token overlap >= 2 — cheap stand-in for semantic overlap
-      const tokensA = new Set(a.title.toLowerCase().split(/\s+/).filter((t) => t.length > 3));
-      const tokensB = new Set(b.title.toLowerCase().split(/\s+/).filter((t) => t.length > 3));
-      let overlap = 0;
-      for (const t of tokensA) if (tokensB.has(t)) overlap++;
-      if (overlap < 2) continue;
+      if (titleTokenOverlap(a.title, b.title) < 2) continue;
       out.get(a.id)!.add(b.id);
       out.get(b.id)!.add(a.id);
     }
@@ -159,6 +158,9 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
       tags: item.tags,
       stale: item.stale ?? false,
       conflicts_with: conflicts.get(item.id) ?? [],
+      refines: item.refines ?? [],
+      supports: item.supports ?? [],
+      depends_on: item.depends_on ?? [],
       preview: previewFromBody(item.body),
     };
 
@@ -209,6 +211,9 @@ export function runSearch(query: string, options: SearchOptions): string {
       source: r.source,
       stale: r.stale,
       conflicts_with: r.conflicts_with,
+      refines: r.refines,
+      supports: r.supports,
+      depends_on: r.depends_on,
       ...(r.body !== undefined ? { body: r.body } : {}),
     })), null, 2);
   }

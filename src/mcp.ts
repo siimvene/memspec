@@ -5,8 +5,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { runAnchor } from './commands/anchor.js';
+import { EXPORT_FORMATS, runExport, type ExportFormat } from './commands/export.js';
 import { runObserve } from './commands/observe.js';
 import { runReconcile } from './commands/reconcile.js';
+import { runRelate, relationTypeSchema } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
 import { searchPayload, type SearchResult } from './commands/search.js';
 import { buildStatusReport, runStatus } from './commands/status.js';
@@ -26,7 +28,7 @@ const defaultCwd = typeof values.cwd === 'string' ? values.cwd : process.env.MEM
 
 const server = new McpServer({
   name: 'memspec',
-  version: '0.3.0',
+  version: '0.4.0',
 });
 
 function renderSearchText(payload: { query: string; results: SearchResult[] }): string {
@@ -47,7 +49,7 @@ function renderSearchText(payload: { query: string; results: SearchResult[] }): 
   return lines.join('\n');
 }
 
-// --- Tools (v0.3 surface — 9 tools) ---
+// --- Tools (v0.4 surface — 11 tools; v0.3 deprecation shims removed) ---
 
 server.tool(
   'memspec_search',
@@ -117,6 +119,10 @@ server.tool(
         supersedes: item.supersedes,
         superseded_by: item.superseded_by,
         supersede_reason: item.supersede_reason,
+        conflicts_with: item.conflicts_with ?? [],
+        refines: item.refines ?? [],
+        supports: item.supports ?? [],
+        depends_on: item.depends_on ?? [],
         lineage,
         ext: item.ext,
         body: item.body,
@@ -143,9 +149,12 @@ interface RememberArgs {
   anchors?: string[];
   check_by?: string;
   store?: string;
+  refines?: string[];
+  supports?: string[];
+  depends_on?: string[];
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on }: RememberArgs) {
   try {
     const cwd = storeName === 'global' ? homedir() : defaultCwd;
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
@@ -157,6 +166,9 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       checkBy: check_by,
       anchors,
       store: storeName,
+      refines,
+      supports,
+      dependsOn: depends_on,
     });
 
     let text = result.message;
@@ -165,20 +177,28 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       text += `\n⚠ Potential duplicates found: ${titles}. Consider memspec_supersede instead.`;
     }
 
+    const structured: Record<string, unknown> = {
+      id: result.id,
+      type,
+      title,
+      source: resolvedSource ?? null,
+      tags: tags ?? [],
+      check_by: check_by ?? null,
+      anchors: result.anchors,
+      verified_with: result.verified_with,
+      anchor_warnings: result.anchorWarnings,
+      duplicates: result.duplicates ?? null,
+    };
+    if (result.autoAttached) {
+      // Phase 5 — mid-band edge attached at write time. Array shape so a
+      // future widening of the per-write attach budget doesn't require a
+      // breaking response change.
+      structured.auto_attached = [result.autoAttached];
+    }
+
     return {
       content: [{ type: 'text' as const, text }],
-      structuredContent: {
-        id: result.id,
-        type,
-        title,
-        source: resolvedSource ?? null,
-        tags: tags ?? [],
-        check_by: check_by ?? null,
-        anchors: result.anchors,
-        verified_with: result.verified_with,
-        anchor_warnings: result.anchorWarnings,
-        duplicates: result.duplicates ?? null,
-      } as Record<string, unknown>,
+      structuredContent: structured,
     };
   } catch (err) {
     return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
@@ -197,6 +217,9 @@ server.tool(
     anchors: z.array(z.string()).optional().describe('Project-root-relative file paths to anchor the claim to. If the claim describes code, anchor it now.'),
     check_by: z.string().optional().describe('ISO timestamp or "never" — overrides the type default TTL'),
     store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
+    refines: z.array(z.string()).optional().describe('Memory ids this record refines (forms a typed edge to each target; parent stays valid)'),
+    supports: z.array(z.string()).optional().describe('Memory ids this record supports (forms a typed edge — evidence backing the target)'),
+    depends_on: z.array(z.string()).optional().describe('Memory ids this record depends on (forms a typed edge — presupposes the target)'),
   },
   handleRemember,
 );
@@ -373,74 +396,61 @@ server.tool(
   },
 );
 
-// --- Deprecation shims (v0.2 names; removed in v0.4) ---
-//
-// Real v0.2 installs exist on npm. The renamed primitives keep answering
-// under their old names for one minor version, marked deprecated in every
-// response. Deleted tools (promote, consolidate, validate, decay, init,
-// stores) have no successor and get no shim.
-
-type ToolResult = Awaited<ReturnType<typeof handleRemember>>;
-
-function markDeprecated(result: ToolResult, oldName: string, newName: string): ToolResult {
-  // console.warn goes to stderr — stdout belongs to the stdio transport.
-  console.warn(`[memspec] ${oldName} is deprecated; use ${newName}. The alias will be removed in v0.4.`);
-  const deprecation = `use ${newName}; will be removed in v0.4`;
-  if (result.structuredContent) {
-    result.structuredContent._deprecated = deprecation;
-  }
-  result.content = [
-    ...result.content,
-    { type: 'text' as const, text: `⚠ DEPRECATED: ${oldName} — ${deprecation}.` },
-  ];
-  return result;
-}
-
 server.tool(
-  'memspec_add',
-  'DEPRECATED — renamed to memspec_remember in v0.3; this alias will be removed in v0.4. Records new project knowledge.',
+  'memspec_relate',
+  'Wire a typed edge from one memory to another without rewriting either record. Edge types: refines (this elaborates the target; parent stays valid), supports (this is evidence for the target), depends_on (this presupposes the target), conflicts_with (declared contradiction). Dedupes silently; replaying the same call is a no-op.',
   {
-    type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
-    title: z.string().describe('Short title for the memory'),
-    body: z.string().optional().describe('Full content/details'),
-    source: z.string().optional().describe('Who/what created this memory (defaults to the connected client name; "unknown" is rejected)'),
-    tags: z.string().optional().describe('Comma-separated tags'),
-    decay_after: z.string().optional().describe('ISO timestamp or "never" (maps to check_by)'),
-    store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
+    from: z.string().describe('Memory id the edge originates from (the edge is written into this record)'),
+    to: z.string().describe('Memory id the edge points at'),
+    type: relationTypeSchema.describe('Edge type: refines | supports | depends_on | conflicts_with'),
   },
-  async ({ type, title, body, source, tags, decay_after, store: storeName }) => {
-    const result = await handleRemember({
-      type,
-      title,
-      body,
-      source,
-      tags: tags ? tags.split(',').map((t) => t.trim()).filter(Boolean) : undefined,
-      check_by: decay_after,
-      store: storeName,
-    });
-    return markDeprecated(result, 'memspec_add', 'memspec_remember');
+  async ({ from, to, type }) => {
+    try {
+      const result = runRelate({ cwd: defaultCwd, from, to, type });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          from_id: result.from_id,
+          to_id: result.to_id,
+          type: result.type,
+          added: result.added,
+          total_edges_of_type: result.total_edges_of_type,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
   },
 );
 
 server.tool(
-  'memspec_correct',
-  'DEPRECATED — renamed to memspec_supersede in v0.3; this alias will be removed in v0.4. Fixes wrong or stale knowledge.',
+  'memspec_export',
+  'Export the active memory graph (nodes + edges) in JSONL, GraphML, or DOT for visualisation or graph-based reasoning. Returns the serialised graph as a single string. JSONL is line-delimited JSON (one object per node or edge); GraphML opens in Gephi/yEd; DOT renders via graphviz. Active records only unless include_superseded is set.',
   {
-    id: z.string().describe('Memory ID to correct'),
-    reason: z.string().describe('Why this memory is wrong or stale'),
-    replace: z.string().optional().describe('Replacement content (maps to body)'),
-    title: z.string().optional().describe('Fresh title for the replacement (defaults to the old title)'),
-    supersede_by: z.string().optional().describe('Mark this memory as corrected by an existing memory ID (maps to a merge into that survivor)'),
-    override_operator: z.boolean().optional().describe('Required to correct operator-sourced records; logged into the persisted reason'),
-    source: z.string().optional().describe('Who is making the correction'),
+    format: z.enum(EXPORT_FORMATS).describe('Output format: jsonl | graphml | dot'),
+    include_superseded: z.boolean().optional().describe('Include superseded records and supersedes edges (default false; active subgraph only)'),
+    types: z.array(z.enum(['fact', 'decision', 'procedure'])).optional().describe('Subset of memory types to include (default: all three; observations are always excluded)'),
   },
-  async ({ id, reason, replace, title, supersede_by, override_operator, source }) => {
-    // v0.2 supersede_by = "an existing record replaces this one" — in v0.3
-    // terms that's a merge with the existing record as survivor.
-    const result = supersede_by
-      ? await handleSupersede({ id: supersede_by, reason, merge_from: [id], override_operator, source })
-      : await handleSupersede({ id, reason, title, body: replace, override_operator, source });
-    return markDeprecated(result, 'memspec_correct', 'memspec_supersede');
+  async ({ format, include_superseded, types }) => {
+    try {
+      const out = runExport({
+        cwd: defaultCwd,
+        format: format as ExportFormat,
+        includeSuperseded: include_superseded,
+        types,
+      });
+      return {
+        content: [{ type: 'text' as const, text: out }],
+        structuredContent: {
+          format,
+          include_superseded: include_superseded === true,
+          types: types ?? ['fact', 'decision', 'procedure'],
+          output: out,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
   },
 );
 

@@ -8,9 +8,9 @@ test('FTS5: stemming finds "configuration" when searching "configured"', async (
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
-  await runCli(['add', 'decision', 'Server configuration approach', '--cwd', target,
+  await runCli(['remember','decision', 'Server configuration approach', '--cwd', target,
     '--body', 'All configuration managed via GitOps', '--source', 'test', '--tags', 'infra']);
-  await runCli(['add', 'fact', 'Database is Postgres', '--cwd', target,
+  await runCli(['remember','fact', 'Database is Postgres', '--cwd', target,
     '--body', 'Postgres 16 on RDS', '--source', 'test', '--tags', 'db']);
 
   // "configured" should find "configuration" via stemming (not a substring match)
@@ -24,9 +24,9 @@ test('FTS5: word boundaries prevent "file" matching "profile"', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
-  await runCli(['add', 'fact', 'User profile settings', '--cwd', target,
+  await runCli(['remember','fact', 'User profile settings', '--cwd', target,
     '--body', 'Profile page shows user preferences', '--source', 'test']);
-  await runCli(['add', 'fact', 'Config file locations', '--cwd', target,
+  await runCli(['remember','fact', 'Config file locations', '--cwd', target,
     '--body', 'File paths for configuration', '--source', 'test']);
 
   // Searching "file" should find "Config file locations" but NOT "User profile settings"
@@ -44,11 +44,11 @@ test('FTS5: BM25 ranking outperforms naive keyword scoring on term spam', async 
   await runCli(['init', '--cwd', target]);
 
   // Item A: focused, specific
-  await runCli(['add', 'decision', 'Platform engineering strategy', '--cwd', target,
+  await runCli(['remember','decision', 'Platform engineering strategy', '--cwd', target,
     '--body', 'Adopt GitOps-based platform approach', '--source', 'test', '--tags', 'platform']);
 
   // Item B: keyword spam
-  await runCli(['add', 'fact', 'Cloud platforms overview', '--cwd', target,
+  await runCli(['remember','fact', 'Cloud platforms overview', '--cwd', target,
     '--body', 'AWS platform, GCP platform, Azure platform are all cloud platforms we evaluated. Platform platform platform.', '--source', 'test']);
 
   const result = await runCli(['search', 'platform engineering', '--cwd', target, '--json']);
@@ -61,9 +61,9 @@ test('FTS5: existing phrase ranking still works', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
-  await runCli(['add', 'decision', 'Use files over DB', '--cwd', target,
+  await runCli(['remember','decision', 'Use files over DB', '--cwd', target,
     '--body', 'Flat file storage decision', '--source', 'test']);
-  await runCli(['add', 'fact', 'DB backup files over NFS', '--cwd', target,
+  await runCli(['remember','fact', 'DB backup files over NFS', '--cwd', target,
     '--body', 'Network file shares', '--source', 'test']);
 
   const result = await runCli(['search', 'files over db', '--cwd', target, '--json']);
@@ -78,10 +78,10 @@ test('FTS5: multi-word query with absent terms still finds the best match', asyn
 
   // Regression for the 2026-06-10 findings: these natural-language queries
   // returned zero results while the bare keyword matched.
-  await runCli(['add', 'fact', 'Kleidia ICP', '--cwd', target,
+  await runCli(['remember','fact', 'Kleidia ICP', '--cwd', target,
     '--body', 'Target customers are defence and government organisations needing YubiKey lifecycle management',
     '--source', 'test', '--tags', 'kleidia,icp']);
-  await runCli(['add', 'fact', 'Unrelated networking note', '--cwd', target,
+  await runCli(['remember','fact', 'Unrelated networking note', '--cwd', target,
     '--body', 'VLAN trunking on the lab switch', '--source', 'test']);
 
   const result = await runCli(['search', 'Kleidia ICP target customers defence government strategy', '--cwd', target, '--json']);
@@ -94,9 +94,9 @@ test('FTS5: OR fallback does not dilute exact AND matches', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
-  await runCli(['add', 'fact', 'JWT auth tokens', '--cwd', target,
+  await runCli(['remember','fact', 'JWT auth tokens', '--cwd', target,
     '--body', 'Uses refresh tokens', '--source', 'test']);
-  await runCli(['add', 'fact', 'JWT logging', '--cwd', target,
+  await runCli(['remember','fact', 'JWT logging', '--cwd', target,
     '--body', 'Log token ids only', '--source', 'test']);
 
   // Both terms present in one item: AND must win, the partial match stays out
@@ -110,8 +110,8 @@ test('FTS5: type filtering works with FTS backend', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
-  await runCli(['add', 'fact', 'JWT tokens', '--cwd', target, '--body', 'Auth tokens', '--source', 'test']);
-  await runCli(['add', 'decision', 'Chose JWT', '--cwd', target, '--body', 'JWT decision', '--source', 'test']);
+  await runCli(['remember','fact', 'JWT tokens', '--cwd', target, '--body', 'Auth tokens', '--source', 'test']);
+  await runCli(['remember','decision', 'Chose JWT', '--cwd', target, '--body', 'JWT decision', '--source', 'test']);
 
   const result = await runCli(['search', 'JWT', '--cwd', target, '--type', 'fact', '--json']);
   const parsed = JSON.parse(result.stdout);

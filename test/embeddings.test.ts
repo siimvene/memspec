@@ -95,9 +95,9 @@ test('search with hybrid engine degrades gracefully to FTS5 when no embeddings c
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
-  await runCli(['add', 'decision', 'Credential isolation approach', '--cwd', target,
+  await runCli(['remember', 'decision', 'Credential isolation approach', '--cwd', target,
     '--body', 'Same-machine proxy is obfuscation; real isolation requires network sandbox', '--source', 'test', '--tags', 'security,isolation']);
-  await runCli(['add', 'fact', 'Server runs Ubuntu 24', '--cwd', target,
+  await runCli(['remember', 'fact', 'Server runs Ubuntu 24', '--cwd', target,
     '--body', 'Oracle cloud VPS with 4 OCPU', '--source', 'test', '--tags', 'infra']);
 
   // FTS5 finds "isolation" via exact keyword match

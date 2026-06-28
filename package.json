@@ -1,6 +1,6 @@
 {
   "name": "memspec",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Structured memory for AI agents - spec plus CLI",
   "type": "module",
   "bin": {
@@ -20,7 +20,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --import tsx --test test/**/*.test.ts",
-    "check": "npm run build && npm test",
+    "schema": "node --import tsx scripts/generate-schema.ts",
+    "schema:check": "node --import tsx scripts/generate-schema.ts /tmp/memspec-schema-check.md && diff -u SCHEMA.md /tmp/memspec-schema-check.md",
+    "check": "npm run build && npm run schema:check && npm test",
     "prepublishOnly": "npm run check"
   },
   "keywords": [

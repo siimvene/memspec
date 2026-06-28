@@ -125,6 +125,111 @@ test('writer round-trips a v0.3 record without losing fields', () => {
   assert.equal(/^correction_reason:/m.test(serialized), false, 'writer must not emit correction_reason');
 });
 
+test('schema accepts typed relations (refines, supports, depends_on) and round-trips them', () => {
+  const item = {
+    id: 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB',
+    kind: 'claim' as const,
+    type: 'fact' as const,
+    state: 'active' as const,
+    created: '2026-04-04T10:30:00Z',
+    source: 'claude-code',
+    source_kind: 'agent' as const,
+    tags: [],
+    check_by: '2026-07-03T10:30:00Z',
+    refines: ['ms_01HXK7Y3P5QZJKM8N4R2T6ABC0'],
+    supports: ['ms_01HXK7Y3P5QZJKM8N4R2T6DEF0', 'ms_01HXK7Y3P5QZJKM8N4R2T6GHI0'],
+    depends_on: ['ms_01HXK7Y3P5QZJKM8N4R2T6JKL0'],
+    title: 'Round trip with relations',
+    body: 'Body.',
+  };
+
+  const serialized = serializeMemoryFile(item);
+  const parsed = parseMemoryFile(serialized, '/dev/null');
+
+  assert.deepEqual(parsed.refines, ['ms_01HXK7Y3P5QZJKM8N4R2T6ABC0']);
+  assert.deepEqual(parsed.supports, [
+    'ms_01HXK7Y3P5QZJKM8N4R2T6DEF0',
+    'ms_01HXK7Y3P5QZJKM8N4R2T6GHI0',
+  ]);
+  assert.deepEqual(parsed.depends_on, ['ms_01HXK7Y3P5QZJKM8N4R2T6JKL0']);
+});
+
+test('schema rejects non-array values for typed relations', () => {
+  for (const field of ['refines', 'supports', 'depends_on'] as const) {
+    const result = validateFrontmatter({
+      id: 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB',
+      kind: 'claim',
+      type: 'fact',
+      state: 'active',
+      created: '2026-04-04T10:30:00Z',
+      source: 'test',
+      tags: [],
+      check_by: 'never',
+      [field]: 'ms_01HXK7Y3P5QZJKM8N4R2T6ABC0',
+    });
+    assert.equal(result.success, false, `${field} must reject a bare string`);
+  }
+
+  for (const field of ['refines', 'supports', 'depends_on'] as const) {
+    const result = validateFrontmatter({
+      id: 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB',
+      kind: 'claim',
+      type: 'fact',
+      state: 'active',
+      created: '2026-04-04T10:30:00Z',
+      source: 'test',
+      tags: [],
+      check_by: 'never',
+      [field]: [123],
+    });
+    assert.equal(result.success, false, `${field} must reject non-string array elements`);
+  }
+});
+
+test('typed relations: missing and empty arrays are both handled', () => {
+  // Missing fields stay undefined and writer omits them.
+  const missing = serializeMemoryFile({
+    id: 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB',
+    kind: 'claim',
+    type: 'fact',
+    state: 'active',
+    created: '2026-04-04T10:30:00Z',
+    source: 'test',
+    tags: [],
+    check_by: 'never',
+    title: 'No relations',
+    body: 'Body.',
+  });
+  assert.equal(/^refines:/m.test(missing), false, 'missing refines must not be emitted');
+  assert.equal(/^supports:/m.test(missing), false, 'missing supports must not be emitted');
+  assert.equal(/^depends_on:/m.test(missing), false, 'missing depends_on must not be emitted');
+
+  // Empty arrays are accepted by the schema but omitted by the writer (same convention as conflicts_with).
+  const emptySerialized = serializeMemoryFile({
+    id: 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB',
+    kind: 'claim',
+    type: 'fact',
+    state: 'active',
+    created: '2026-04-04T10:30:00Z',
+    source: 'test',
+    tags: [],
+    check_by: 'never',
+    refines: [],
+    supports: [],
+    depends_on: [],
+    title: 'Empty relations',
+    body: 'Body.',
+  });
+  assert.equal(/^refines:/m.test(emptySerialized), false, 'empty refines must not be emitted');
+  assert.equal(/^supports:/m.test(emptySerialized), false, 'empty supports must not be emitted');
+  assert.equal(/^depends_on:/m.test(emptySerialized), false, 'empty depends_on must not be emitted');
+
+  const parsedEmpty = parseMemoryFile(emptySerialized, '/dev/null');
+  assert.equal(parsedEmpty.refines, undefined);
+  assert.equal(parsedEmpty.supports, undefined);
+  assert.equal(parsedEmpty.depends_on, undefined);
+});
+
 test('claims without type are rejected; observations without type are accepted', () => {
   const claim = validateFrontmatter({
     id: 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB',

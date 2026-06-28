@@ -19,9 +19,9 @@ test('status shows empty store summary', async () => {
 test('status counts active items by type', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
-  await runCli(['add', 'fact', 'Fact one', '--cwd', target, '--source', 'test']);
-  await runCli(['add', 'fact', 'Fact two', '--cwd', target, '--source', 'test']);
-  await runCli(['add', 'decision', 'Dec one', '--cwd', target, '--source', 'test']);
+  await runCli(['remember','fact', 'Fact one', '--cwd', target, '--source', 'test']);
+  await runCli(['remember','fact', 'Fact two', '--cwd', target, '--source', 'test']);
+  await runCli(['remember','decision', 'Dec one', '--cwd', target, '--source', 'test']);
 
   const result = await runCli(['status', '--cwd', target]);
   assert.match(result.stdout, /fact\s+2/);

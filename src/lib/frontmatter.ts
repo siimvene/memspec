@@ -43,6 +43,9 @@ export function parseMemoryFile(content: string, filePath: string): MemoryItem {
     superseded_by: data.superseded_by,
     supersede_reason: data.supersede_reason,
     conflicts_with: data.conflicts_with,
+    refines: data.refines,
+    supports: data.supports,
+    depends_on: data.depends_on,
     expires: data.expires,
     ext: data.ext,
     title,
@@ -74,6 +77,9 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   if (item.superseded_by) frontmatter.superseded_by = item.superseded_by;
   if (item.supersede_reason) frontmatter.supersede_reason = item.supersede_reason;
   if (item.conflicts_with && item.conflicts_with.length > 0) frontmatter.conflicts_with = item.conflicts_with;
+  if (item.refines && item.refines.length > 0) frontmatter.refines = item.refines;
+  if (item.supports && item.supports.length > 0) frontmatter.supports = item.supports;
+  if (item.depends_on && item.depends_on.length > 0) frontmatter.depends_on = item.depends_on;
   if (item.expires) frontmatter.expires = item.expires;
   if (item.ext && Object.keys(item.ext).length > 0) frontmatter.ext = item.ext;
 

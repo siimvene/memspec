@@ -2,15 +2,12 @@
 
 import { homedir } from 'node:os';
 import { Command } from 'commander';
-import { runAdd } from './commands/add.js';
 import { runAnchor } from './commands/anchor.js';
-import { runConsolidate } from './commands/consolidate.js';
 import { runContext } from './commands/context.js';
-import { runCorrect } from './commands/correct.js';
 import { runObserve } from './commands/observe.js';
-import { runPromote } from './commands/promote.js';
-import { runDecay } from './commands/decay.js';
+import { EXPORT_FORMATS, parseTypesArg, runExport, type ExportFormat } from './commands/export.js';
 import { runReconcile } from './commands/reconcile.js';
+import { runRelate, RELATION_TYPES, type RelationType } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
 import { runInit } from './commands/init.js';
 import { runMigrate } from './commands/migrate.js';
@@ -19,7 +16,6 @@ import { runSearch } from './commands/search.js';
 import { runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
 import { runSweep } from './commands/sweep.js';
-import { runValidate } from './commands/validate.js';
 import { runVerify } from './commands/verify.js';
 import { loadConfig } from './lib/config.js';
 import { MemspecStore } from './lib/store.js';
@@ -30,7 +26,7 @@ const program = new Command();
 program
   .name('memspec')
   .description('Structured memory for AI agents')
-  .version('0.3.0')
+  .version('0.4.0')
   .showHelpAfterError();
 
 program
@@ -62,34 +58,6 @@ program
   });
 
 program
-  .command('add')
-  .description('Add a memory item')
-  .argument('<type>', 'fact | decision | procedure')
-  .argument('<title>', 'memory title')
-  .option('--cwd <path>', 'project root')
-  .option('--body <text>', 'memory body')
-  .requiredOption('--source <source>', 'creator identifier (required; "unknown" is rejected)')
-  .option('--tags <tags>', 'comma-separated tags')
-  .option('--decay-after <value>', 'ISO timestamp or "never"')
-  .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
-  .action((type: string, title: string, options: {
-    cwd?: string; body?: string; source?: string; tags?: string; decayAfter?: string; store?: string;
-  }) => {
-    if (options.store === 'global') {
-      options.cwd = homedir();
-    }
-    const result = runAdd(type, title, options);
-    console.log(result.message);
-    if (result.duplicates && result.duplicates.length > 0) {
-      console.log('\n\u26a0 Potential duplicates found:');
-      for (const dup of result.duplicates) {
-        console.log(`  - [${dup.id}] ${dup.title}`);
-      }
-      console.log('  Consider using memspec correct instead.');
-    }
-  });
-
-program
   .command('remember')
   .description('Record a new memory (v0.3 — supersedes `add`; anchors inline)')
   .argument('<type>', 'fact | decision | procedure')
@@ -102,8 +70,12 @@ program
   .option('--anchor <file...>', 'project-root-relative file paths to anchor this claim to')
   .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
   .option('--pin', 'always surface this claim in boot context (operator-only; CLI flag, not on the MCP surface)')
+  .option('--refines <id...>', 'memory id this record refines/elaborates on (parent stays valid; repeatable)')
+  .option('--supports <id...>', 'memory id this record provides evidence for (repeatable)')
+  .option('--depends-on <id...>', 'memory id this record presupposes (knowledge or chronological dependency; repeatable)')
   .action((type: string, title: string, options: {
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
+    refines?: string[]; supports?: string[]; dependsOn?: string[];
   }) => {
     if (options.store === 'global') {
       options.cwd = homedir();
@@ -117,6 +89,9 @@ program
       anchors: options.anchor,
       store: options.store,
       pin: options.pin,
+      refines: options.refines,
+      supports: options.supports,
+      dependsOn: options.dependsOn,
     });
     console.log(result.message);
     if (result.duplicates && result.duplicates.length > 0) {
@@ -156,6 +131,26 @@ program
   });
 
 program
+  .command('relate')
+  .description('Wire a typed edge from one memory to another (refines | supports | depends_on | conflicts_with)')
+  .requiredOption('--from <id>', 'memory id the edge originates from (the edge is written into this record)')
+  .requiredOption('--to <id>', 'memory id the edge points at')
+  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | conflicts_with')
+  .option('--cwd <path>', 'project root')
+  .action((options: { cwd?: string; from: string; to: string; type: string }) => {
+    if (!(RELATION_TYPES as readonly string[]).includes(options.type)) {
+      throw new Error(`--type must be one of: ${RELATION_TYPES.join(' | ')} (got "${options.type}")`);
+    }
+    const result = runRelate({
+      cwd: options.cwd,
+      from: options.from,
+      to: options.to,
+      type: options.type as RelationType,
+    });
+    console.log(result.message);
+  });
+
+program
   .command('observe')
   .description('Capture a point-in-time observation with hard expiry')
   .argument('<text>', 'observation text (first line becomes the title)')
@@ -165,16 +160,6 @@ program
   .action((text: string, options: { cwd?: string; ttl?: string; source?: string }) => {
     const result = runObserve({ cwd: options.cwd, text, ttl: options.ttl, source: options.source });
     console.log(result.message);
-  });
-
-program
-  .command('promote')
-  .description('Confirm or promote a captured memory to active')
-  .argument('<id>', 'memory ID to promote')
-  .option('--cwd <path>', 'project root')
-  .option('--source <source>', 'who is confirming')
-  .action((id: string, options: { cwd?: string; source?: string }) => {
-    console.log(runPromote(id, options));
   });
 
 program
@@ -230,37 +215,11 @@ program
   });
 
 program
-  .command('correct')
-  .description('Correct or invalidate a memory')
-  .argument('<id>', 'memory ID to correct')
-  .requiredOption('--reason <text>', 'why this is wrong or stale')
-  .option('--cwd <path>', 'project root')
-  .option('--replace <text>', 'replacement content')
-  .option('--title <text>', 'fresh title for the replacement (defaults to the old title)')
-  .option('--supersede-by <id>', 'mark this memory as corrected by an existing memory instead of minting a new one')
-  .option('--override-operator', 'required to correct operator-sourced records; logged into the correction reason')
-  .option('--source <source>', 'corrector identifier')
-  .action((id: string, options: {
-    cwd?: string; reason: string; replace?: string; title?: string; supersedeBy?: string; overrideOperator?: boolean; source?: string;
-  }) => {
-    console.log(runCorrect(id, options));
-  });
-
-program
   .command('status')
   .description('Show store summary')
   .option('--cwd <path>', 'project root')
   .action((options: { cwd?: string }) => {
     console.log(runStatus(options));
-  });
-
-program
-  .command('decay')
-  .description('Flag items past TTL as stale (flag, not delete — retire via memspec sweep)')
-  .option('--cwd <path>', 'project root')
-  .option('--dry-run', 'preview without changes')
-  .action((options: { cwd?: string; dryRun?: boolean }) => {
-    console.log(runDecay(options));
   });
 
 program
@@ -292,14 +251,6 @@ program
   });
 
 program
-  .command('validate')
-  .description('Check all memory files against schema')
-  .option('--cwd <path>', 'project root')
-  .action((options: { cwd?: string }) => {
-    console.log(runValidate(options));
-  });
-
-program
   .command('stores')
   .description('List configured store layers')
   .option('--cwd <path>', 'project root')
@@ -324,7 +275,7 @@ program
 
 program
   .command('migrate')
-  .description('One-shot v0.2 -> v0.3 migration of a memspec store (idempotent; dry-run by default)')
+  .description('One-shot v0.2 or v0.3 -> v0.4 migration of a memspec store (idempotent; dry-run by default)')
   .option('--cwd <path>', 'project root')
   .option('--apply', 'write changes (dry-run is the default)')
   .option('--override <pair...>', 'override source_kind for a source string: source=operator|agent|import')
@@ -360,14 +311,23 @@ program
   });
 
 program
-  .command('consolidate')
-  .description('Find duplicate/redundant memories')
+  .command('export')
+  .description('Export the memory graph (nodes + edges) as JSONL, GraphML, or DOT to stdout')
+  .requiredOption('--format <format>', `output format: ${EXPORT_FORMATS.join(' | ')}`)
   .option('--cwd <path>', 'project root')
-  .option('--type <type>', 'filter by memory type')
-  .option('--json', 'JSON output')
-  .action((options: { cwd?: string; type?: string; json?: boolean }) => {
-    const result = runConsolidate(options);
-    console.log(result.message);
+  .option('--include-superseded', 'include superseded records (active-only by default)')
+  .option('--types <types>', 'comma-separated subset of fact,decision,procedure (default: all three)')
+  .action((options: { cwd?: string; format: string; includeSuperseded?: boolean; types?: string }) => {
+    if (!(EXPORT_FORMATS as readonly string[]).includes(options.format)) {
+      throw new Error(`--format must be one of: ${EXPORT_FORMATS.join(' | ')} (got "${options.format}")`);
+    }
+    const out = runExport({
+      cwd: options.cwd,
+      format: options.format as ExportFormat,
+      includeSuperseded: options.includeSuperseded,
+      types: parseTypesArg(options.types),
+    });
+    process.stdout.write(out);
   });
 
 try {

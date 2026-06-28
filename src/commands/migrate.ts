@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
 import matter from 'gray-matter';
-import { canonicalSourceForBucketing, inferSourceKind } from '../lib/source.js';
+import { canonicalSourceForBucketing, inferSourceKind, storageTierForSourceKind } from '../lib/source.js';
 import { normalizeLegacyFrontmatter } from '../lib/schema.js';
 import { MemspecStore } from '../lib/store.js';
 import type { SourceKind, VerifiedWith } from '../lib/types.js';
@@ -18,7 +18,9 @@ interface FileChange {
   beforeRaw: string;
   afterRaw: string;
   changes: string[];
-  /** True if state already looked v0.3-shaped (idempotency tracking). */
+  /** Resolved target path post-migration; equal to `path` when no relocation needed. */
+  targetPath: string;
+  /** True when neither field changes nor a relocation are needed (idempotency tracking). */
   noop: boolean;
 }
 
@@ -65,6 +67,7 @@ function inferVerifiedWith(
 }
 
 function computeFileChange(
+  storeRoot: string,
   filePath: string,
   raw: string,
   sourceOverrides: Record<string, SourceKind>,
@@ -187,12 +190,22 @@ function computeFileChange(
     }
   }
 
+  // Compute target path. Tier-aware: operator-sourced records relocate to
+  // memory/operator/{type}s/ per Phase 4. Path resolution depends on the
+  // post-migration source_kind, which is why this happens after step 8 above.
+  const target = targetPath(storeRoot, filePath, data);
+  if (target !== filePath) {
+    const targetRel = target.startsWith(storeRoot) ? target.slice(storeRoot.length + 1) : target;
+    changes.push(`relocate -> ${targetRel}`);
+  }
+
   if (changes.length === 0) {
     return {
       path: filePath,
       beforeRaw: raw,
       afterRaw: raw,
       changes,
+      targetPath: filePath,
       noop: true,
     };
   }
@@ -209,6 +222,7 @@ function computeFileChange(
     beforeRaw: raw,
     afterRaw,
     changes,
+    targetPath: target,
     noop: false,
   };
 }
@@ -251,11 +265,17 @@ function orderedFrontmatter(data: Record<string, unknown>): Record<string, unkno
 }
 
 /**
- * Where the migrated file should physically live in v0.3:
- * - claim/active goes to memory/{type}s/
- * - claim/superseded or retired goes to archive/
- * - observation/active goes to observations/
+ * Where the migrated file should physically live after the migration:
+ * - claim/active operator-tier goes to memory/operator/{type}s/ (v0.4)
+ * - claim/active otherwise goes to memory/{type}s/
+ * - claim/superseded or retired goes to archive/ (archive is tier-agnostic)
+ * - observation/active goes to observations/ (tier-agnostic per Phase 4 design)
  * If the file is already in the right directory we leave it.
+ *
+ * Note: this duplicates path logic from `MemspecStore.pathForItem` rather than
+ * delegating, because the legacy frontmatter handed to migrate isn't yet a
+ * validated `MemoryFrontmatter`. Phase 4 audit flagged the dup-logic for v0.5
+ * cleanup; for v0.4 we keep the local copy tier-aware.
  */
 function targetPath(storeRoot: string, currentPath: string, data: Record<string, unknown>): string {
   const id = String(data.id);
@@ -269,7 +289,12 @@ function targetPath(storeRoot: string, currentPath: string, data: Record<string,
   } else if (kind === 'observation' || !type) {
     dir = join(storeRoot, 'observations');
   } else {
-    dir = join(storeRoot, 'memory', `${type}s`);
+    const sourceKind = (data.source_kind as SourceKind | undefined)
+      ?? inferSourceKind(String(data.source ?? ''));
+    const tier = storageTierForSourceKind(sourceKind);
+    dir = tier === 'operator'
+      ? join(storeRoot, 'memory', 'operator', `${type}s`)
+      : join(storeRoot, 'memory', `${type}s`);
   }
 
   // Keep the existing dated subdirectory for observations if the file is already inside one.
@@ -375,7 +400,7 @@ export function runMigrate(options: MigrateOptions): MigrateResult {
     if (!data || typeof data !== 'object' || !data.id) continue;
     rawDocs.push({ path: file, raw, source: String(data.source ?? '') });
 
-    const change = computeFileChange(file, raw, sourceOverrides);
+    const change = computeFileChange(store.root, file, raw, sourceOverrides);
     if (change) fileChanges.push(change);
   }
 
@@ -386,6 +411,15 @@ export function runMigrate(options: MigrateOptions): MigrateResult {
   lines.push('');
 
   const changed = fileChanges.filter((c) => !c.noop);
+
+  // Pre-migration sanity report sections (v0.4 additions).
+  lines.push(renderOperatorRelocations(store.root, changed));
+  lines.push('');
+  lines.push(renderFieldMigrationSummary(changed));
+  lines.push('');
+  lines.push('v0.4 additions: No new fields to backfill — refines/supports/depends_on remain absent.');
+  lines.push('');
+
   lines.push(`Scanned ${rawDocs.length} memspec file(s); ${changed.length} need migration.`);
 
   // Dry-run preview: show the per-file change list.
@@ -412,28 +446,50 @@ export function runMigrate(options: MigrateOptions): MigrateResult {
     };
   }
 
-  // Apply pass: write each file, optionally relocating it to its v0.3 home.
+  // Apply pass: write field changes to the source path, then atomically relocate
+  // to the v0.4 target path if different. Atomicity contract: we always write
+  // the new file before unlinking the old, so a crash mid-move leaves the
+  // record recoverable (worst case: a duplicate id that the reader resolves
+  // via the operator-path-wins collision rule).
   let written = 0;
   let moved = 0;
   for (const fc of changed) {
-    writeFileSync(fc.path, fc.afterRaw);
-    written++;
+    const target = fc.targetPath;
+    const needsRelocation = target !== fc.path;
 
-    // Reload to determine target path post-migration.
-    const data = matter(fc.afterRaw).data as Record<string, unknown>;
-    const target = targetPath(store.root, fc.path, data);
-    if (target !== fc.path) {
-      // Ensure target dir exists.
+    if (needsRelocation) {
+      // Ensure target dir exists before any write.
       const targetDir = dirname(target);
       if (!existsSync(targetDir)) {
         mkdirSync(targetDir, { recursive: true });
       }
-      renameSync(fc.path, target);
+      // Defensive: if a stale copy already sits at the target path, keep the
+      // target (more authoritative when target is operator tier), warn, then
+      // drop the source. This shouldn't happen on a clean store but we don't
+      // want to silently clobber either direction.
+      if (existsSync(target)) {
+        process.stderr.write(
+          `memspec migrate: both ${fc.path} and ${target} exist for the same id; keeping ${target} and removing source.\n`,
+        );
+        unlinkSync(fc.path);
+        continue;
+      }
+      // Atomic per-record: write the migrated content at the new path first,
+      // then unlink the old path. If the unlink fails we've still written the
+      // canonical copy — re-running migrate will clean up the orphan.
+      writeFileSync(target, fc.afterRaw);
+      written++;
+      if (existsSync(fc.path)) {
+        unlinkSync(fc.path);
+      }
       moved++;
+    } else {
+      writeFileSync(fc.path, fc.afterRaw);
+      written++;
     }
   }
   lines.push('');
-  lines.push(`Wrote ${written} file(s); moved ${moved} to v0.3 paths.`);
+  lines.push(`Wrote ${written} file(s); moved ${moved} to v0.4 paths.`);
 
   return {
     message: lines.join('\n'),
@@ -442,6 +498,86 @@ export function runMigrate(options: MigrateOptions): MigrateResult {
     apply: true,
     sourceTable,
   };
+}
+
+/**
+ * Pre-migration sanity report: list every record that would move from the
+ * standard storage path to the operator-tier path. Operator-supervised review
+ * surface — surface the source string that triggered the tier mapping so
+ * mis-classifications are visible before --apply.
+ */
+function renderOperatorRelocations(storeRoot: string, changed: FileChange[]): string {
+  const relocations = changed
+    .filter((c) => c.targetPath !== c.path && c.targetPath.includes(join('memory', 'operator')))
+    .map((c) => {
+      const parsed = matter(c.beforeRaw);
+      const data = parsed.data as Record<string, unknown>;
+      return {
+        id: String(data.id),
+        from: relativePath(storeRoot, c.path),
+        to: relativePath(storeRoot, c.targetPath),
+        source: String(data.source ?? '(unset)'),
+      };
+    });
+
+  if (relocations.length === 0) {
+    return 'Operator-tier relocations: none.';
+  }
+
+  const lines: string[] = [`Operator-tier relocations (${relocations.length}):`, ''];
+  for (const r of relocations) {
+    lines.push(`  ${r.id}`);
+    lines.push(`    from: ${r.from}`);
+    lines.push(`      to: ${r.to}`);
+    lines.push(`    source: ${r.source}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Roll-up of schema field migrations across all changed files. Counts every
+ * legacy → v0.3 rename + drop so operators can sanity-check the scale of the
+ * v0.2-to-v0.4 hop in one glance. Each row mirrors a `changes.push(...)` site
+ * in `computeFileChange`.
+ */
+function renderFieldMigrationSummary(changed: FileChange[]): string {
+  const patterns: Array<[string, RegExp]> = [
+    ['state remapped', /^state .* -> /],
+    ['kind defaulted to claim', /^kind: claim \(default\)$/],
+    ['decay_after -> check_by', /^decay_after -> check_by$/],
+    ['corrects -> supersedes', /^corrects -> supersedes$/],
+    ['corrected_by -> superseded_by', /^corrected_by -> superseded_by$/],
+    ['correction_reason -> supersede_reason', /^correction_reason -> supersede_reason$/],
+    ['supersede_reason backfilled', /^supersede_reason backfilled/],
+    ['ext.code_anchors -> anchors', /^ext\.code_anchors -> anchors$/],
+    ['duplicate ext.code_anchors dropped', /^dropped duplicate ext\.code_anchors$/],
+    ['confidence -> ext.legacy_confidence', /^confidence -> ext\.legacy_confidence$/],
+    ['source_kind inferred', /^source_kind: .* \(inferred /],
+    ['verified_with inferred', /^verified_with: .* \(inferred\)$/],
+    ['stale flagged', /^stale: true /],
+    ['relocations queued', /^relocate -> /],
+  ];
+
+  const counts = new Map<string, number>();
+  for (const fc of changed) {
+    for (const change of fc.changes) {
+      for (const [label, re] of patterns) {
+        if (re.test(change)) counts.set(label, (counts.get(label) ?? 0) + 1);
+      }
+    }
+  }
+
+  const lines: string[] = ['Schema field migrations:'];
+  let any = false;
+  for (const [label] of patterns) {
+    const n = counts.get(label) ?? 0;
+    if (n > 0) {
+      lines.push(`  ${String(n).padStart(4)}  ${label}`);
+      any = true;
+    }
+  }
+  if (!any) lines.push('  (none — store is already v0.4-shaped)');
+  return lines.join('\n');
 }
 
 function relativePath(root: string, file: string): string {

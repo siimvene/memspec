@@ -149,7 +149,7 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
     }
     lines.push('For each candidate, review the changed files and run one of:');
     lines.push('  memspec verify <id>                          # confirms — fails while anchors drift');
-    lines.push('  memspec correct <id> --reason ... --replace ...  # memory is now wrong');
+    lines.push('  memspec supersede <id> --reason ... --body ...  # memory is now wrong');
     lines.push('  memspec anchor <id> <files...>               # still true; re-baseline anchors');
   }
   if (sinceRef) lines.push('', `Range: ${sinceRef.substring(0, 12)}..HEAD (checkpoint updated)`);

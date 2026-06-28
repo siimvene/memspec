@@ -6,7 +6,7 @@ import matter from 'gray-matter';
 import { makeTempProject, readText, runCli } from './helpers.js';
 
 async function addFact(target: string, title: string): Promise<string> {
-  await runCli(['add', 'fact', title, '--cwd', target, '--body', 'Body text', '--source', 'test']);
+  await runCli(['remember', 'fact', title, '--cwd', target, '--body', 'Body text', '--source', 'test']);
   const factsDir = join(target, '.memspec', 'memory', 'facts');
   const entries = await readdir(factsDir);
   return entries[entries.length - 1].replace(/\.md$/, '');
@@ -160,7 +160,7 @@ test('verify rejects non-active memories', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   const id = await addFact(target, 'Soon corrected');
-  await runCli(['correct', id, '--cwd', target, '--reason', 'wrong']);
+  await runCli(['supersede', id, '--cwd', target, '--reason', 'wrong']);
 
   await assert.rejects(
     () => runCli(['verify', id, '--cwd', target]),
@@ -175,8 +175,8 @@ test('verify keeps check_by never untouched', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
-    'add', 'decision', 'Durable decision', '--cwd', target,
-    '--body', 'Locked in', '--source', 'test', '--decay-after', 'never',
+    'remember', 'decision', 'Durable decision', '--cwd', target,
+    '--body', 'Locked in', '--source', 'test', '--check-by', 'never',
   ]);
   const decisionsDir = join(target, '.memspec', 'memory', 'decisions');
   const [entry] = await readdir(decisionsDir);

@@ -6,7 +6,7 @@ import matter from 'gray-matter';
 import { makeTempProject, readText, runCli } from './helpers.js';
 
 async function addFact(target: string, title: string): Promise<string> {
-  await runCli(['add', 'fact', title, '--cwd', target, '--body', 'Body text', '--source', 'test']);
+  await runCli(['remember', 'fact', title, '--cwd', target, '--body', 'Body text', '--source', 'test']);
   const factsDir = join(target, '.memspec', 'memory', 'facts');
   const entries = await readdir(factsDir);
   assert.equal(entries.length, 1);

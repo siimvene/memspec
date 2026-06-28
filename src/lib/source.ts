@@ -29,6 +29,15 @@ export function effectiveSourceKind(item: { source: string; source_kind?: Source
 }
 
 /**
+ * Storage tier discriminator for a source_kind. Phase 4 will route operator
+ * records to a separate filesystem path; callers should use this helper rather
+ * than inline string comparisons against 'operator'.
+ */
+export function storageTierForSourceKind(kind: SourceKind): 'operator' | 'standard' {
+  return kind === 'operator' ? 'operator' : 'standard';
+}
+
+/**
  * Strip date suffixes and similar variants when bucketing sources for the
  * migration source_kind table. `therin-2026-05-29` and `therin` are the same
  * voice; the dry-run table groups them so review covers fewer unique strings.
