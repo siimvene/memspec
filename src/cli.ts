@@ -275,7 +275,7 @@ program
 
 program
   .command('migrate')
-  .description('One-shot v0.2 -> v0.3 migration of a memspec store (idempotent; dry-run by default)')
+  .description('One-shot v0.2 or v0.3 -> v0.4 migration of a memspec store (idempotent; dry-run by default)')
   .option('--cwd <path>', 'project root')
   .option('--apply', 'write changes (dry-run is the default)')
   .option('--override <pair...>', 'override source_kind for a source string: source=operator|agent|import')

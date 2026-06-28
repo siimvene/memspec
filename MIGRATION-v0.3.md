@@ -1,9 +1,16 @@
-# Migrating to memspec v0.3
+# Migrating to memspec v0.3 / v0.4
 
 v0.3 is a breaking redesign ("witnessed claims"): renamed schema fields, a
 cut-down MCP tool surface, and evidence-based trust instead of confidence
 scores. The migration is one CLI command plus a review of one inference
 table. Budget ten minutes.
+
+> **v0.4 note:** the same `memspec migrate` CLI now hops v0.2 or v0.3 stores
+> straight to v0.4 in one pass. v0.4 adds tier-segregated storage
+> (operator-sourced records relocate to `memory/operator/{type}s/`) and three
+> optional typed-relation fields (`refines`, `supports`, `depends_on`). See
+> the "v0.4 in one hop" section at the bottom for the differences from a
+> plain v0.3 migration.
 
 ## Who needs to migrate
 
@@ -106,3 +113,39 @@ git checkout -- .memspec/   # or restore the .memspec.bak-v02 copy
 Because the migrate script is idempotent and the v0.3 reader is dual-mode,
 rollback is mostly cosmetic — a restored v0.2 store keeps working under the
 v0.3 binary, and you can re-run the migration whenever you're ready.
+
+## v0.4 in one hop
+
+A store on v0.2 or v0.3 schema goes straight to v0.4 with a single
+`memspec migrate --apply`. Nothing about the dry-run/apply contract changes;
+the v0.4 binary just emits extra surface in the pre-migration report and
+relocates more files on apply.
+
+### What's new on top of the v0.3 migration
+
+1. **Operator-tier path segregation.** Records whose effective `source_kind`
+   resolves to `operator` (any `siim`, `user`, or `human:<name>` source —
+   plus anything you flip with `--override source=operator`) relocate from
+   `memory/{type}s/<id>.md` to `memory/operator/{type}s/<id>.md`.
+   Observations and archived records are tier-agnostic and stay put.
+2. **New pre-migration report sections.** The dry-run now prints an
+   `Operator-tier relocations` block listing every record that would move
+   (id, current path, target path, triggering source string), a
+   `Schema field migrations` roll-up counting each legacy → v0.3 rename
+   across the store, and a one-line `v0.4 additions` reminder.
+3. **No backfill for the new typed-relation fields.** `refines`, `supports`,
+   and `depends_on` are optional in the v0.4 schema and are deliberately
+   left absent on migrated records — they're populated only by explicit
+   `memspec relate` calls or `memspec remember --refines/--supports/--depends-on`.
+
+### Resume protocol if the migration is interrupted
+
+Apply is atomic per record: the new path is written, then the old path is
+unlinked. If `migrate --apply` dies mid-run, simply re-invoke it — the
+script is idempotent and any partially-moved record either looks v0.4-shape
+already (skipped) or still has its source file (re-relocated).
+
+If you spot a record where both the source path and the operator-tier
+target exist for the same id, the reader's collision rule kicks in
+(operator path wins, stderr warning) and the next migrate pass logs a
+matching warning before unlinking the duplicate.

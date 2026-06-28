@@ -146,8 +146,9 @@ test('migrate --apply renames fields and remaps state', async () => {
   assert.equal(archived.corrected_by, undefined);
   assert.equal(archived.supersede_reason, '(predates reason tracking)');
 
+  // v0.4: operator-sourced decisions relocate to memory/operator/decisions/
   const operator = await loadFm(
-    join(target, '.memspec', 'memory', 'decisions', 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VD.md'),
+    join(target, '.memspec', 'memory', 'operator', 'decisions', 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VD.md'),
   );
   assert.equal(operator.source_kind, 'operator');
   assert.equal(operator.check_by, 'never');
@@ -185,8 +186,9 @@ test('migrate --override honours operator override', async () => {
     '--override', 'claude-code=operator',
   ]);
 
+  // Override flips claude-code to operator → facts now relocate to operator subtree.
   const fact = await loadFm(
-    join(target, '.memspec', 'memory', 'facts', 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB.md'),
+    join(target, '.memspec', 'memory', 'operator', 'facts', 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB.md'),
   );
   assert.equal(fact.source_kind, 'operator');
 });
