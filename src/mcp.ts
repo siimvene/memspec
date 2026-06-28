@@ -176,20 +176,28 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       text += `\n⚠ Potential duplicates found: ${titles}. Consider memspec_supersede instead.`;
     }
 
+    const structured: Record<string, unknown> = {
+      id: result.id,
+      type,
+      title,
+      source: resolvedSource ?? null,
+      tags: tags ?? [],
+      check_by: check_by ?? null,
+      anchors: result.anchors,
+      verified_with: result.verified_with,
+      anchor_warnings: result.anchorWarnings,
+      duplicates: result.duplicates ?? null,
+    };
+    if (result.autoAttached) {
+      // Phase 5 — mid-band edge attached at write time. Array shape so a
+      // future widening of the per-write attach budget doesn't require a
+      // breaking response change.
+      structured.auto_attached = [result.autoAttached];
+    }
+
     return {
       content: [{ type: 'text' as const, text }],
-      structuredContent: {
-        id: result.id,
-        type,
-        title,
-        source: resolvedSource ?? null,
-        tags: tags ?? [],
-        check_by: check_by ?? null,
-        anchors: result.anchors,
-        verified_with: result.verified_with,
-        anchor_warnings: result.anchorWarnings,
-        duplicates: result.duplicates ?? null,
-      } as Record<string, unknown>,
+      structuredContent: structured,
     };
   } catch (err) {
     return { content: [{ type: 'text' as const, text: String(err) }], isError: true };

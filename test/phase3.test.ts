@@ -211,8 +211,11 @@ test('status returns conflict report, sweep candidates, and schema violations', 
   const target = await makeProject();
 
   // Two active facts with overlapping titles → title-overlap conflict.
-  runRemember('fact', 'Auth uses JWT tokens', { cwd: target, body: 'JWT 15min', source: 'agent-1' });
-  runRemember('fact', 'Auth uses JWT tokens', { cwd: target, body: 'JWT refresh', source: 'agent-2' });
+  // First five normalised words match (status's title-overlap bucket) but
+  // the full titles differ, so v0.4 Phase 5 high-band refusal (exact title
+  // match) doesn't fire. The pair still surfaces in the status report.
+  runRemember('fact', 'Auth uses JWT tokens issued', { cwd: target, body: 'JWT 15min', source: 'agent-1' });
+  runRemember('fact', 'Auth uses JWT tokens issued nightly', { cwd: target, body: 'JWT refresh', source: 'agent-2' });
 
   // A stale-eligible sweep candidate: past TTL, no anchors, assertion witness.
   // Hand-write the file with stale: true and a past check_by.

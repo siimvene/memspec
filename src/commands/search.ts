@@ -1,4 +1,5 @@
 import { getProfile, loadConfig } from '../lib/config.js';
+import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { MemspecStore, type StoreSearchOptions } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits } from '../lib/usage.js';
@@ -99,15 +100,9 @@ function annotateConflicts(items: MemoryItem[]): Map<string, string[]> {
       if (!b.type) continue;
       if (a.type !== b.type) continue;
       // share at least one tag
-      if (a.tags.length === 0 || b.tags.length === 0) continue;
-      const sharedTag = a.tags.some((t) => b.tags.includes(t));
-      if (!sharedTag) continue;
+      if (sharedTagCount(a.tags, b.tags) === 0) continue;
       // title token overlap >= 2 — cheap stand-in for semantic overlap
-      const tokensA = new Set(a.title.toLowerCase().split(/\s+/).filter((t) => t.length > 3));
-      const tokensB = new Set(b.title.toLowerCase().split(/\s+/).filter((t) => t.length > 3));
-      let overlap = 0;
-      for (const t of tokensA) if (tokensB.has(t)) overlap++;
-      if (overlap < 2) continue;
+      if (titleTokenOverlap(a.title, b.title) < 2) continue;
       out.get(a.id)!.add(b.id);
       out.get(b.id)!.add(a.id);
     }
