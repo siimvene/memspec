@@ -49,6 +49,9 @@ export const memoryFrontmatterSchema = z.object({
   superseded_by: z.string().optional(),
   supersede_reason: z.string().optional(),
   conflicts_with: z.array(z.string()).optional(),
+  refines: z.array(z.string()).optional(),
+  supports: z.array(z.string()).optional(),
+  depends_on: z.array(z.string()).optional(),
   expires: z.string().refine(
     (s) => !isNaN(Date.parse(s)),
     'Must be a valid ISO 8601 date',
