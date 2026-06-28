@@ -28,7 +28,7 @@ async function makeGitProject(): Promise<string> {
 }
 
 async function addAnchoredFact(target: string, title: string, file: string): Promise<string> {
-  await runCli(['add', 'fact', title, '--cwd', target, '--body', 'Body', '--source', 'test']);
+  await runCli(['remember', 'fact', title, '--cwd', target, '--body', 'Body', '--source', 'test']);
   const factsDir = join(target, '.memspec', 'memory', 'facts');
   const entries = await readdir(factsDir);
   const id = entries[entries.length - 1].replace(/\.md$/, '');

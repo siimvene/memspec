@@ -14,8 +14,8 @@ test('context returns empty section when no memories exist', async () => {
 test('context returns markdown section listing active memories', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target, '--no-install-hooks']);
-  await runCli(['add', 'fact', 'Auth uses JWT', '--cwd', target, '--body', 'JWT with 15min expiry', '--source', 'test']);
-  await runCli(['add', 'decision', 'Chose REST', '--cwd', target, '--body', 'REST over GraphQL for simplicity', '--source', 'test']);
+  await runCli(['remember','fact', 'Auth uses JWT', '--cwd', target, '--body', 'JWT with 15min expiry', '--source', 'test']);
+  await runCli(['remember','decision', 'Chose REST', '--cwd', target, '--body', 'REST over GraphQL for simplicity', '--source', 'test']);
 
   const result = await runCli(['context', '--cwd', target]);
   // Boot header carries the store size and points at the full readout.
@@ -33,7 +33,7 @@ test('context marks anchored memories with the anchor witness', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target, '--no-install-hooks']);
   await writeFile(joinPath(target, 'auth.py'), 'argon2id\n');
-  await runCli(['add', 'fact', 'Anchored fact', '--cwd', target, '--body', 'auth backend', '--source', 'test']);
+  await runCli(['remember','fact', 'Anchored fact', '--cwd', target, '--body', 'auth backend', '--source', 'test']);
   const entries = await readdir(joinPath(target, '.memspec', 'memory', 'facts'));
   const id = entries[0].replace(/\.md$/, '');
   await runCli(['anchor', id, 'auth.py', '--cwd', target]);
@@ -45,7 +45,7 @@ test('context marks anchored memories with the anchor witness', async () => {
 test('context --format json emits an array of items', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target, '--no-install-hooks']);
-  await runCli(['add', 'fact', 'Item one', '--cwd', target, '--body', 'Body one', '--source', 'test']);
+  await runCli(['remember','fact', 'Item one', '--cwd', target, '--body', 'Body one', '--source', 'test']);
 
   const result = await runCli(['context', '--cwd', target, '--format', 'json']);
   const parsed = JSON.parse(result.stdout);
@@ -69,7 +69,7 @@ test('context --limit caps the number of items emitted', async () => {
   await runCli(['init', '--cwd', target, '--no-install-hooks']);
   for (let i = 0; i < 5; i++) {
     await runCli([
-      'add', 'fact', `Fact ${i}`,
+      'remember', 'fact', `Fact ${i}`,
       '--cwd', target,
       '--body', `body ${i}`,
       '--source', 'test',
@@ -89,7 +89,7 @@ test('context respects --budget (tight budget drops items)', async () => {
   const longBody = 'x'.repeat(300);
   for (let i = 0; i < 10; i++) {
     await runCli([
-      'add', 'fact', `Long fact ${i}`,
+      'remember', 'fact', `Long fact ${i}`,
       '--cwd', target,
       '--body', longBody,
       '--source', 'test',
@@ -105,8 +105,8 @@ test('context respects --budget (tight budget drops items)', async () => {
 test('context --type filters by memory type', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target, '--no-install-hooks']);
-  await runCli(['add', 'fact', 'A fact', '--cwd', target, '--body', 'fact body', '--source', 'test']);
-  await runCli(['add', 'decision', 'A decision', '--cwd', target, '--body', 'decision body', '--source', 'test']);
+  await runCli(['remember','fact', 'A fact', '--cwd', target, '--body', 'fact body', '--source', 'test']);
+  await runCli(['remember','decision', 'A decision', '--cwd', target, '--body', 'decision body', '--source', 'test']);
 
   const result = await runCli(['context', '--cwd', target, '--type', 'decision', '--format', 'json']);
   const parsed = JSON.parse(result.stdout);
@@ -117,8 +117,8 @@ test('context --type filters by memory type', async () => {
 test('context --query routes through store.search', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target, '--no-install-hooks']);
-  await runCli(['add', 'fact', 'JWT auth tokens', '--cwd', target, '--body', 'JWT details', '--source', 'test']);
-  await runCli(['add', 'fact', 'Database is Postgres', '--cwd', target, '--body', 'Postgres 16', '--source', 'test']);
+  await runCli(['remember','fact', 'JWT auth tokens', '--cwd', target, '--body', 'JWT details', '--source', 'test']);
+  await runCli(['remember','fact', 'Database is Postgres', '--cwd', target, '--body', 'Postgres 16', '--source', 'test']);
 
   const result = await runCli(['context', '--cwd', target, '--query', 'JWT']);
   assert.match(result.stdout, /JWT auth tokens/);
@@ -129,7 +129,7 @@ test('context truncates very long bodies in markdown output', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target, '--no-install-hooks']);
   const longBody = 'x'.repeat(500);
-  await runCli(['add', 'fact', 'Long body', '--cwd', target, '--body', longBody, '--source', 'test']);
+  await runCli(['remember','fact', 'Long body', '--cwd', target, '--body', longBody, '--source', 'test']);
 
   const result = await runCli(['context', '--cwd', target]);
   // The truncation indicator should be present and the full 500-char body

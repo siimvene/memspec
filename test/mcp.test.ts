@@ -130,11 +130,11 @@ test('mcp server lists all memspec tools over stdio', async () => {
     }).tools ?? []);
     const toolNames = tools.map((tool) => tool.name).sort();
 
-    // v0.3 surface (9 tools) + v0.4 memspec_relate + memspec_export + 2 deprecation shims.
+    // v0.4 surface (11 tools): v0.3 base (9) + memspec_relate (Phase 2) +
+    // memspec_export (Phase 6). Phase 7 removed the memspec_add / memspec_correct
+    // deprecation shims.
     assert.deepEqual(toolNames, [
-      'memspec_add',
       'memspec_anchor',
-      'memspec_correct',
       'memspec_export',
       'memspec_get',
       'memspec_observe',
@@ -147,10 +147,9 @@ test('mcp server lists all memspec tools over stdio', async () => {
       'memspec_verify',
     ]);
 
-    const addTool = tools.find((tool) => tool.name === 'memspec_add');
-    assert.ok(addTool?.description?.startsWith('DEPRECATED'));
-    const correctTool = tools.find((tool) => tool.name === 'memspec_correct');
-    assert.ok(correctTool?.description?.startsWith('DEPRECATED'));
+    // Phase 7 — verify the removed shims are gone from the tool list.
+    assert.equal(toolNames.includes('memspec_add'), false);
+    assert.equal(toolNames.includes('memspec_correct'), false);
 
     const rememberTool = tools.find((tool) => tool.name === 'memspec_remember');
     assert.ok(rememberTool?.description?.includes('anchor it now'));
@@ -166,7 +165,7 @@ test('mcp search tool returns matching memories', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
-    'add',
+    'remember',
     'decision',
     'Credential isolation approach',
     '--cwd',
@@ -217,7 +216,7 @@ test('mcp get tool returns full memory by id', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli([
-    'add',
+    'remember',
     'fact',
     'Test fact for MCP get',
     '--cwd',
@@ -262,99 +261,10 @@ test('mcp get tool returns full memory by id', async () => {
   }
 });
 
-test('mcp memspec_add shim records via remember and flags deprecation', async () => {
-  const target = await makeTempProject();
-  await runCli(['init', '--cwd', target]);
-
-  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target]);
-
-  try {
-    await session.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'memspec-test', version: '0.0.0' },
-    });
-    session.notify('notifications/initialized', {});
-
-    const call = await session.request('tools/call', {
-      name: 'memspec_add',
-      arguments: {
-        type: 'fact',
-        title: 'Added through the v0.2 alias',
-        body: 'shim payload',
-        source: 'mcp-test',
-        tags: 'a,b',
-      },
-    });
-
-    assert.equal(call.error, undefined);
-    const result = call.result as {
-      content: Array<{ text: string }>;
-      structuredContent?: Record<string, unknown>;
-    };
-    assert.equal(result.structuredContent?._deprecated, 'use memspec_remember; will be removed in v0.4');
-    assert.ok(result.content.some((c) => c.text.includes('DEPRECATED')));
-
-    // The write actually landed through the remember path.
-    const store = await import('../src/lib/store.js').then((m) => new m.MemspecStore(target));
-    const items = store.loadAll();
-    assert.equal(items.length, 1);
-    assert.equal(items[0].title, 'Added through the v0.2 alias');
-    assert.deepEqual(items[0].tags, ['a', 'b']);
-  } finally {
-    await session.close();
-  }
-});
-
-test('mcp memspec_correct shim supersedes and flags deprecation', async () => {
-  const target = await makeTempProject();
-  await runCli(['init', '--cwd', target]);
-  await runCli(['add', 'fact', 'Wrong port', '--cwd', target, '--body', 'listens on 7779', '--source', 'mcp-test']);
-
-  const store = await import('../src/lib/store.js').then((m) => new m.MemspecStore(target));
-  const targetId = store.loadAll()[0].id;
-
-  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target]);
-
-  try {
-    await session.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'memspec-test', version: '0.0.0' },
-    });
-    session.notify('notifications/initialized', {});
-
-    const call = await session.request('tools/call', {
-      name: 'memspec_correct',
-      arguments: {
-        id: targetId,
-        reason: 'port changed',
-        replace: 'listens on 8080',
-      },
-    });
-
-    assert.equal(call.error, undefined);
-    const result = call.result as {
-      content: Array<{ text: string }>;
-      structuredContent?: Record<string, unknown>;
-    };
-    assert.equal(result.structuredContent?._deprecated, 'use memspec_supersede; will be removed in v0.4');
-    assert.equal(result.structuredContent?.superseded_ids && (result.structuredContent.superseded_ids as string[])[0], targetId);
-
-    const after = store.loadAll();
-    const old = after.find((i) => i.id === targetId);
-    assert.equal(old?.state, 'superseded');
-    const replacement = after.find((i) => i.id !== targetId);
-    assert.ok(replacement?.body.includes('listens on 8080'));
-  } finally {
-    await session.close();
-  }
-});
-
 test('mcp status tool returns store summary', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
-  await runCli(['add', 'fact', 'Status test item', '--cwd', target, '--source', 'test']);
+  await runCli(['remember', 'fact', 'Status test item', '--cwd', target, '--source', 'test']);
 
   const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target]);
 
