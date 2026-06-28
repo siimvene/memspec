@@ -205,8 +205,10 @@ test('correct refuses operator-sourced records without --override-operator', asy
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   await runCli(['add', 'fact', 'Operator truth', '--cwd', target, '--body', 'Stated by Siim', '--source', 'human:siim']);
-  const entries = await readdir(join(target, '.memspec', 'memory', 'facts'));
-  const id = matter(await readText(join(target, '.memspec', 'memory', 'facts', entries[0]))).data.id;
+  // Phase 4: operator-tier records live under memory/operator/facts/.
+  const operatorFactsDir = join(target, '.memspec', 'memory', 'operator', 'facts');
+  const entries = await readdir(operatorFactsDir);
+  const id = matter(await readText(join(operatorFactsDir, entries[0]))).data.id;
 
   await assert.rejects(
     () => runCli(['correct', id, '--reason', 'agent disagrees', '--cwd', target]),
@@ -216,8 +218,8 @@ test('correct refuses operator-sourced records without --override-operator', asy
     },
   );
 
-  // Untouched without the flag.
-  const stillThere = await readdir(join(target, '.memspec', 'memory', 'facts'));
+  // Untouched without the flag — still sitting in the operator tier.
+  const stillThere = await readdir(operatorFactsDir);
   assert.equal(stillThere.length, 1);
 
   // With the flag it proceeds, and the override is logged into the reason.

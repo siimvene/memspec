@@ -4,6 +4,7 @@ import { defaultConfigYaml, type ConfigGenerationOptions } from './config.js';
 import { FtsIndex } from './fts.js';
 import { parseMemoryFile, serializeMemoryFile } from './frontmatter.js';
 import { validateFrontmatter } from './schema.js';
+import { effectiveSourceKind, storageTierForSourceKind } from './source.js';
 import type { MemoryFrontmatter, MemoryItem, MemoryType } from './types.js';
 import matter from 'gray-matter';
 
@@ -114,6 +115,15 @@ export class MemspecStore {
     return join(this.root, 'memory', `${type}s`);
   }
 
+  /**
+   * Phase 4: operator-tier records live in a dedicated subtree so storage
+   * segregation is visible on disk. Observations are tier-agnostic — they
+   * stay in their single directory regardless of source_kind.
+   */
+  operatorTypeDir(type: MemoryType): string {
+    return join(this.root, 'memory', 'operator', `${type}s`);
+  }
+
   observationDir(): string {
     return join(this.root, 'observations');
   }
@@ -122,7 +132,9 @@ export class MemspecStore {
     if (item.kind === 'observation' || !item.type) {
       return join(this.observationDir(), `${item.id}.md`);
     }
-    return join(this.typeDir(item.type), `${item.id}.md`);
+    const tier = storageTierForSourceKind(effectiveSourceKind(item));
+    const dir = tier === 'operator' ? this.operatorTypeDir(item.type) : this.typeDir(item.type);
+    return join(dir, `${item.id}.md`);
   }
 
   writeItem(item: MemoryFrontmatter & { title: string; body: string }): string {
@@ -153,7 +165,11 @@ export class MemspecStore {
     ];
 
     this.warnings.length = 0;
-    const items: MemoryItem[] = [];
+    // Phase 4: collision defence. Same id appearing in both standard and operator
+    // paths shouldn't happen, but if it does the operator path wins (more
+    // authoritative). Stderr warning so callers notice the drift; no throw.
+    const operatorMemoryRoot = join(this.root, 'memory', 'operator');
+    const byId = new Map<string, MemoryItem>();
 
     for (const file of files) {
       try {
@@ -174,13 +190,36 @@ export class MemspecStore {
           continue;
         }
 
-        items.push(parseMemoryFile(raw, file));
+        const item = parseMemoryFile(raw, file);
+        const existing = byId.get(item.id);
+        if (existing) {
+          const incomingIsOperator = file.startsWith(operatorMemoryRoot);
+          const existingIsOperator = existing.filePath.startsWith(operatorMemoryRoot);
+          if (incomingIsOperator && !existingIsOperator) {
+            process.stderr.write(
+              `memspec: id collision for ${item.id} between ${existing.filePath} and ${file}; operator path wins.\n`,
+            );
+            byId.set(item.id, item);
+          } else if (!incomingIsOperator && existingIsOperator) {
+            process.stderr.write(
+              `memspec: id collision for ${item.id} between ${existing.filePath} and ${file}; operator path wins.\n`,
+            );
+            // Keep existing (operator).
+          } else {
+            // Same tier — keep first, but surface the duplicate so it's visible.
+            process.stderr.write(
+              `memspec: duplicate id ${item.id} at ${existing.filePath} and ${file}; keeping first.\n`,
+            );
+          }
+        } else {
+          byId.set(item.id, item);
+        }
       } catch (err) {
         this.warnings.push({ file, reason: err instanceof Error ? err.message : String(err) });
       }
     }
 
-    return items;
+    return Array.from(byId.values());
   }
 
   loadActive(): MemoryItem[] {

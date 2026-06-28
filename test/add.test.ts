@@ -121,11 +121,17 @@ test('add infers source_kind from the source string', async () => {
   await runCli(['add', 'fact', 'Operator fact', '--cwd', target, '--source', 'human:siim']);
   await runCli(['add', 'fact', 'Agent fact', '--cwd', target, '--source', 'claude-code']);
 
+  // Operator-tier records live under memory/operator/facts/ (Phase 4),
+  // agent-tier records stay in memory/facts/.
   const factsDir = join(target, '.memspec', 'memory', 'facts');
-  const entries = await readdir(factsDir);
+  const operatorDir = join(target, '.memspec', 'memory', 'operator', 'facts');
   const kinds = new Map<string, string>();
-  for (const entry of entries) {
+  for (const entry of await readdir(factsDir)) {
     const parsed = matter(await readText(join(factsDir, entry)));
+    kinds.set(parsed.data.source, parsed.data.source_kind);
+  }
+  for (const entry of await readdir(operatorDir)) {
+    const parsed = matter(await readText(join(operatorDir, entry)));
     kinds.set(parsed.data.source, parsed.data.source_kind);
   }
 
