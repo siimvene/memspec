@@ -2,17 +2,22 @@
 
 Portable, file-canonical memory for AI agents.
 
-## What's new in v0.3
+## What's new in v0.4
 
-v0.3 ("witnessed claims") replaces confidence scores with evidence: every claim
+v0.4 ("graph primitives") makes typed relations first-class: every record can
+carry optional `refines`, `supports`, and `depends_on` edges alongside the
+existing supersede/conflict edges. New `memspec_relate` wires edges after the
+fact, `memspec_export` dumps the graph as JSONL / GraphML / DOT, operator-tier
+records segregate on disk under `memory/operator/`, and the v0.3 deprecation
+shims (`memspec_add`, `memspec_correct`, plus the deprecated CLI commands) are
+gone. `memspec migrate` hops v0.2 or v0.3 stores straight to v0.4 in one pass.
+See [MIGRATION-v0.3.md](MIGRATION-v0.3.md) for the upgrade path and
+[CHANGELOG.md](CHANGELOG.md) for the full list of changes.
+
+v0.3 ("witnessed claims") replaced confidence scores with evidence: every claim
 carries how it was last witnessed (`anchor`, `operator`, `evidence`, or
 `assertion`), conflicts are first-class edges, and the boot context opens with
-a "Needs attention" maintenance queue. It is a breaking release — MCP tools
-were renamed (`memspec_add` → `memspec_remember`, `memspec_correct` →
-`memspec_supersede`, with deprecation aliases through v0.3) and six tools were
-deleted, schema fields were renamed, and a one-shot `memspec migrate` command
-upgrades existing stores. See [MIGRATION-v0.3.md](MIGRATION-v0.3.md) for the
-upgrade path and [CHANGELOG.md](CHANGELOG.md) for the full list of changes.
+a "Needs attention" maintenance queue.
 
 ## The Problem
 
@@ -266,7 +271,7 @@ memspec-mcp
 memspec-mcp --cwd /path/to/project
 ```
 
-Exposed tools: `memspec_search`, `memspec_get`, `memspec_remember`, `memspec_supersede`, `memspec_observe`, `memspec_verify`, `memspec_anchor`, `memspec_reconcile`, `memspec_status` — plus deprecation aliases `memspec_add` and `memspec_correct` that forward to the renamed tools (removed in v0.4).
+Exposed tools (v0.4, eleven total): `memspec_search`, `memspec_get`, `memspec_remember`, `memspec_supersede`, `memspec_relate`, `memspec_observe`, `memspec_verify`, `memspec_anchor`, `memspec_reconcile`, `memspec_status`, `memspec_export`. The v0.3 deprecation aliases `memspec_add` and `memspec_correct` were removed in v0.4.
 
 `memspec init`, `memspec sweep`, `memspec stores`, and `memspec migrate` are deliberately CLI-only — store creation and physical removal are operator acts, not an agent surface.
 
@@ -305,10 +310,14 @@ memspec init --cwd ~/.memspec
 .memspec/
   observations/        # Raw, unclassified
   memory/
-    facts/             # Active facts
-    decisions/         # Active decisions
-    procedures/        # Active procedures
-  archive/             # Corrected, decayed, archived items
+    facts/             # Active agent-tier facts
+    decisions/         # Active agent-tier decisions
+    procedures/        # Active agent-tier procedures
+    operator/          # v0.4: tier-segregated operator-sourced records
+      facts/
+      decisions/
+      procedures/
+  archive/             # Superseded and retired items
   config.yaml          # Search engine, embeddings, decay rules
 ```
 
@@ -324,12 +333,14 @@ Each memory is a markdown file with YAML frontmatter (id, kind, type, state, sou
 | `memspec search <query>` | Search active memories (stale items are returned flagged) |
 | `memspec context [--format] [--query] [--type]` | Emit a token-budgeted memory summary for agent context injection |
 | `memspec supersede <id> --reason "..." [--body] [--title] [--merge-from <ids>] [--override-operator]` | Replace, retract, or merge memory; reason persisted on every record involved |
+| `memspec relate --from <id> --to <id> --type <refines\|supports\|depends_on\|conflicts_with>` | Wire a typed edge from one memory to another after the fact |
 | `memspec verify <id> [--evidence "..."]` | Record that a memory is still true; checks code anchors, requires evidence when anchorless |
 | `memspec anchor <id> <files...> [--replace]` | Link a memory to the files it depends on |
 | `memspec reconcile [--since <ref>] [--json]` | Find anchored memories whose code has drifted |
 | `memspec status` | The single maintenance readout (counts, witness classes, stale flags, anchor drift, conflicts, schema violations, sweep candidates) |
 | `memspec sweep [--dry-run]` | Interactively retire stale-flagged items (the only removal path) |
-| `memspec migrate [--apply] [--override source=tier]` | One-shot v0.2 → v0.3 store migration (idempotent; dry-run by default) |
+| `memspec export --format <jsonl\|graphml\|dot> [--include-superseded] [--types <list>]` | Export the memory graph (nodes + edges) to stdout |
+| `memspec migrate [--apply] [--override source=tier]` | One-shot v0.2/v0.3 → v0.4 store migration (idempotent; dry-run by default) |
 
 ## Session-start context injection
 

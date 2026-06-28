@@ -64,22 +64,26 @@ memspec migrate --cwd <root> --apply --override "some-source=operator"
 
 ## Update tool names in calling code
 
-Two MCP tools were renamed. Deprecation aliases answer under the old names
-through v0.3 (each response carries a `_deprecated` field) and are removed
-in v0.4:
+Two MCP tools were renamed in v0.3. The deprecation aliases answered under
+the old names through v0.3 and were removed in v0.4 — update any calling
+code that still uses them:
 
-| v0.2 name | v0.3 name | notes |
+| v0.2 name | v0.3+ name | notes |
 |---|---|---|
 | `memspec_add` | `memspec_remember` | `tags` becomes an array; `decay_after` becomes `check_by`; inline `anchors` added |
 | `memspec_correct` | `memspec_supersede` | `replace` becomes `body`; `supersede_by` becomes a merge into that survivor (`merge_from`) |
 
-Six tools are deleted with no successor — remove any calls to them:
+Six tools were deleted in v0.3 with no successor (and stay gone in v0.4) —
+remove any calls to them:
 
 - `memspec_promote` — the stabilization gate is gone
 - `memspec_consolidate` — use `memspec_supersede` with `merge_from`
 - `memspec_validate` — schema checking is part of `memspec_status`
 - `memspec_decay` — items past `check_by` are flagged stale automatically at read time
 - `memspec_init`, `memspec_stores` — CLI-only operator actions now
+
+v0.4 adds two new tools (`memspec_relate`, `memspec_export`) and a new CLI
+command (`memspec export`). See SPEC §8.2 for the full v0.4 tool list.
 
 ## Schema field changes (for anyone reading frontmatter directly)
 
