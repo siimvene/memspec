@@ -3,7 +3,7 @@ import type { MemoryFrontmatter, MemoryItem } from './types.js';
 import { assertValidFrontmatter } from './schema.js';
 
 const LEGACY_DATE_KEYS = ['decay_after'] as const;
-const DATE_KEYS = ['created', 'check_by', 'last_verified', 'expires', ...LEGACY_DATE_KEYS] as const;
+const DATE_KEYS = ['created', 'check_by', 'last_verified', 'expires', 'valid_from', 'valid_to', ...LEGACY_DATE_KEYS] as const;
 
 function coerceDates(data: Record<string, unknown>): Record<string, unknown> {
   const result = { ...data };
@@ -47,6 +47,8 @@ export function parseMemoryFile(content: string, filePath: string): MemoryItem {
     supports: data.supports,
     depends_on: data.depends_on,
     expires: data.expires,
+    valid_from: data.valid_from,
+    valid_to: data.valid_to,
     ext: data.ext,
     title,
     body: body.trim(),
@@ -81,6 +83,8 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   if (item.supports && item.supports.length > 0) frontmatter.supports = item.supports;
   if (item.depends_on && item.depends_on.length > 0) frontmatter.depends_on = item.depends_on;
   if (item.expires) frontmatter.expires = item.expires;
+  if (item.valid_from) frontmatter.valid_from = item.valid_from;
+  if (item.valid_to) frontmatter.valid_to = item.valid_to;
   if (item.ext && Object.keys(item.ext).length > 0) frontmatter.ext = item.ext;
 
   // Strip leading heading if it matches the title to avoid duplication

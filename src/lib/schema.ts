@@ -79,6 +79,10 @@ export const memoryFrontmatterSchema = z.object({
     (s) => !isNaN(Date.parse(s)),
     'Must be a valid ISO 8601 date',
   ).optional().describe('Observations only: hard ISO 8601 expiry after which the record is no longer surfaced.'),
+  valid_from: z.iso.datetime().optional()
+    .describe('ISO 8601 timestamp when the world-state truth claimed by this record becomes valid. Open-ended if absent. Orthogonal to `check_by` — validity bounds the truth window; `check_by` bounds the review schedule.'),
+  valid_to: z.iso.datetime().optional()
+    .describe('ISO 8601 timestamp when the world-state truth ceases to hold. Open-ended if absent. Orthogonal to `check_by` — past `valid_to` means the fact is no longer true, past `check_by` only means review is overdue.'),
   ext: z.record(z.string(), z.unknown()).optional()
     .describe('Extension bag for non-schema fields (e.g. `ext.confirmations`, `ext.last_verification`, `ext.legacy_confidence`). Conventions documented in `src/lib/types.ts`.'),
 }).refine(

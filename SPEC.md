@@ -1,4 +1,4 @@
-# Memspec Specification v0.4
+# Memspec Specification v0.5
 
 ## Abstract
 
@@ -9,6 +9,18 @@ This document is the portable specification. It is implementation-agnostic — a
 ### Relationship to OKF
 
 Google Cloud's [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) shares Memspec's file surface — markdown body, YAML frontmatter, directory-of-files, no SDK. It standardizes the *static* half of agent knowledge: catalogs of external assets (tables, metrics, runbooks, API endpoints) authored by enrichment agents or humans. Memspec covers the *working-memory* half: claims an agent writes about its own decisions, fixes, and discoveries during work, with first-class lifecycle — witness, supersession, conflict edges, drift detection. A Memspec memory is structurally a valid OKF concept (its `type` is one of `fact`, `decision`, or `procedure`). The formats are complementary, not competing.
+
+### Changes in v0.5 (Connected + Measured)
+
+v0.5 adds two retrieval-side features and the project's first homegrown
+retrieval eval harness. All additions are backward-compatible: new
+fields and parameters are optional; missing values preserve v0.4
+behaviour.
+
+- **Graph traversal on `memspec_search`.** New optional `expand_edges` flag walks typed edges outward from BM25 seed hits. `edge_types` filter narrows the walk (default: all six — `refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`); `expand_depth` caps hops at 1–3 (default 1). Expanded hits carry an `expanded_via: {from_id, edge_type, hops}` field so callers can see why a record surfaced. Hop scoring is BFS order, no numeric decay; outbound traversal only.
+- **Temporal validity intervals.** New optional `valid_from` and `valid_to` ISO8601 fields on `MemoryFrontmatter`. `memspec_search` accepts an `as_of` filter that drops records whose validity window excludes the given timestamp. Orthogonal to `check_by` (which is a review schedule, not a truth window). Missing bounds mean "always valid."
+- **`memspec_remember` and `memspec_get` validity wiring.** Remember accepts `valid_from` / `valid_to` at write time on both MCP and CLI surfaces; get returns them when present.
+- **BENCHMARK.md + `scripts/run-bench.mjs`.** Reproducible retrieval-only eval harness against the public LongMemEval-S dataset. Reports Recall@5/10, MRR, and latency p50/p99. Not paper-comparable (different protocol, smaller sample) but a real measurement baseline for future regressions.
 
 ### Changes in v0.4 (Graph Primitives + Final Shim Cleanup)
 
@@ -220,6 +232,10 @@ A retrieval query contains:
 - **types** (optional): Filter by memory type. Default: all types.
 - **max_tokens** (optional): Token budget for the response. Default: 2000.
 - **profile** (optional): Named retrieval profile. Default: `default`.
+- **expand_edges** (optional, v0.5+): If true, walk typed edges outward from BM25 seed hits to surface connected records. Default: false.
+- **edge_types** (optional, v0.5+): Restrict graph walk to specific edge types. Default: all six (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). No-op when `expand_edges` is false.
+- **expand_depth** (optional, v0.5+): Cap on graph walk hops, 1–3. Default: 1. No-op when `expand_edges` is false.
+- **as_of** (optional, v0.5+): ISO8601 timestamp. Drops records whose `valid_from`/`valid_to` window excludes this instant. Records without validity bounds are always returned.
 
 ### 5.2 Response
 
@@ -229,6 +245,7 @@ A retrieval response is an ordered list of memory items, ranked by relevance, tr
 - The witness class (`verified_with`) and the stale flag, if set
 - Known `conflicts_with` edges (including edges to non-returned claims, with their titles inline)
 - The creation date
+- When `expand_edges` surfaced the hit, an `expanded_via: {from_id, edge_type, hops}` field naming the seed it was reached from (v0.5+)
 
 ### 5.3 Ranking
 
