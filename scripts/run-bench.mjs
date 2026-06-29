@@ -28,12 +28,18 @@ const SEED = Number(process.env.BENCH_SEED || 42);
 
 const BRANCHES = ['v0.4', 'v0.5-graph', 'v0.5-temporal', 'v0.5-integration'];
 const BRANCH_REFS = {
-  'v0.4': 'main',
+  // v0.4 baseline pinned to the release commit so the comparison stays stable
+  // even after v0.5 lands on main.
+  'v0.4': '5e26ec2',
   'v0.5-graph': 'feat/v0.5-graph',
   'v0.5-temporal': 'feat/v0.5-temporal',
   'v0.5-integration': 'feat/v0.5-integration',
 };
-const DATASETS = ['longmemeval', 'locomo'];
+const DATASETS = ['longmemeval', 'locomo', 'realstore'];
+// Real-store eval: pre-populated store + hand-crafted questions with id-based ground truth.
+// Set REAL_STORE_PATH to the project root containing .memspec/ (default: a fixed tmp path).
+const REAL_STORE_PATH = process.env.REAL_STORE_PATH || '';
+const REAL_STORE_QUESTIONS = process.env.REAL_STORE_QUESTIONS || join(REPO_ROOT, 'scripts/real-store-eval-questions.json');
 
 // --- Argument parsing -------------------------------------------------------
 
@@ -153,7 +159,72 @@ function loadLoCoMo() {
   };
 }
 
+function loadRealStore() {
+  if (!REAL_STORE_PATH) {
+    throw new Error('REAL_STORE_PATH env var required for --dataset realstore (project root containing .memspec/)');
+  }
+  if (!existsSync(join(REAL_STORE_PATH, '.memspec'))) {
+    throw new Error(`REAL_STORE_PATH=${REAL_STORE_PATH} does not contain a .memspec/ directory`);
+  }
+  const raw = JSON.parse(readFileSync(REAL_STORE_QUESTIONS, 'utf8'));
+  const questions = raw.questions.map((q) => ({
+    question_id: q.id,
+    question: q.question,
+    expected_ids: q.expected_ids,
+    category: q.category,
+  }));
+  return {
+    sha256: sha256File(REAL_STORE_QUESTIONS),
+    total: questions.length,
+    sampled: questions.length,
+    questions,
+    storePath: REAL_STORE_PATH,
+    realStore: true,
+  };
+}
+
 // --- Per-question evaluation ------------------------------------------------
+
+async function evalRealStoreQuestion(api, question, options, storeRoot) {
+  const searchOpts = {
+    cwd: storeRoot,
+    limit: '10',
+    json: true,
+  };
+  if (options.expandEdges) {
+    searchOpts.expandEdges = true;
+    searchOpts.expandDepth = 1;
+  }
+  const t0 = process.hrtime.bigint();
+  const payload = api.searchPayload(question.question, searchOpts);
+  const t1 = process.hrtime.bigint();
+  const latencyMs = Number(t1 - t0) / 1e6;
+
+  const results = payload.results || [];
+  const expectedSet = new Set(question.expected_ids);
+  const ranks = [];
+  let firstHitRank = 0;
+  results.forEach((r, idx) => {
+    if (expectedSet.has(r.id)) {
+      ranks.push(idx + 1);
+      if (firstHitRank === 0) firstHitRank = idx + 1;
+    }
+  });
+
+  return {
+    question_id: question.question_id,
+    category: question.category,
+    latency_ms: latencyMs,
+    result_count: results.length,
+    ground_truth_count: question.expected_ids.length,
+    hit_ranks: ranks,
+    first_hit_rank: firstHitRank,
+    top_ids: results.slice(0, 10).map((r) => r.id),
+    recall_at_5: ranks.some((r) => r <= 5) ? 1 : 0,
+    recall_at_10: ranks.some((r) => r <= 10) ? 1 : 0,
+    reciprocal_rank: firstHitRank > 0 ? 1 / firstHitRank : 0,
+  };
+}
 
 async function evalQuestion(api, question, options) {
   const storeRoot = join(tmpdir(), `eval-store-${randomBytes(8).toString('hex')}`);
@@ -263,9 +334,11 @@ async function runCondition(branchKey, datasetKey, variantKey, dataset) {
   let i = 0;
   for (const q of dataset.questions) {
     i++;
-    const r = await evalQuestion(api, q, { expandEdges });
+    const r = dataset.realStore
+      ? await evalRealStoreQuestion(api, q, { expandEdges }, dataset.storePath)
+      : await evalQuestion(api, q, { expandEdges });
     perQ.push(r);
-    if (i % 10 === 0) {
+    if (i % 10 === 0 || (dataset.realStore && i === dataset.questions.length)) {
       console.log(`  [${i}/${dataset.questions.length}] recall@10=${perQ.filter((x) => x.recall_at_10).length}/${i}`);
     }
   }
@@ -306,6 +379,7 @@ async function runCondition(branchKey, datasetKey, variantKey, dataset) {
 function loadDataset(key) {
   if (key === 'longmemeval') return loadLongMemEval();
   if (key === 'locomo') return loadLoCoMo();
+  if (key === 'realstore') return loadRealStore();
   throw new Error(`unknown dataset: ${key}`);
 }
 

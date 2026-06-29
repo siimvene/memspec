@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "store_origin": "Copy of ~/.memspec/ as of 2026-06-29; 275 records (246 active, 29 superseded), real organic edges (35 edge occurrences across 22 files).",
+  "scoring": "top-K results must contain any expected_ids by id match.",
+  "questions": [
+    {
+      "id": "q01-direct-v05",
+      "category": "direct",
+      "question": "memspec v0.5 plan",
+      "expected_ids": ["ms_01KWAJNFEPX5TSA7HTE0RC6RRW"],
+      "rationale": "Direct title hit for the v0.5 goal procedure."
+    },
+    {
+      "id": "q02-direct-v04",
+      "category": "direct",
+      "question": "memspec v0.4 goal expanded scope",
+      "expected_ids": ["ms_01KW78HE2FXJE0KFY2FWMP0RAM"],
+      "rationale": "Direct title hit for v0.4 goal procedure."
+    },
+    {
+      "id": "q03-direct-kleidia-byo",
+      "category": "direct",
+      "question": "Kleidia BYO-Vault support roadmap",
+      "expected_ids": ["ms_01KT669Q6S0RNE3V47BY1SJ8FW"],
+      "rationale": "Direct title + tag hit for Kleidia BYO-Vault decision."
+    },
+    {
+      "id": "q04-direct-sixworks-recon",
+      "category": "direct",
+      "question": "SiXworks pitch recon Jamie Grive CTO",
+      "expected_ids": ["ms_01KW7X181YT8FHK6CW9SJ77TED"],
+      "rationale": "Direct title hit for pre-call recon fact."
+    },
+    {
+      "id": "q05-direct-openbao",
+      "category": "direct",
+      "question": "OpenBao bundling debate SiXworks architects",
+      "expected_ids": ["ms_01KW7X1KX4JZ8ZXB78XFPK73QM"],
+      "rationale": "Direct title hit for OpenBao debate fact."
+    },
+    {
+      "id": "q06-direct-discord",
+      "category": "direct",
+      "question": "Therin discord bridge systemd service",
+      "expected_ids": ["ms_01KS49AQRWHN4RARR7WEXADR6Y", "ms_01KQ5C2R0N1X9XW6ZF7RRJ6M0E"],
+      "rationale": "Two related discord-bridge records — the runtime fact and the architecture procedure."
+    },
+    {
+      "id": "q07-direct-supply-chain",
+      "category": "direct",
+      "question": "supply chain hardening npm policy",
+      "expected_ids": ["ms_01KS49BV4AW07F9WY5M10NF03N"],
+      "rationale": "Direct hit for supply-chain hardening decision."
+    },
+    {
+      "id": "q08-direct-voice",
+      "category": "direct",
+      "question": "Voice DNA writing style operator",
+      "expected_ids": ["ms_01KSD6GVVNT3606BF5Z0NCVQ2X"],
+      "rationale": "Direct hit for Voice DNA adoption decision."
+    },
+    {
+      "id": "q09-multi-memspec-roadmap",
+      "category": "multi-record",
+      "question": "memspec roadmap evolution from v0.3 to v0.5",
+      "expected_ids": [
+        "ms_01KWAJNFEPX5TSA7HTE0RC6RRW",
+        "ms_01KW78HE2FXJE0KFY2FWMP0RAM",
+        "ms_01KW71003Y8F0K0DW46R1HRTHA"
+      ],
+      "rationale": "Three procedure records that document the v0.3 -> v0.4 -> v0.5 chain. v0.5 depends_on v0.4 (real edge). v0.4 has conflicts_with to both v0.3 and v0.5. Edge expansion from any seed should pull in the others."
+    },
+    {
+      "id": "q10-multi-polymarket-waves",
+      "category": "multi-record",
+      "question": "Polymarket weather bot pre-live infra wave status",
+      "expected_ids": [
+        "ms_01KT654RSA587WSFV7NCBQN7GH",
+        "ms_01KT66CSQ89A9AS0DE6BX0T8Q3",
+        "ms_01KT636AQ4YDYMYMRXT2G2ZPA7"
+      ],
+      "rationale": "Multiple wave-completion facts that conflict_with each other (dense conflict_with edges). Expansion from any one should walk to the others."
+    },
+    {
+      "id": "q11-multi-kleidia-positioning",
+      "category": "multi-record",
+      "question": "Kleidia defence positioning OpenBao HSM",
+      "expected_ids": [
+        "ms_01KSYDTB8B82REKD8C7A96S2C9",
+        "ms_01KSW2BDFJMXHASCCKVCMPSJSE",
+        "ms_01KT669Q6S0RNE3V47BY1SJ8FW",
+        "ms_01KW7X1KX4JZ8ZXB78XFPK73QM"
+      ],
+      "rationale": "Cluster of kleidia/openbao/defence-tagged records. Direct retrieval should hit some via tags."
+    },
+    {
+      "id": "q12-multi-dream-loop",
+      "category": "multi-record",
+      "question": "memspec dream loop weekly procedure pattern detection",
+      "expected_ids": [
+        "ms_01KSCJ56SAAXV97KF5D8SF6ZJT",
+        "ms_01KND977Q9GCBJ0WNATKZD842M",
+        "ms_01KND977QADX7X3EPEJ05HYBTJ",
+        "ms_01KND977QBNSMWKEDHAYFV5WYB"
+      ],
+      "rationale": "Modern weekly dream procedure plus three legacy openclaw-import dream/reflector/curator procedures that conflict_with each other."
+    },
+    {
+      "id": "q13-supersede-markedroid",
+      "category": "supersede-chain",
+      "question": "MarkeDroid equity valuation negotiation",
+      "expected_ids": [
+        "ms_01KQG24CANSRZQXNFDW5WA9A9C",
+        "ms_01KQG1Z2EZNHR7WPJ2YD0AA5TD"
+      ],
+      "rationale": "Current record supersedes a prior. Expansion along supersedes edge should surface the superseded predecessor."
+    },
+    {
+      "id": "q14-supersede-estate",
+      "category": "supersede-chain",
+      "question": "estate plan dead man switch family",
+      "expected_ids": [
+        "ms_01KQ5VSE75X23NNQ1X0CD5HJEV",
+        "ms_01KQ5VDM8FZMVBXCA9K2930NVZ"
+      ],
+      "rationale": "Estate plan decision supersedes earlier draft. Expansion should walk to superseded predecessor."
+    },
+    {
+      "id": "q15-depends-on-v05",
+      "category": "edge-traversal",
+      "question": "what depends on memspec v0.4 completion",
+      "expected_ids": [
+        "ms_01KWAJNFEPX5TSA7HTE0RC6RRW",
+        "ms_01KW78HE2FXJE0KFY2FWMP0RAM"
+      ],
+      "rationale": "v0.5 explicitly depends_on v0.4 goal. Real depends_on edge in the store. Expansion should walk from one to the other."
+    },
+    {
+      "id": "q16-conflicts-with-operator-scripts",
+      "category": "edge-traversal",
+      "question": "memspec v0.4 operator scripts schema repair",
+      "expected_ids": [
+        "ms_01KW7JRXF5KHJ2RMMAQPC0XA6H",
+        "ms_01KW78HE2FXJE0KFY2FWMP0RAM"
+      ],
+      "rationale": "Operator scripts procedure has conflicts_with to v0.4 goal. Expansion along conflicts_with should pull in the goal."
+    },
+    {
+      "id": "q17-direct-platsil",
+      "category": "direct",
+      "question": "Platsil invitation credential verification blocker",
+      "expected_ids": ["ms_01KVX8Y20RRJSFY4VWGZ26K230"],
+      "rationale": "Direct title hit for Platsil credential-verification decision."
+    },
+    {
+      "id": "q18-direct-phd",
+      "category": "direct",
+      "question": "PhD thesis status June 2026",
+      "expected_ids": ["ms_01KW7XXQCM3XHYR66Q56M0KW3J"],
+      "rationale": "Direct title hit for PhD thesis status fact."
+    },
+    {
+      "id": "q19-multi-trading-shipped",
+      "category": "multi-record",
+      "question": "Polymarket trading bot quant fixes shipped tier 1 tier 2",
+      "expected_ids": [
+        "ms_01KSNHSDP8J6XETN1CBS6NJND3",
+        "ms_01KQMT2NVQSMV381X2E62JYYJN"
+      ],
+      "rationale": "Two trading-quant shipped decisions with conflicts_with edges to each other and a third record."
+    },
+    {
+      "id": "q20-direct-verification-discipline",
+      "category": "direct",
+      "question": "pre-claim memspec search discipline checklist",
+      "expected_ids": ["ms_01KW5R75B630CH2CV027XS236Z"],
+      "rationale": "Direct title hit for pre-claim search-discipline procedure."
+    }
+  ]
+}

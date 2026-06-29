@@ -14,9 +14,11 @@
 
 For v0.5-graph and v0.5-integration we report both **baseline** (no edge expansion — same retrieval path as v0.4) and **expand=1** (BFS over typed edges, depth 1). Edge expansion only helps when the harness creates edges; since the bench ingests independent session-facts with no `--refines/--supports/--depends-on` links, the expansion frontier is empty by construction. The expand=1 column is included to verify *no regression* relative to no-expansion.
 
-**Sample size:** 20 per dataset slice (random sample, seed=42). LongMemEval-S Knowledge-Update was evaluated 2026-06-29T21:54Z; the LoCoMo cat-2 Temporal slice was added in a follow-up run on 2026-06-29T23:00Z (this file). v0.5-temporal was skipped in both runs because the temporal-validity surface (`valid_from` / `as_of` filter) does not change retrieval ranking for cold queries — it gates which rows are reachable, not how they are scored.
-**Generated:** 2026-06-29T23:00Z (LoCoMo append)
+**Sample size:** 20 per dataset slice (random sample, seed=42 for LongMemEval / LoCoMo; full hand-crafted set for real-store). LongMemEval-S Knowledge-Update was evaluated 2026-06-29T21:54Z; LoCoMo cat-2 Temporal was added 2026-06-29T23:00Z; the real-store eval was added 2026-06-29T23:30Z (this file). v0.5-temporal was skipped in all runs because the temporal-validity surface (`valid_from` / `as_of` filter) does not change retrieval ranking for cold queries — it gates which rows are reachable, not how they are scored.
+**Generated:** 2026-06-29T23:30Z (real-store append)
 **Harness:** `scripts/run-bench.mjs`
+
+A third section evaluates Siim's actual `~/.memspec/` operator store (with organic typed edges) to test the hypothesis that graph expansion was flat in the synthetic runs because the harness never created edges. The real-store run answers that question.
 
 ## Results
 
@@ -59,6 +61,27 @@ Sample: 20 questions from cat-2, seed=42 (out of 321 eligible).
 - **v0.5-graph and v0.5-integration do not regress baseline retrieval.** Identical recall, MRR within noise. This is the primary safety claim the bench can support given current saturation.
 - **Edge expansion adds ~5 ms p50 / ~5–10 ms p99 of latency.** The expand-edges code path runs even when the frontier is empty (no edges in these tmp stores), so this is the cost of the BFS bookkeeping itself, not the cost of actual traversal. Acceptable.
 - **Edge expansion's retrieval value is unmeasured here.** The harness ingests independent session-facts with no `refines/supports/depends_on/conflicts_with` edges — so `expand-edges` walks a zero-hop frontier. A meaningful graph-traversal evaluation needs a dataset whose memories carry edges (or a harness step that synthesises them, e.g. by chaining sessions within a conversation). Out of scope for this run.
+
+### Real store eval (Siim's `~/.memspec/`, hand-crafted test set, n=20)
+
+Dataset: copy of Siim's live `~/.memspec/` operator store as of 2026-06-29 (275 records: 246 active + 29 superseded; 35 typed-edge occurrences across 22 files — `conflicts_with`, `depends_on`, `supersedes` populated organically by months of agent usage). The eval reads from the copy at `/tmp`; the live store is never mutated.
+Scoring: top-K results must contain any `expected_ids` by id match. Hand-crafted test set of 20 questions at `scripts/real-store-eval-questions.json` covering: 11 direct (single best-hit title/tag queries), 4 multi-record (cluster queries with multiple acceptable hits), 2 supersede-chain (active record + its superseded predecessor), 2 edge-traversal (queries designed so the answer requires walking a real `depends_on` / `conflicts_with` edge), and 1 "third record cluster" overlapping the multi category.
+
+| Condition | Recall@5 | Recall@10 | MRR | p50 latency | p99 latency |
+|---|---|---|---|---|---|
+| v0.4 baseline | 0.950 | 0.950 | 0.925 | 24.9 ms | 91.5 ms |
+| v0.5-graph (no expansion) | 0.950 | 0.950 | 0.925 | 24.9 ms | 92.9 ms |
+| v0.5-graph (expand=1) | 0.950 | 0.950 | 0.925 | 36.6 ms | 39.3 ms |
+| v0.5-integration (no expansion) | 0.950 | 0.950 | 0.925 | 25.5 ms | 95.9 ms |
+| v0.5-integration (expand=1) | 0.950 | 0.950 | 0.925 | 37.0 ms | 40.4 ms |
+
+**Observations:**
+
+- **Headline recall is identical across all five conditions** — same 19/20 hits, same single miss (`q18-direct-phd`: the phrase "PhD thesis" loses BM25 to "thesis harness" records that share the rarer "thesis" stem). The any-hit recall@K metric is saturated by direct title-FTS match: 18 of 20 questions have a record whose title literally restates the query, which BM25 ranks at position 1 every time. Graph expansion cannot improve a top-K that already contains the right answer.
+- **A multi-recall metric (fraction of expected IDs found in top-10) does show movement.** Computed offline from the same per-question JSON dumps: **0.779 → 0.804 with expand=1 on both v0.5 branches** (v0.4 baseline: 0.779). The lift comes from one question — `q15-depends-on-v05` — where the v0.5 goal record's `depends_on` edge to the v0.4 goal walks the second expected ID into top-10. That's exactly the case the test was designed to catch, and the only question in the set where seed BM25 fell short of the expected cluster while a single one-hop edge closed the gap.
+- **The supersede-chain questions (q13, q14) did NOT lift with expand=1**, because superseded records are filtered out of active-state search before expansion runs — so the seed never appears, the walk never starts, and the active predecessor remains invisible regardless of edge density. Surfacing supersede chains in retrieval would require either including `state=superseded` records in the candidate pool or exposing `expand_edges` over the supersede edge type with a state-bypass flag. Both are v0.6 conversations.
+- **Expansion latency tax: ~12 ms p50, but p99 *improved*** (95 → 40 ms) because the BFS path is more predictable than the cold-FTS p99 outliers in a real 246-record store. Not a regression.
+- **Final read on the "does graph expansion help" question:** on the strict any-hit recall@K protocol the LongMemEval and LoCoMo runs used, no — and now on a real edge-populated store with hand-crafted queries the answer is *still* no, but for a different reason: BM25 is saturating the metric, not edge sparsity. The one question where expansion *did* surface a new expected ID (q15) confirms the v0.5 graph code is functioning as designed on real edges; the metric just doesn't reward it. A graph-aware bench needs (a) recall metrics that credit multi-doc completeness, or (b) queries phrased so BM25 cannot single-shot the answer (e.g. natural-language paraphrases that don't lexically match titles).
 
 ## Caveats
 
