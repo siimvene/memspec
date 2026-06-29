@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.5.0 — 2026-06-29
+
+**Connected + Measured.** Two retrieval-side features (graph traversal on
+search, temporal validity intervals) plus the project's first homegrown
+retrieval eval harness. Backward-compatible: every new field and parameter
+is optional, missing values preserve v0.4 behaviour.
+
+Motivated by arxiv 2606.24775 ("Are We Ready For An Agent-Native Memory
+System?" — Zhou et al., June 2026). Findings O3 (lifecycle prevents stale
+facts), O4 (graph organization wins cross-session), and O6 (consolidation
+kills chronology, hurting time-dependent queries) drove this release's
+design.
+
+### Done
+
+- **Graph traversal expansion on `memspec_search`.** `expand_edges: true`
+  walks typed edges outward from BM25 seed hits. `edge_types` filter
+  (default: all six — `refines`, `supports`, `depends_on`,
+  `conflicts_with`, `supersedes`, `superseded_by`); `expand_depth` 1–3
+  (default 1). Expanded hits carry an `expanded_via: {from_id, edge_type,
+  hops}` field so the caller can see why a record surfaced. Hop scoring
+  is BFS order — no numeric decay; `hops` is preserved on hits for
+  future re-rankers. Outbound traversal only (inbound walk deferred).
+- **Temporal validity intervals.** New optional `valid_from` / `valid_to`
+  ISO8601 fields on `MemoryFrontmatter`. `memspec_search` accepts an
+  `as_of` filter that drops records whose validity window excludes the
+  given timestamp. Orthogonal to `check_by` (which is a review schedule,
+  not a truth window). Missing bounds mean "always valid" — backward
+  compatible with every v0.4 record.
+- **`memspec_remember` accepts validity at write time.** Both MCP and
+  CLI surfaces take optional `valid_from` / `valid_to`.
+- **`memspec_get` returns validity fields** when present on the record.
+- **BENCHMARK.md + `scripts/run-bench.mjs`.** Homegrown retrieval-only
+  eval harness running against the public LongMemEval-S dataset.
+  Recall@5, Recall@10, MRR, plus latency p50/p99. Four-condition
+  comparison committed at v0.5 release. Methodology is documented and
+  reproducible; not paper-comparable (different protocol, smaller
+  sample), but a real measurement baseline for future regressions.
+
+### Honest eval finding
+
+v0.5 ships features without retrieval-quality regression. On the
+LongMemEval-S Knowledge-Update slice (n=20), all five tested conditions
+(v0.4 baseline, v0.5-graph no-expand, v0.5-graph expand=1,
+v0.5-integration no-expand, v0.5-integration expand=1) saturate at
+Recall@5/10/MRR = 1.000. The dataset/protocol doesn't differentiate
+retrieval strategies because the ground-truth tags are lexically
+distinctive enough that BM25 alone hits the ceiling.
+
+Graph expansion's benefit needs richer datasets (LoCoMo multi-session,
+or ingest protocols that build organic typed edges over time) to
+surface. Cost-side measurement is meaningful: graph BFS adds roughly
+5ms p50 and 5–10ms p99 latency even when walking an empty edge
+frontier. The cost is small but real; the gain is unmeasurable on
+this dataset.
+
+### Not in this release
+
+- **LLM-driven query planning** (the paper's "SimpleMem" pattern, Table
+  5) — deferred to v0.6. Needs a pluggable LLM client design first.
+- **Automatic extraction module** — deliberately rejected. memspec's
+  identity is "the agent decides what to remember"; auto-extraction
+  would change that contract.
+- **Multi-engine storage backend** (the paper's third tier of memory
+  representation) — scope creep for now.
+- **Inbound graph walks** — `expand_edges` is outbound-only in v0.5.
+- **`memspec_unrelate`** — still out of scope.
+
 ## 0.4.0 — 2026-06-28
 
 Graph primitives plus the final v0.3-shim cleanup. Typed relation edges

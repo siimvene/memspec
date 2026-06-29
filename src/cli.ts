@@ -27,7 +27,7 @@ const program = new Command();
 program
   .name('memspec')
   .description('Structured memory for AI agents')
-  .version('0.4.0')
+  .version('0.5.0')
   .showHelpAfterError();
 
 program
