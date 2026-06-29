@@ -11,6 +11,33 @@ export interface SearchOptions {
   json?: boolean;
   profile?: string;
   full?: boolean;
+  /**
+   * v0.5 Phase 2 — ISO 8601 timestamp. When set, drop results whose
+   * world-state validity window doesn't contain this point. Records with no
+   * `valid_from`/`valid_to` bounds are treated as always valid and always
+   * returned. Orthogonal to `check_by` staleness — past `check_by` only
+   * means review is overdue, past `valid_to` means the fact no longer holds.
+   */
+  asOf?: string;
+}
+
+/**
+ * v0.5 Phase 2 — drop a record when `asOf` is set and lies outside the
+ * record's validity window. Missing bounds are treated as open-ended
+ * (`-Infinity` for `valid_from`, `+Infinity` for `valid_to`), so a record
+ * with no validity fields is always returned. Returns `true` to keep the
+ * record, `false` to drop it.
+ */
+export function isValidAsOf(item: MemoryItem, asOf: Date): boolean {
+  if (item.valid_from !== undefined) {
+    const from = Date.parse(item.valid_from);
+    if (!Number.isNaN(from) && asOf.getTime() < from) return false;
+  }
+  if (item.valid_to !== undefined) {
+    const to = Date.parse(item.valid_to);
+    if (!Number.isNaN(to) && asOf.getTime() > to) return false;
+  }
+  return true;
 }
 
 /**
@@ -140,7 +167,22 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     minConfidence: profile.min_confidence ?? 0,
     ranking: profile.ranking,
   };
-  const items = store.search(query, storeOptions);
+  // v0.5 Phase 2 — temporal validity filter. Parse asOf up front (before the
+  // store query) so a bad ISO string fails the request loudly rather than
+  // silently letting every record through (which would be the behaviour of
+  // NaN comparisons).
+  let asOfDate: Date | undefined;
+  if (options.asOf !== undefined) {
+    asOfDate = new Date(options.asOf);
+    if (Number.isNaN(asOfDate.getTime())) {
+      throw new Error(`Invalid as_of timestamp: ${options.asOf} (must be ISO 8601)`);
+    }
+  }
+
+  let items = store.search(query, storeOptions);
+  if (asOfDate !== undefined) {
+    items = items.filter((item) => isValidAsOf(item, asOfDate));
+  }
 
   const conflicts = annotateConflicts(items);
   const full = options.full === true;

@@ -53,15 +53,16 @@ function renderSearchText(payload: { query: string; results: SearchResult[] }): 
 
 server.tool(
   'memspec_search',
-  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set).',
+  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). Pass as_of to filter by world-state validity at a specific point in time.',
   {
     query: z.string().describe('Search terms'),
     type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
     limit: z.number().min(1).max(50).optional().describe('Max results (default 10)'),
     profile: z.string().optional().describe('Retrieval profile name from config'),
     full: z.boolean().optional().describe('Include each result body inline (token-budgeted). Defaults to previews only.'),
+    as_of: z.string().optional().describe('ISO 8601 timestamp; drop results whose world-state validity window excludes this point. Records without valid_from/valid_to are treated as always valid. Orthogonal to check_by staleness.'),
   },
-  async ({ query, type, limit, profile, full }) => {
+  async ({ query, type, limit, profile, full, as_of }) => {
     try {
       const payload = searchPayload(query, {
         cwd: defaultCwd,
@@ -69,6 +70,7 @@ server.tool(
         limit: limit?.toString(),
         profile,
         full,
+        asOf: as_of,
       });
 
       return {
@@ -123,6 +125,8 @@ server.tool(
         refines: item.refines ?? [],
         supports: item.supports ?? [],
         depends_on: item.depends_on ?? [],
+        valid_from: item.valid_from,
+        valid_to: item.valid_to,
         lineage,
         ext: item.ext,
         body: item.body,
@@ -152,9 +156,11 @@ interface RememberArgs {
   refines?: string[];
   supports?: string[];
   depends_on?: string[];
+  valid_from?: string;
+  valid_to?: string;
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on, valid_from, valid_to }: RememberArgs) {
   try {
     const cwd = storeName === 'global' ? homedir() : defaultCwd;
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
@@ -169,6 +175,8 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       refines,
       supports,
       dependsOn: depends_on,
+      validFrom: valid_from,
+      validTo: valid_to,
     });
 
     let text = result.message;
@@ -220,6 +228,8 @@ server.tool(
     refines: z.array(z.string()).optional().describe('Memory ids this record refines (forms a typed edge to each target; parent stays valid)'),
     supports: z.array(z.string()).optional().describe('Memory ids this record supports (forms a typed edge — evidence backing the target)'),
     depends_on: z.array(z.string()).optional().describe('Memory ids this record depends on (forms a typed edge — presupposes the target)'),
+    valid_from: z.string().optional().describe('ISO 8601 timestamp when the world-state truth becomes valid (v0.5 temporal validity; orthogonal to check_by)'),
+    valid_to: z.string().optional().describe('ISO 8601 timestamp when the world-state truth ceases to hold (v0.5 temporal validity; orthogonal to check_by)'),
   },
   handleRemember,
 );

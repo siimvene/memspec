@@ -44,6 +44,10 @@ const FIELD_GROUPS: Array<{ title: string; fields: string[] }> = [
     fields: ['check_by', 'stale', 'last_verified', 'expires', 'pinned'],
   },
   {
+    title: 'Temporal validity',
+    fields: ['valid_from', 'valid_to'],
+  },
+  {
     title: 'Witness',
     fields: ['verified_with', 'anchors'],
   },

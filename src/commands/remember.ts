@@ -27,6 +27,10 @@ export interface RememberOptions {
   refines?: string[];
   supports?: string[];
   dependsOn?: string[];
+  /** v0.5 Phase 2 — ISO 8601 timestamp at which the world-state truth becomes valid. Orthogonal to check_by. */
+  validFrom?: string;
+  /** v0.5 Phase 2 — ISO 8601 timestamp at which the world-state truth ceases to hold. Orthogonal to check_by. */
+  validTo?: string;
 }
 
 export interface DuplicateMatch {
@@ -281,6 +285,23 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   if (supports) itemData.supports = supports;
   const dependsOn = dedupe(options.dependsOn);
   if (dependsOn) itemData.depends_on = dependsOn;
+
+  // v0.5 Phase 2 — temporal validity. Validate early so callers see a
+  // friendly error instead of a Zod schema dump from the writer.
+  const assertIsoOrUndefined = (label: string, value: string | undefined): string | undefined => {
+    if (value === undefined) return undefined;
+    if (Number.isNaN(Date.parse(value))) {
+      throw new Error(`${label} must be a valid ISO 8601 timestamp (got "${value}")`);
+    }
+    return value;
+  };
+  const validFrom = assertIsoOrUndefined('valid_from', options.validFrom);
+  const validTo = assertIsoOrUndefined('valid_to', options.validTo);
+  if (validFrom !== undefined && validTo !== undefined && Date.parse(validFrom) > Date.parse(validTo)) {
+    throw new Error(`valid_from (${validFrom}) must be <= valid_to (${validTo})`);
+  }
+  if (validFrom) itemData.valid_from = validFrom;
+  if (validTo) itemData.valid_to = validTo;
 
   // Phase 5 — mid-band auto-attach is recorded as a `conflicts_with` edge
   // on the new record. Single edge max; operator-tier protection already
