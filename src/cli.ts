@@ -12,7 +12,8 @@ import { runRemember } from './commands/remember.js';
 import { runInit } from './commands/init.js';
 import { runMigrate } from './commands/migrate.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
-import { runSearch } from './commands/search.js';
+import { runSearch, type SearchExpandDepth } from './commands/search.js';
+import { EDGE_TYPES, type EdgeType } from './lib/graph-walk.js';
 import { runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
 import { runSweep } from './commands/sweep.js';
@@ -208,10 +209,43 @@ program
   .option('--limit <n>', 'max results', '10')
   .option('--json', 'output as JSON')
   .option('--full', 'include full body content (token-budgeted)')
+  .option('--expand-edges', 'v0.5: walk typed edges outward from BM25 hits and surface reachable records')
+  .option('--edge-types <list>', `v0.5: comma-separated subset of edge types to traverse (default all six: ${EDGE_TYPES.join(',')})`)
+  .option('--expand-depth <n>', 'v0.5: BFS hop depth for edge expansion (1, 2, or 3; default 1)')
   .action((query: string, options: {
     cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean; full?: boolean;
+    expandEdges?: boolean; edgeTypes?: string; expandDepth?: string;
   }) => {
-    console.log(runSearch(query, options));
+    let edgeTypes: EdgeType[] | undefined;
+    if (options.edgeTypes) {
+      edgeTypes = options.edgeTypes.split(',').map((s) => s.trim()).filter(Boolean) as EdgeType[];
+      for (const edge of edgeTypes) {
+        if (!(EDGE_TYPES as readonly string[]).includes(edge)) {
+          throw new Error(`--edge-types must be a subset of: ${EDGE_TYPES.join(',')} (got "${edge}")`);
+        }
+      }
+    }
+
+    let expandDepth: SearchExpandDepth | undefined;
+    if (options.expandDepth !== undefined) {
+      const parsed = parseInt(options.expandDepth, 10);
+      if (parsed !== 1 && parsed !== 2 && parsed !== 3) {
+        throw new Error(`--expand-depth must be 1, 2, or 3 (got "${options.expandDepth}")`);
+      }
+      expandDepth = parsed as SearchExpandDepth;
+    }
+
+    console.log(runSearch(query, {
+      cwd: options.cwd,
+      type: options.type,
+      profile: options.profile,
+      limit: options.limit,
+      json: options.json,
+      full: options.full,
+      expandEdges: options.expandEdges,
+      edgeTypes,
+      expandDepth,
+    }));
   });
 
 program

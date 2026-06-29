@@ -1,8 +1,11 @@
 import { getProfile, loadConfig } from '../lib/config.js';
+import { EDGE_TYPES, expandGraph, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { MemspecStore, type StoreSearchOptions } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits } from '../lib/usage.js';
+
+export type SearchExpandDepth = 1 | 2 | 3;
 
 export interface SearchOptions {
   cwd?: string;
@@ -11,6 +14,19 @@ export interface SearchOptions {
   json?: boolean;
   profile?: string;
   full?: boolean;
+  /**
+   * v0.5 Phase 1: when true, BM25 seed hits are extended by walking typed
+   * edges (refines/supports/depends_on/conflicts_with/supersedes/superseded_by)
+   * outward from each seed. Default false — v0.4 behaviour is preserved.
+   */
+  expandEdges?: boolean;
+  /**
+   * Subset of edge types to traverse. Defaults to all six. Order is preserved
+   * so callers can prioritise certain edges and get deterministic output.
+   */
+  edgeTypes?: readonly EdgeType[];
+  /** Hop cap on the BFS walk. Defaults to 1; capped at 3. */
+  expandDepth?: SearchExpandDepth;
 }
 
 /**
@@ -34,6 +50,13 @@ export interface SearchResult {
   depends_on: string[];
   preview: string;
   body?: string; // present only when full=true and within the budget
+  /**
+   * v0.5 Phase 1: present on hits surfaced via typed-edge expansion. Absent
+   * on seed hits (BM25/dense direct matches). When a record appears in both
+   * the seed set and the expansion frontier, the seed entry wins and this
+   * field is omitted — the dedupe rule keeps the BM25 score visible.
+   */
+  expanded_via?: ExpansionHit;
 }
 
 export interface SearchPayload {
@@ -118,6 +141,45 @@ function annotateConflicts(items: MemoryItem[]): Map<string, string[]> {
 }
 
 /**
+ * Build a SearchResult row from a MemoryItem. Shared between the seed pass
+ * and the expansion pass so both shape consistently — the only difference is
+ * the optional `expanded_via` field set by the caller.
+ */
+function buildResultRow(
+  item: MemoryItem,
+  conflicts: ReadonlyMap<string, string[]>,
+  full: boolean,
+  budget: { used: number; limit: number },
+): SearchResult {
+  const result: SearchResult = {
+    id: item.id,
+    type: item.type ?? 'observation',
+    title: item.title,
+    verified_with: witnessOf(item),
+    created: item.created,
+    last_verified: item.last_verified ?? item.created,
+    source: item.source,
+    tags: item.tags,
+    stale: item.stale ?? false,
+    conflicts_with: conflicts.get(item.id) ?? [],
+    refines: item.refines ?? [],
+    supports: item.supports ?? [],
+    depends_on: item.depends_on ?? [],
+    preview: previewFromBody(item.body),
+  };
+
+  if (full) {
+    const cost = estimateTokens(item.body);
+    if (budget.used + cost <= budget.limit) {
+      result.body = item.body;
+      budget.used += cost;
+    }
+  }
+
+  return result;
+}
+
+/**
  * Single search entry point. Both CLI and MCP read from this payload — no
  * second `store.search` call to keep them in sync.
  */
@@ -142,38 +204,67 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   };
   const items = store.search(query, storeOptions);
 
-  const conflicts = annotateConflicts(items);
+  // v0.5 Phase 1: optional graph expansion. We load the active set once and
+  // pass it to the walker via a Map<id, item>. The walker is bounded
+  // (depth + maxExpansion), so even on a thousand-record store the extra
+  // load is dominated by the existing FTS pass.
+  const expandEdges = options.expandEdges === true;
+  let expansionHits: ExpansionHit[] = [];
+  let allActiveById: Map<string, MemoryItem> | undefined;
+  if (expandEdges && items.length > 0) {
+    const activeItems = store.loadActive();
+    allActiveById = new Map(activeItems.map((item) => [item.id, item]));
+    const edgeTypes = options.edgeTypes && options.edgeTypes.length > 0
+      ? options.edgeTypes
+      : EDGE_TYPES;
+    expansionHits = expandGraph(
+      items.map((item) => item.id),
+      allActiveById,
+      {
+        edgeTypes,
+        maxDepth: options.expandDepth ?? 1,
+      },
+    );
+  }
+
+  // Conflicts annotation runs across the union of seed + expansion items so
+  // pairwise conflict surfacing still works when an expansion drags in a
+  // sibling claim. Expansion hits with unresolved ids (not in the active map)
+  // are skipped silently — the walker may surface them as raw ids, but we
+  // can't build a result row without a record.
+  const expansionItems: MemoryItem[] = [];
+  const seedIdSet = new Set(items.map((i) => i.id));
+  for (const hit of expansionHits) {
+    if (seedIdSet.has(hit.id)) continue; // dedupe: seed wins
+    const record = allActiveById?.get(hit.id);
+    if (!record) continue;
+    expansionItems.push(record);
+  }
+  const conflicts = annotateConflicts([...items, ...expansionItems]);
+
   const full = options.full === true;
-  let budgetUsed = 0;
+  const budget = { used: 0, limit: FULL_BODY_TOKEN_BUDGET };
 
-  const results: SearchResult[] = items.map((item) => {
-    const result: SearchResult = {
-      id: item.id,
-      type: item.type ?? 'observation',
-      title: item.title,
-      verified_with: witnessOf(item),
-      created: item.created,
-      last_verified: item.last_verified ?? item.created,
-      source: item.source,
-      tags: item.tags,
-      stale: item.stale ?? false,
-      conflicts_with: conflicts.get(item.id) ?? [],
-      refines: item.refines ?? [],
-      supports: item.supports ?? [],
-      depends_on: item.depends_on ?? [],
-      preview: previewFromBody(item.body),
-    };
+  const results: SearchResult[] = items.map((item) => buildResultRow(item, conflicts, full, budget));
 
-    if (full) {
-      const cost = estimateTokens(item.body);
-      if (budgetUsed + cost <= FULL_BODY_TOKEN_BUDGET) {
-        result.body = item.body;
-        budgetUsed += cost;
-      }
+  // Append expansion hits in the order produced by the walker (BFS, so closer
+  // hops first; edge-type order is the order the caller supplied). The seed
+  // dedupe above already filtered hits whose id appears in the seed set.
+  if (expansionHits.length > 0 && allActiveById) {
+    const seen = new Set(results.map((r) => r.id));
+    // A record reachable along multiple edges in the same hop is surfaced
+    // once, keyed by the first-walked edge. This mirrors the BFS visited-set
+    // semantics in graph-walk.ts.
+    for (const hit of expansionHits) {
+      if (seen.has(hit.id)) continue;
+      const record = allActiveById.get(hit.id);
+      if (!record) continue;
+      const row = buildResultRow(record, conflicts, full, budget);
+      row.expanded_via = hit;
+      results.push(row);
+      seen.add(hit.id);
     }
-
-    return result;
-  });
+  }
 
   if (results.length > 0) {
     recordSearchHits(store.root, results.map((r) => r.id));
@@ -215,6 +306,7 @@ export function runSearch(query: string, options: SearchOptions): string {
       supports: r.supports,
       depends_on: r.depends_on,
       ...(r.body !== undefined ? { body: r.body } : {}),
+      ...(r.expanded_via !== undefined ? { expanded_via: r.expanded_via } : {}),
     })), null, 2);
   }
 
@@ -222,7 +314,10 @@ export function runSearch(query: string, options: SearchOptions): string {
 
   for (const item of payload.results) {
     const conflictTag = item.conflicts_with.length > 0 ? ` [CONFLICTS WITH ${item.conflicts_with.join(', ')}]` : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${conflictTag}`);
+    const expandedTag = item.expanded_via
+      ? ` [via ${item.expanded_via.edge_type} from ${item.expanded_via.from_id} @ hop ${item.expanded_via.hops}]`
+      : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${conflictTag}${expandedTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) {
       lines.push(`  tags: ${item.tags.join(', ')}`);

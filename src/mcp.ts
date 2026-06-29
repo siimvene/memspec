@@ -10,7 +10,8 @@ import { runObserve } from './commands/observe.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runRelate, relationTypeSchema } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
-import { searchPayload, type SearchResult } from './commands/search.js';
+import { searchPayload, type SearchExpandDepth, type SearchResult } from './commands/search.js';
+import { EDGE_TYPES } from './lib/graph-walk.js';
 import { buildStatusReport, runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
 import { runVerify } from './commands/verify.js';
@@ -36,7 +37,10 @@ function renderSearchText(payload: { query: string; results: SearchResult[] }): 
   const lines: string[] = [`${payload.results.length} result(s) for "${payload.query}"`, ''];
   for (const item of payload.results) {
     const conflictTag = item.conflicts_with.length > 0 ? ` [CONFLICTS WITH ${item.conflicts_with.join(', ')}]` : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${conflictTag}`);
+    const expandedTag = item.expanded_via
+      ? ` [via ${item.expanded_via.edge_type} from ${item.expanded_via.from_id} @ hop ${item.expanded_via.hops}]`
+      : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${conflictTag}${expandedTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) lines.push(`  tags: ${item.tags.join(', ')}`);
     if (item.body !== undefined) {
@@ -53,15 +57,18 @@ function renderSearchText(payload: { query: string; results: SearchResult[] }): 
 
 server.tool(
   'memspec_search',
-  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set).',
+  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface records reachable from each BM25 hit along typed edges (refines / supports / depends_on / conflicts_with / supersedes / superseded_by); expanded hits carry an `expanded_via` field naming the seed and edge that surfaced them.',
   {
     query: z.string().describe('Search terms'),
     type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
     limit: z.number().min(1).max(50).optional().describe('Max results (default 10)'),
     profile: z.string().optional().describe('Retrieval profile name from config'),
     full: z.boolean().optional().describe('Include each result body inline (token-budgeted). Defaults to previews only.'),
+    expand_edges: z.boolean().optional().describe('v0.5: when true, walk typed edges outward from BM25 seed hits and surface reachable records as additional results (each carries an `expanded_via` descriptor). Default false — v0.4 behaviour preserved.'),
+    edge_types: z.array(z.enum(EDGE_TYPES)).optional().describe('v0.5: subset of edge types to traverse when expand_edges is true. Default: all six (refines, supports, depends_on, conflicts_with, supersedes, superseded_by). Order is preserved for deterministic output.'),
+    expand_depth: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe('v0.5: BFS hop depth for edge expansion (1–3). Default 1 — single hop.'),
   },
-  async ({ query, type, limit, profile, full }) => {
+  async ({ query, type, limit, profile, full, expand_edges, edge_types, expand_depth }) => {
     try {
       const payload = searchPayload(query, {
         cwd: defaultCwd,
@@ -69,6 +76,9 @@ server.tool(
         limit: limit?.toString(),
         profile,
         full,
+        expandEdges: expand_edges,
+        edgeTypes: edge_types,
+        expandDepth: expand_depth as SearchExpandDepth | undefined,
       });
 
       return {
