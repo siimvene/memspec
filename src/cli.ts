@@ -74,9 +74,11 @@ program
   .option('--refines <id...>', 'memory id this record refines/elaborates on (parent stays valid; repeatable)')
   .option('--supports <id...>', 'memory id this record provides evidence for (repeatable)')
   .option('--depends-on <id...>', 'memory id this record presupposes (knowledge or chronological dependency; repeatable)')
+  .option('--valid-from <iso>', 'ISO 8601 timestamp — world-state truth window starts at this point (v0.5 temporal validity; orthogonal to --check-by)')
+  .option('--valid-to <iso>', 'ISO 8601 timestamp — world-state truth window ends at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .action((type: string, title: string, options: {
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
-    refines?: string[]; supports?: string[]; dependsOn?: string[];
+    refines?: string[]; supports?: string[]; dependsOn?: string[]; validFrom?: string; validTo?: string;
   }) => {
     if (options.store === 'global') {
       options.cwd = homedir();
@@ -93,6 +95,8 @@ program
       refines: options.refines,
       supports: options.supports,
       dependsOn: options.dependsOn,
+      validFrom: options.validFrom,
+      validTo: options.validTo,
     });
     console.log(result.message);
     if (result.duplicates && result.duplicates.length > 0) {
@@ -212,9 +216,10 @@ program
   .option('--expand-edges', 'v0.5: walk typed edges outward from BM25 hits and surface reachable records')
   .option('--edge-types <list>', `v0.5: comma-separated subset of edge types to traverse (default all six: ${EDGE_TYPES.join(',')})`)
   .option('--expand-depth <n>', 'v0.5: BFS hop depth for edge expansion (1, 2, or 3; default 1)')
+  .option('--as-of <iso>', 'ISO 8601 timestamp; drop results whose world-state validity window excludes this point (records without valid_from/valid_to are always returned)')
   .action((query: string, options: {
     cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean; full?: boolean;
-    expandEdges?: boolean; edgeTypes?: string; expandDepth?: string;
+    expandEdges?: boolean; edgeTypes?: string; expandDepth?: string; asOf?: string;
   }) => {
     let edgeTypes: EdgeType[] | undefined;
     if (options.edgeTypes) {
@@ -245,6 +250,7 @@ program
       expandEdges: options.expandEdges,
       edgeTypes,
       expandDepth,
+      asOf: options.asOf,
     }));
   });
 

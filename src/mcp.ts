@@ -57,7 +57,7 @@ function renderSearchText(payload: { query: string; results: SearchResult[] }): 
 
 server.tool(
   'memspec_search',
-  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface records reachable from each BM25 hit along typed edges (refines / supports / depends_on / conflicts_with / supersedes / superseded_by); expanded hits carry an `expanded_via` field naming the seed and edge that surfaced them.',
+  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface records reachable from each BM25 hit along typed edges (refines / supports / depends_on / conflicts_with / supersedes / superseded_by); expanded hits carry an `expanded_via` field naming the seed and edge that surfaced them. Pass as_of to filter by world-state validity at a specific point in time.',
   {
     query: z.string().describe('Search terms'),
     type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
@@ -67,8 +67,9 @@ server.tool(
     expand_edges: z.boolean().optional().describe('v0.5: when true, walk typed edges outward from BM25 seed hits and surface reachable records as additional results (each carries an `expanded_via` descriptor). Default false — v0.4 behaviour preserved.'),
     edge_types: z.array(z.enum(EDGE_TYPES)).optional().describe('v0.5: subset of edge types to traverse when expand_edges is true. Default: all six (refines, supports, depends_on, conflicts_with, supersedes, superseded_by). Order is preserved for deterministic output.'),
     expand_depth: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe('v0.5: BFS hop depth for edge expansion (1–3). Default 1 — single hop.'),
+    as_of: z.string().optional().describe('ISO 8601 timestamp; drop results whose world-state validity window excludes this point. Records without valid_from/valid_to are treated as always valid. Orthogonal to check_by staleness.'),
   },
-  async ({ query, type, limit, profile, full, expand_edges, edge_types, expand_depth }) => {
+  async ({ query, type, limit, profile, full, expand_edges, edge_types, expand_depth, as_of }) => {
     try {
       const payload = searchPayload(query, {
         cwd: defaultCwd,
@@ -79,6 +80,7 @@ server.tool(
         expandEdges: expand_edges,
         edgeTypes: edge_types,
         expandDepth: expand_depth as SearchExpandDepth | undefined,
+        asOf: as_of,
       });
 
       return {
@@ -133,6 +135,8 @@ server.tool(
         refines: item.refines ?? [],
         supports: item.supports ?? [],
         depends_on: item.depends_on ?? [],
+        valid_from: item.valid_from,
+        valid_to: item.valid_to,
         lineage,
         ext: item.ext,
         body: item.body,
@@ -162,9 +166,11 @@ interface RememberArgs {
   refines?: string[];
   supports?: string[];
   depends_on?: string[];
+  valid_from?: string;
+  valid_to?: string;
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on, valid_from, valid_to }: RememberArgs) {
   try {
     const cwd = storeName === 'global' ? homedir() : defaultCwd;
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
@@ -179,6 +185,8 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       refines,
       supports,
       dependsOn: depends_on,
+      validFrom: valid_from,
+      validTo: valid_to,
     });
 
     let text = result.message;
@@ -230,6 +238,8 @@ server.tool(
     refines: z.array(z.string()).optional().describe('Memory ids this record refines (forms a typed edge to each target; parent stays valid)'),
     supports: z.array(z.string()).optional().describe('Memory ids this record supports (forms a typed edge — evidence backing the target)'),
     depends_on: z.array(z.string()).optional().describe('Memory ids this record depends on (forms a typed edge — presupposes the target)'),
+    valid_from: z.string().optional().describe('ISO 8601 timestamp when the world-state truth becomes valid (v0.5 temporal validity; orthogonal to check_by)'),
+    valid_to: z.string().optional().describe('ISO 8601 timestamp when the world-state truth ceases to hold (v0.5 temporal validity; orthogonal to check_by)'),
   },
   handleRemember,
 );

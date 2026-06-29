@@ -98,6 +98,20 @@ field/state names into this v0.3+ shape before validation.
 - **Required:** no
 - **Description:** Operator-only flag; pinned claims are always surfaced in boot context (cap 5, ordered by `last_verified` descending).
 
+## Temporal validity
+
+### `valid_from`
+
+- **Type:** `string`
+- **Required:** no
+- **Description:** ISO 8601 timestamp when the world-state truth claimed by this record becomes valid. Open-ended if absent. Orthogonal to `check_by` — validity bounds the truth window; `check_by` bounds the review schedule.
+
+### `valid_to`
+
+- **Type:** `string`
+- **Required:** no
+- **Description:** ISO 8601 timestamp when the world-state truth ceases to hold. Open-ended if absent. Orthogonal to `check_by` — past `valid_to` means the fact is no longer true, past `check_by` only means review is overdue.
+
 ## Witness
 
 ### `verified_with`

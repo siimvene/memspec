@@ -51,6 +51,10 @@ export interface MemoryFrontmatter {
   supports?: string[]; // ids this record provides evidence for
   depends_on?: string[]; // ids this record presupposes (knowledge or chronological dependency)
   expires?: string; // observations only — hard expiry (ISO 8601)
+  /** ISO 8601. World-state truth becomes valid at this point. Open-ended if absent. */
+  valid_from?: string;
+  /** ISO 8601. World-state truth ceases to hold at this point. Open-ended if absent. */
+  valid_to?: string;
   /**
    * Recommended ext field conventions:
    * - ext.confirmations: number — times this memory has been independently confirmed
