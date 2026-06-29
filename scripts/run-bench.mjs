@@ -17,7 +17,10 @@ import { execSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(here, '..');
+// REPO_ROOT can be pinned via env so the script can be staged outside the repo
+// and survive the in-flight `git checkout` (otherwise the script file itself
+// disappears mid-run on branches that don't carry it).
+const REPO_ROOT = process.env.BENCH_REPO_ROOT || resolve(here, '..');
 const DATA_DIR = '/tmp/eval-data';
 const RESULTS_DIR = '/tmp/memspec-bench-results';
 const SAMPLE_SIZE = Number(process.env.BENCH_SAMPLE_SIZE || 50);
