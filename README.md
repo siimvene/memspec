@@ -4,6 +4,14 @@
 
 **Memspec is the spec + tooling for living project memory that stays in your repo.** Markdown files under `.memspec/` are the canonical source of truth. Memspec layers structured lifecycle, full-text and hybrid search, linked-note traversal, and an MCP server on top — without standing up a backend service.
 
+## Architecture
+
+<p align="center">
+  <img src="assets/memspec_architecture_flow.svg" alt="How memspec works: agents read and write markdown memories under .memspec/, which flow through lifecycle, code anchors, linked notes, and hybrid search to the MCP server and session hooks" width="620">
+</p>
+
+Agents `remember` claims and `observe` notes; everything lands as markdown under `.memspec/`. From there a structured layer — lifecycle (`active → superseded → retired`), code anchors, typed links, and temporal validity — feeds FTS5/hybrid search, the MCP server, and session-start hooks, so the next session wakes up with the right context instead of amnesia.
+
 ## Features
 
 - **File-canonical.** Memories are markdown files with YAML frontmatter. Human-readable, git-diffable, greppable. Lose the index, lose speed — not data.
@@ -13,6 +21,8 @@
 - **Linked notes** (v0.5+). Records reference other records by id (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). Search can follow these links one or more hops to surface neighbours alongside direct matches; `--include-superseded` lets link-following reach archived predecessors (v0.6+).
 - **Temporal validity** (v0.5+). Optional `valid_from` / `valid_to` per memory. Search with `--as-of <iso>` filters by world-state truth window, orthogonal to the `check_by` review schedule.
 - **Operator-tier storage** (v0.4+). Records sourced by the operator land in a separate filesystem path with stricter overwrite protection (`--override-operator` required to supersede).
+- **Layered stores** (v0.6+). A project `.memspec/` and a global `~/.memspec/` merge at retrieval time — project records take priority, global merges as a lower layer. Every search, context, and MCP path honours the configured `stores:` layers.
+- **Dedup-aware writes.** `remember` refuses near-duplicate claims and points at the existing record, so memory accretes corrections via `supersede` instead of silent duplicates.
 - **Hybrid search.** SQLite FTS5 + BM25 by default; optional dense embeddings rerank via OpenAI-compatible endpoints or Ollama.
 - **MCP server.** Eleven tools, first-class integration with Claude Code, Cursor, Codex.
 - **Witnessed claims.** Every memory carries `verified_with` (`anchor | operator | evidence | assertion`) — provenance, not a confidence score.
