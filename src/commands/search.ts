@@ -2,7 +2,7 @@ import { getProfile, loadConfig } from '../lib/config.js';
 import { EDGE_TYPES, expandGraph, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { MemspecStore, type StoreSearchOptions } from '../lib/store.js';
-import { MEMORY_TYPES, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
+import { MEMORY_TYPES, type LifecycleState, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits } from '../lib/usage.js';
 
 export type SearchExpandDepth = 1 | 2 | 3;
@@ -35,6 +35,20 @@ export interface SearchOptions {
    * means review is overdue, past `valid_to` means the fact no longer holds.
    */
   asOf?: string;
+  /**
+   * v0.6 Phase 1 — when true with `expandEdges`, the expansion walker is
+   * given a wider record map (active + superseded) so it can resolve edge
+   * targets that point into the archive. The SEED pool stays active-only:
+   * letting superseded records seed lexical search would flood results with
+   * stale matches, defeating the lifecycle. This option only affects which
+   * records expansion can SURFACE; it never changes what initially matches
+   * the query. Default false — v0.5 behaviour preserved.
+   *
+   * Motivation: real-store eval (`q13-supersede-markedroid`) — expansion
+   * across the supersede DAG couldn't reach an archived predecessor because
+   * search built its expansion map from active records only.
+   */
+  includeSuperseded?: boolean;
 }
 
 /**
@@ -64,6 +78,13 @@ export interface SearchResult {
   id: string;
   type: MemoryType | 'observation';
   title: string;
+  /**
+   * v0.6 Phase 1 — lifecycle state of the surfaced record. Seeds are always
+   * `active`; expansion hits may be `superseded` when `includeSuperseded`
+   * is set. Surfaced on every row so callers can distinguish current claims
+   * from archive context without a second lookup.
+   */
+  state: LifecycleState;
   verified_with: VerifiedWith;
   created: string;
   last_verified: string;
@@ -182,6 +203,7 @@ function buildResultRow(
     id: item.id,
     type: item.type ?? 'observation',
     title: item.title,
+    state: item.state,
     verified_with: witnessOf(item),
     created: item.created,
     last_verified: item.last_verified ?? item.created,
@@ -250,18 +272,28 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   // pass it to the walker via a Map<id, item>. The walker is bounded
   // (depth + maxExpansion), so even on a thousand-record store the extra
   // load is dominated by the existing FTS pass.
+  //
+  // v0.6 Phase 1: when `includeSuperseded` is set, the map also carries
+  // archived (superseded) records so the walker can resolve edge targets
+  // that point into the archive. Active records still take priority on id
+  // collisions (shouldn't happen — ids are stable across the lifecycle —
+  // but the spread order documents intent).
   const expandEdges = options.expandEdges === true;
+  const includeSuperseded = options.includeSuperseded === true;
   let expansionHits: ExpansionHit[] = [];
-  let allActiveById: Map<string, MemoryItem> | undefined;
+  let expansionRecordsById: Map<string, MemoryItem> | undefined;
   if (expandEdges && items.length > 0) {
     const activeItems = store.loadActive();
-    allActiveById = new Map(activeItems.map((item) => [item.id, item]));
+    const recordsForWalk: MemoryItem[] = includeSuperseded
+      ? [...store.loadSuperseded(), ...activeItems]
+      : activeItems;
+    expansionRecordsById = new Map(recordsForWalk.map((item) => [item.id, item]));
     const edgeTypes = options.edgeTypes && options.edgeTypes.length > 0
       ? options.edgeTypes
       : EDGE_TYPES;
     expansionHits = expandGraph(
       items.map((item) => item.id),
-      allActiveById,
+      expansionRecordsById,
       {
         edgeTypes,
         maxDepth: options.expandDepth ?? 1,
@@ -271,14 +303,14 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
 
   // Conflicts annotation runs across the union of seed + expansion items so
   // pairwise conflict surfacing still works when an expansion drags in a
-  // sibling claim. Expansion hits with unresolved ids (not in the active map)
-  // are skipped silently — the walker may surface them as raw ids, but we
-  // can't build a result row without a record.
+  // sibling claim. Expansion hits with unresolved ids (not in the map) are
+  // skipped silently — the walker may surface them as raw ids, but we can't
+  // build a result row without a record.
   const expansionItems: MemoryItem[] = [];
   const seedIdSet = new Set(items.map((i) => i.id));
   for (const hit of expansionHits) {
     if (seedIdSet.has(hit.id)) continue; // dedupe: seed wins
-    const record = allActiveById?.get(hit.id);
+    const record = expansionRecordsById?.get(hit.id);
     if (!record) continue;
     expansionItems.push(record);
   }
@@ -292,14 +324,14 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   // Append expansion hits in the order produced by the walker (BFS, so closer
   // hops first; edge-type order is the order the caller supplied). The seed
   // dedupe above already filtered hits whose id appears in the seed set.
-  if (expansionHits.length > 0 && allActiveById) {
+  if (expansionHits.length > 0 && expansionRecordsById) {
     const seen = new Set(results.map((r) => r.id));
     // A record reachable along multiple edges in the same hop is surfaced
     // once, keyed by the first-walked edge. This mirrors the BFS visited-set
     // semantics in graph-walk.ts.
     for (const hit of expansionHits) {
       if (seen.has(hit.id)) continue;
-      const record = allActiveById.get(hit.id);
+      const record = expansionRecordsById.get(hit.id);
       if (!record) continue;
       const row = buildResultRow(record, conflicts, full, budget);
       row.expanded_via = hit;
@@ -337,6 +369,7 @@ export function runSearch(query: string, options: SearchOptions): string {
       id: r.id,
       type: r.type,
       title: r.title,
+      state: r.state,
       verified_with: r.verified_with,
       created: r.created,
       last_verified: r.last_verified,

@@ -68,8 +68,9 @@ server.tool(
     edge_types: z.array(z.enum(EDGE_TYPES)).optional().describe('v0.5: subset of edge types to traverse when expand_edges is true. Default: all six (refines, supports, depends_on, conflicts_with, supersedes, superseded_by). Order is preserved for deterministic output.'),
     expand_depth: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe('v0.5: BFS hop depth for edge expansion (1–3). Default 1 — single hop.'),
     as_of: z.string().optional().describe('ISO 8601 timestamp; drop results whose world-state validity window excludes this point. Records without valid_from/valid_to are treated as always valid. Orthogonal to check_by staleness.'),
+    include_superseded: z.boolean().optional().describe('v0.6: when true with expand_edges, allow expansion to reach superseded/archived records as targets (seed records stay active-only). Default false.'),
   },
-  async ({ query, type, limit, profile, full, expand_edges, edge_types, expand_depth, as_of }) => {
+  async ({ query, type, limit, profile, full, expand_edges, edge_types, expand_depth, as_of, include_superseded }) => {
     try {
       const payload = searchPayload(query, {
         cwd: defaultCwd,
@@ -81,6 +82,7 @@ server.tool(
         edgeTypes: edge_types,
         expandDepth: expand_depth as SearchExpandDepth | undefined,
         asOf: as_of,
+        includeSuperseded: include_superseded,
       });
 
       return {
