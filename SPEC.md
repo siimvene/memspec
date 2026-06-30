@@ -17,7 +17,7 @@ retrieval eval harness. All additions are backward-compatible: new
 fields and parameters are optional; missing values preserve v0.4
 behaviour.
 
-- **Graph traversal on `memspec_search`.** New optional `expand_edges` flag walks typed edges outward from BM25 seed hits. `edge_types` filter narrows the walk (default: all six — `refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`); `expand_depth` caps hops at 1–3 (default 1). Expanded hits carry an `expanded_via: {from_id, edge_type, hops}` field so callers can see why a record surfaced. Hop scoring is BFS order, no numeric decay; outbound traversal only.
+- **Follow linked notes from `memspec_search`.** New optional `expand_edges` flag follows the named links on each search match and surfaces the linked notes as additional results. `edge_types` filter narrows which link types are followed (default: all six — `refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`); `expand_depth` caps link-following depth at 1–3 hops (default 1). Linked-note hits carry an `expanded_via: {from_id, edge_type, hops}` field so callers can see why a record surfaced. Hop scoring is link-following order, no numeric decay; outbound only.
 - **Temporal validity intervals.** New optional `valid_from` and `valid_to` ISO8601 fields on `MemoryFrontmatter`. `memspec_search` accepts an `as_of` filter that drops records whose validity window excludes the given timestamp. Orthogonal to `check_by` (which is a review schedule, not a truth window). Missing bounds mean "always valid."
 - **`memspec_remember` and `memspec_get` validity wiring.** Remember accepts `valid_from` / `valid_to` at write time on both MCP and CLI surfaces; get returns them when present.
 - **BENCHMARK.md + `scripts/run-bench.mjs`.** Reproducible retrieval-only eval harness against the public LongMemEval-S dataset. Reports Recall@5/10, MRR, and latency p50/p99. Not paper-comparable (different protocol, smaller sample) but a real measurement baseline for future regressions.
@@ -232,9 +232,9 @@ A retrieval query contains:
 - **types** (optional): Filter by memory type. Default: all types.
 - **max_tokens** (optional): Token budget for the response. Default: 2000.
 - **profile** (optional): Named retrieval profile. Default: `default`.
-- **expand_edges** (optional, v0.5+): If true, walk typed edges outward from BM25 seed hits to surface connected records. Default: false.
-- **edge_types** (optional, v0.5+): Restrict graph walk to specific edge types. Default: all six (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). No-op when `expand_edges` is false.
-- **expand_depth** (optional, v0.5+): Cap on graph walk hops, 1–3. Default: 1. No-op when `expand_edges` is false.
+- **expand_edges** (optional, v0.5+): If true, follow the named links on each search match to surface linked notes as additional results. Default: false.
+- **edge_types** (optional, v0.5+): Restrict link-following to specific link types. Default: all six (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). No-op when `expand_edges` is false.
+- **expand_depth** (optional, v0.5+): Cap on how many hops to follow, 1–3. Default: 1. No-op when `expand_edges` is false.
 - **as_of** (optional, v0.5+): ISO8601 timestamp. Drops records whose `valid_from`/`valid_to` window excludes this instant. Records without validity bounds are always returned.
 
 ### 5.2 Response
@@ -245,7 +245,7 @@ A retrieval response is an ordered list of memory items, ranked by relevance, tr
 - The witness class (`verified_with`) and the stale flag, if set
 - Known `conflicts_with` edges (including edges to non-returned claims, with their titles inline)
 - The creation date
-- When `expand_edges` surfaced the hit, an `expanded_via: {from_id, edge_type, hops}` field naming the seed it was reached from (v0.5+)
+- When `expand_edges` surfaced the hit, an `expanded_via: {from_id, edge_type, hops}` field naming the search match the linked note was reached from (v0.5+)
 
 ### 5.3 Ranking
 
@@ -407,7 +407,7 @@ Optional MCP server. v0.4 exposes eleven tools:
 
 - `memspec_search` — ranked retrieval with optional type filter and profile;
   result objects carry `verified_with`, `stale`, `conflicts_with`, and the
-  typed-relation edges (`refines`, `supports`, `depends_on`)
+  named links (`refines`, `supports`, `depends_on`)
 - `memspec_get` — fetch a memory by id with its lineage chain. v0.4 walks
   `supersedes` / `superseded_by` plus the typed relations `refines`,
   `supports`, `depends_on` (depth-capped at 3, cycle-safe)
@@ -419,7 +419,7 @@ Optional MCP server. v0.4 exposes eleven tools:
   `body` filled → replacement (new active record). `body` empty → retraction.
   `merge_from` collapses N duplicates into one survivor atomically. Reason is
   persisted on every record involved.
-- `memspec_relate` — wire a typed edge from one memory to another after the
+- `memspec_relate` — wire a named link from one memory to another after the
   fact: `refines`, `supports`, `depends_on`, or `conflicts_with`
 - `memspec_observe` — point-in-time observation with hard expiry (default 7d)
 - `memspec_verify` — re-witness a claim; anchorless verification requires

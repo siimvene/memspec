@@ -150,25 +150,25 @@ field/state names into this v0.3+ shape before validation.
 
 - **Type:** array of `string`
 - **Required:** no
-- **Description:** Explicit conflict edges to other memory ids; surfaced on read so contradictions are visible rather than blindly ranked.
+- **Description:** Explicit conflict links to other memory ids; surfaced on read so contradictions are visible rather than blindly ranked.
 
 ### `refines`
 
 - **Type:** array of `string`
 - **Required:** no
-- **Description:** Ids this record refines or elaborates on; the parent stays valid (v0.4 typed relation).
+- **Description:** Ids of notes this record refines or elaborates on; the parent stays valid (v0.4 named link).
 
 ### `supports`
 
 - **Type:** array of `string`
 - **Required:** no
-- **Description:** Ids this record provides evidence for (v0.4 typed relation).
+- **Description:** Ids of notes this record provides evidence for (v0.4 named link).
 
 ### `depends_on`
 
 - **Type:** array of `string`
 - **Required:** no
-- **Description:** Ids this record presupposes — a knowledge or chronological dependency (v0.4 typed relation).
+- **Description:** Ids of notes this record presupposes — a knowledge or chronological dependency (v0.4 named link).
 
 ## Extension
 

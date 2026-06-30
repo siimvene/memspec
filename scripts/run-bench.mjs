@@ -408,7 +408,7 @@ function renderMarkdown(allResults, datasetSha) {
 
 For v0.5-graph and v0.5-integration we report both **baseline** (no edge expansion — same retrieval path as v0.4) and **expand=1** (BFS over typed edges, depth 1). Edge expansion only helps when the harness creates edges; since the bench ingests independent session-facts with no \`--refines/--supports/--depends-on\` links, the expansion frontier is empty by construction. The expand=1 column is included to verify *no regression* relative to no-expansion.
 
-**Sample size:** ${SAMPLE_SIZE} per dataset slice (random sample, seed=${SEED}).
+**Sample size:** per-dataset n shown in each section heading below (random sample, seed=${SEED}).
 **Generated:** ${new Date().toISOString()}
 **Harness:** \`scripts/run-bench.mjs\`
 
@@ -419,8 +419,11 @@ For v0.5-graph and v0.5-integration we report both **baseline** (no edge expansi
     const rows = byDataset[ds] || [];
     if (rows.length === 0) continue;
     const dsLabel = ds === 'longmemeval' ? 'LongMemEval-S Knowledge-Update' : 'LoCoMo cat-2 Temporal';
-    const n = rows[0].n;
-    md += `\n### ${dsLabel} (n=${n})\n\n`;
+    // Per-condition n — pulled from each row's own count, not a module constant.
+    // Distinct values get joined so unequal slices stay visible rather than hidden.
+    const ns = [...new Set(rows.map((r) => r.n))];
+    const nLabel = ns.length === 1 ? `n=${ns[0]}` : `n=${ns.join('/')}`;
+    md += `\n### ${dsLabel} (${nLabel})\n\n`;
     md += `| Condition | Recall@5 | Recall@10 | MRR | p50 latency | p99 latency |\n`;
     md += `|---|---|---|---|---|---|\n`;
     const order = [
