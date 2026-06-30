@@ -228,6 +228,17 @@ export class MemspecStore {
       .map((item) => withLazyStale(item));
   }
 
+  /**
+   * v0.6 Phase 1 — superseded records, loaded from `archive/`. Used by search
+   * when `include_superseded: true` lets the expansion walker reach archived
+   * records as targets (seeds stay active-only). Retired records are kept out
+   * deliberately: a retraction is a deletion of intent, not a target the
+   * walker should follow into.
+   */
+  loadSuperseded(): MemoryItem[] {
+    return this.loadAll().filter((item) => item.state === 'superseded');
+  }
+
   findById(id: string): MemoryItem | null {
     return this.loadAll().find((item) => item.id === id) ?? null;
   }

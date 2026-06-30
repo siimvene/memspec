@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.6.0 — 2026-06-30
+
+**Linked Notes.** Vocabulary cleanup release: the feature formerly known
+as "graph traversal on search" is now "follow links from each match into
+its linked notes." API parameter names are unchanged, so v0.5 callers
+work as-is. Two small bug fixes round out the release.
+
+### Bug fixes
+
+- **Archive expansion (`include_superseded`).** Real-store eval finding:
+  `memspec_search --expand-edges` previously couldn't follow
+  `supersedes` / `superseded_by` links into archived predecessors
+  because the active-state filter ran before link-following. A new
+  `include_superseded` flag on `memspec_search` lets link-following
+  reach superseded records as targets while keeping search matches
+  themselves active-only. Default false — no behaviour change for
+  existing callers.
+- **`scripts/run-bench.mjs` sample-size rendering.** `renderMarkdown`
+  now reads per-condition `n` from each row instead of the module
+  `SAMPLE_SIZE` constant. Eval runs at non-default sample sizes render
+  correct headers without manual patching.
+
+### Docs
+
+- **Vocabulary swap: graph → linked notes.** SPEC.md, MCP tool
+  descriptions, and `src/lib/schema.ts` field descriptions now use
+  "linked notes" / "named links" / "follow links from each match"
+  language instead of "graph traversal" / "typed edges" / "BFS hop
+  depth." API parameter names unchanged (`expand_edges`, `edge_types`,
+  `expand_depth`, `expanded_via` field stay). Code-internal names
+  (`graph-walk.ts`, `EdgeType`, `expandGraph`) also unchanged — devs
+  grepping for graph/BFS still find them. Motivated by operator
+  feedback that the graph terminology was unnecessarily jargon-heavy
+  for what is, mechanically, just "markdown files reference other
+  markdown files by id, and search can optionally open those linked
+  files too."
+- **README cut from 437 → ~130 lines.** Restructured around: install →
+  quick start → memory model → linked notes → tools → docs pointers.
+  Removed redundant problem/why-this-shape/design-principles prose
+  (lives in SPEC.md), trimmed install-and-how-it-works duplication,
+  dropped "Who It Is For" framing. Uses linked-notes vocabulary
+  throughout.
+
+### Not in this release
+
+- **LLM-driven query planning** — still a v0.7+ candidate; needs a
+  pluggable LLM client design first.
+- **Inbound link traversal** — current walker is outbound only; reverse
+  index work deferred.
+- **Code rename `graph-walk.ts` → `linked-notes.ts`** etc — cosmetic,
+  would churn history with no functional value.
+
 ## 0.5.0 — 2026-06-29
 
 **Connected + Measured.** Two retrieval-side features (graph traversal on

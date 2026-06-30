@@ -27,7 +27,7 @@ const program = new Command();
 program
   .name('memspec')
   .description('Structured memory for AI agents')
-  .version('0.5.0')
+  .version('0.6.0')
   .showHelpAfterError();
 
 program
@@ -217,9 +217,10 @@ program
   .option('--edge-types <list>', `v0.5: comma-separated subset of edge types to traverse (default all six: ${EDGE_TYPES.join(',')})`)
   .option('--expand-depth <n>', 'v0.5: BFS hop depth for edge expansion (1, 2, or 3; default 1)')
   .option('--as-of <iso>', 'ISO 8601 timestamp; drop results whose world-state validity window excludes this point (records without valid_from/valid_to are always returned)')
+  .option('--include-superseded', 'v0.6: when set with --expand-edges, allow expansion to reach superseded/archived records as targets (seeds stay active-only)')
   .action((query: string, options: {
     cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean; full?: boolean;
-    expandEdges?: boolean; edgeTypes?: string; expandDepth?: string; asOf?: string;
+    expandEdges?: boolean; edgeTypes?: string; expandDepth?: string; asOf?: string; includeSuperseded?: boolean;
   }) => {
     let edgeTypes: EdgeType[] | undefined;
     if (options.edgeTypes) {
@@ -251,6 +252,7 @@ program
       edgeTypes,
       expandDepth,
       asOf: options.asOf,
+      includeSuperseded: options.includeSuperseded,
     }));
   });
 

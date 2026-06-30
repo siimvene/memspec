@@ -68,13 +68,13 @@ export const memoryFrontmatterSchema = z.object({
   supersede_reason: z.string().optional()
     .describe('Durable reason explaining why this record was superseded (renamed from `correction_reason`).'),
   conflicts_with: z.array(z.string()).optional()
-    .describe('Explicit conflict edges to other memory ids; surfaced on read so contradictions are visible rather than blindly ranked.'),
+    .describe('Explicit conflict links to other memory ids; surfaced on read so contradictions are visible rather than blindly ranked.'),
   refines: z.array(z.string()).optional()
-    .describe('Ids this record refines or elaborates on; the parent stays valid (v0.4 typed relation).'),
+    .describe('Ids of notes this record refines or elaborates on; the parent stays valid (v0.4 named link).'),
   supports: z.array(z.string()).optional()
-    .describe('Ids this record provides evidence for (v0.4 typed relation).'),
+    .describe('Ids of notes this record provides evidence for (v0.4 named link).'),
   depends_on: z.array(z.string()).optional()
-    .describe('Ids this record presupposes — a knowledge or chronological dependency (v0.4 typed relation).'),
+    .describe('Ids of notes this record presupposes — a knowledge or chronological dependency (v0.4 named link).'),
   expires: z.string().refine(
     (s) => !isNaN(Date.parse(s)),
     'Must be a valid ISO 8601 date',
