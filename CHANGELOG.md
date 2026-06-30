@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.2 — 2026-06-30
+
+Build-tooling patch. No runtime or API changes — the published package
+behaves identically to 0.6.1. This release exists to stop shipping stale
+compiled artifacts in the npm tarball.
+
+### Build
+
+- **`dist/` is now wiped before every build.** A new `clean` script runs
+  ahead of `tsc`, so compiled outputs for commands removed in the v0.4
+  rewrite (`add`, `consolidate`, `correct`, `decay`, `promote`,
+  `validate`) no longer linger in `dist/` and get packed into the
+  published tarball. `tsc` only overwrites files it regenerates, so
+  without an explicit clean these orphans persisted indefinitely.
+- **`postbuild` restores the bin executable bit.** Because `clean`
+  deletes and recreates `dist/cli.js` and `dist/mcp.js`, the executable
+  bit that the previous in-place `tsc` overwrite happened to preserve is
+  lost. A `postbuild` step `chmod`s both bin files to `0o755` via Node's
+  `fs.chmodSync` (a no-op on Windows). Both steps are dependency-free.
+
 ## 0.6.1 — 2026-06-30
 
 Patch release. Fixes a silent failure mode in layered stores — the
