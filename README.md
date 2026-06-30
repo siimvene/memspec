@@ -1,6 +1,23 @@
 # Memspec
 
-Portable, file-canonical memory for AI agents. Markdown files in your repo, structured lifecycle, search with linked-note neighbours, MCP server. No daemon. No backend service.
+**The problem:** AI coding agents wake up with amnesia. Every session starts cold — no memory of what was decided, what failed, what the project's tribal knowledge says. Teams paper over this with scattered markdown files, prompt stuffing, or hosted memory APIs that lock you into a vendor.
+
+**Memspec is the spec + tooling for living project memory that stays in your repo.** Markdown files under `.memspec/` are the canonical source of truth. Memspec layers structured lifecycle, full-text and hybrid search, linked-note traversal, and an MCP server on top — without standing up a backend service.
+
+## Features
+
+- **File-canonical.** Memories are markdown files with YAML frontmatter. Human-readable, git-diffable, greppable. Lose the index, lose speed — not data.
+- **Three claim types + observations.** `fact`, `decision`, `procedure` with per-type TTLs; `observation` for point-in-time notes with hard expiry.
+- **Lifecycle, not curation.** `active | superseded | retired`. Corrections create a new memory linked back to the original; supersede chains preserve the reason on every record involved. Past TTL = stale flag at read time, never deletion.
+- **Code-anchored verification.** Tie memories to git blob SHAs. When code drifts, memspec flags drifted anchors for review instead of letting facts about code rot silently.
+- **Linked notes** (v0.5+). Records reference other records by id (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). Search can follow these links one or more hops to surface neighbours alongside direct matches; `--include-superseded` lets link-following reach archived predecessors (v0.6+).
+- **Temporal validity** (v0.5+). Optional `valid_from` / `valid_to` per memory. Search with `--as-of <iso>` filters by world-state truth window, orthogonal to the `check_by` review schedule.
+- **Operator-tier storage** (v0.4+). Records sourced by the operator land in a separate filesystem path with stricter overwrite protection (`--override-operator` required to supersede).
+- **Hybrid search.** SQLite FTS5 + BM25 by default; optional dense embeddings rerank via OpenAI-compatible endpoints or Ollama.
+- **MCP server.** Eleven tools, first-class integration with Claude Code, Cursor, Codex.
+- **Witnessed claims.** Every memory carries `verified_with` (`anchor | operator | evidence | assertion`) — provenance, not a confidence score.
+- **Reproducible benchmarks.** [`BENCHMARK.md`](BENCHMARK.md) ships measured retrieval numbers on LongMemEval, LoCoMo, and a real-store eval; `scripts/run-bench.mjs` reproduces them.
+- **Zero infrastructure.** `npm install -g memspec` + `memspec init`. No accounts, no API keys, no hosted services.
 
 ## Install
 
