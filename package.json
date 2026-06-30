@@ -1,6 +1,6 @@
 {
   "name": "memspec",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Structured memory for AI agents - spec plus CLI",
   "type": "module",
   "bin": {

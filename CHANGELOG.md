@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.3 — 2026-06-30
+
+Patch release. Fixes a stale hardcoded version string. No API or runtime
+behaviour changes.
+
+### Bug fixes
+
+- **`memspec --version` (and the MCP server version) now report the real
+  package version.** The version was hardcoded as `'0.6.1'` in
+  `src/cli.ts` and `src/mcp.ts`, and `npm version` only bumps
+  `package.json` — so the bump to 0.6.2 never reached the source. As a
+  result the published 0.6.2 CLI still printed `0.6.1`. Both strings are
+  now `0.6.3` and tracked with the release.
+
 ## 0.6.2 — 2026-06-30
 
 Build-tooling patch. No runtime or API changes — the published package
