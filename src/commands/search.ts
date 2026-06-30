@@ -1,7 +1,8 @@
+import { CompositeStore } from '../lib/composite-store.js';
 import { getProfile, loadConfig } from '../lib/config.js';
 import { EDGE_TYPES, expandGraph, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
-import { MemspecStore, type StoreSearchOptions } from '../lib/store.js';
+import { type StoreSearchOptions } from '../lib/store.js';
 import { MEMORY_TYPES, type LifecycleState, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits } from '../lib/usage.js';
 
@@ -233,7 +234,10 @@ function buildResultRow(
  * second `store.search` call to keep them in sync.
  */
 export function searchPayload(query: string, options: SearchOptions): SearchPayload {
-  const store = new MemspecStore(options.cwd);
+  // v0.6.1 (#2): wrap in CompositeStore so configured `stores:` layers surface
+  // in retrieval. When no layering is configured this is a single-layer
+  // composite over the project store — byte-identical to v0.6 behaviour.
+  const store = CompositeStore.forCwd(options.cwd);
   const config = loadConfig(store.root);
   const profileName = options.profile ?? 'default';
   const profile = getProfile(config, profileName);

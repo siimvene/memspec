@@ -16,8 +16,8 @@ import { buildStatusReport, runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
 import { runVerify } from './commands/verify.js';
 import { homedir } from 'node:os';
+import { CompositeStore } from './lib/composite-store.js';
 import { buildLineage } from './lib/lineage.js';
-import { MemspecStore } from './lib/store.js';
 
 const { values } = parseArgs({
   options: { cwd: { type: 'string' } },
@@ -109,7 +109,9 @@ server.tool(
   },
   async ({ id }) => {
     try {
-      const store = new MemspecStore(defaultCwd);
+      // v0.6.1 (#2): wrap in CompositeStore so layered records are reachable
+      // by id. Without `stores:` config this is a single-layer composite.
+      const store = CompositeStore.forCwd(defaultCwd);
       const allItems = store.loadAll();
       const item = allItems.find((i) => i.id === id) ?? null;
       if (!item) {

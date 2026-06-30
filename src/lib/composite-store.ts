@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { MemspecStore, type StoreSearchOptions, type LoadWarning } from './store.js';
-import type { StoreLayerConfig } from './config.js';
+import { loadConfig, type StoreLayerConfig } from './config.js';
 import type { MemoryItem, MemoryFrontmatter } from './types.js';
 
 export interface StoreLayer {
@@ -70,6 +70,29 @@ export class CompositeStore {
     return new CompositeStore(layers, projectRoot);
   }
 
+  /**
+   * v0.6.1 — retrieval entry point used by `search`, `context`, and the MCP
+   * `memspec_search` / `memspec_get` handlers. Loads the project's config and
+   * honours its `stores:` block; when no explicit layering is configured, falls
+   * back to a single-layer composite wrapping the project store. The fallback
+   * deliberately skips the auto-global detection that `fromConfig` performs for
+   * `memspec stores` — retrieval must stay byte-identical to a single
+   * `MemspecStore(cwd)` when no `stores:` block is present.
+   *
+   * Fixes issue #2 (Mika Tsernobrivoi, @KongFuzi1, 2026-05-31): retrieval paths
+   * constructed `MemspecStore` directly, so the configured layers were silently
+   * ignored.
+   */
+  static forCwd(cwd?: string): CompositeStore {
+    const probe = new MemspecStore(cwd);
+    const config = loadConfig(probe.root);
+    if (config.stores && config.stores.length > 0) {
+      return new CompositeStore(config.stores, cwd);
+    }
+    // No explicit layering — preserve v0.6 single-store behaviour exactly.
+    return new CompositeStore([], cwd);
+  }
+
   get exists(): boolean {
     return this.layers.some((l) => l.store.exists);
   }
@@ -91,6 +114,27 @@ export class CompositeStore {
       }
     }
     return allItems;
+  }
+
+  /**
+   * Load superseded items from all layers, deduplicating by ID (higher priority
+   * wins). Mirrors `MemspecStore.loadSuperseded`, used by search expansion when
+   * `include_superseded` is set so the walker can resolve archived targets
+   * across every configured layer.
+   */
+  loadSuperseded(): MemoryItem[] {
+    const seen = new Set<string>();
+    const items: MemoryItem[] = [];
+    for (const layer of this.layers) {
+      if (!layer.store.exists) continue;
+      for (const item of layer.store.loadSuperseded()) {
+        if (!seen.has(item.id)) {
+          seen.add(item.id);
+          items.push(item);
+        }
+      }
+    }
+    return items;
   }
 
   /** Load active items from all layers, deduplicating by ID (higher priority wins) */
