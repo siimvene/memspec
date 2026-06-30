@@ -1,7 +1,7 @@
 import { checkAnchors, getCodeAnchors, projectRootForStore } from '../lib/anchors.js';
+import { CompositeStore } from '../lib/composite-store.js';
 import { loadConfig } from '../lib/config.js';
 import { effectiveSourceKind } from '../lib/source.js';
-import { MemspecStore } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType } from '../lib/types.js';
 import { recentRetrievalCounts } from '../lib/usage.js';
 
@@ -293,7 +293,10 @@ function budgetSections(
 }
 
 export function runContext(options: ContextOptions): string {
-  const store = new MemspecStore(options.cwd);
+  // v0.6.1 (#2): wrap in CompositeStore so configured `stores:` layers surface
+  // in retrieval. Without layering this is a single-layer composite — byte-
+  // identical to v0.6 behaviour.
+  const store = CompositeStore.forCwd(options.cwd);
   if (!store.exists) {
     return options.format === 'json' ? '[]' : '## Active project memory\n\n_No active memories._\n';
   }

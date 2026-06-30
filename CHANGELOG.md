@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.6.1 — 2026-06-30
+
+Patch release. Fixes a silent failure mode in layered stores — the
+`stores:` config block in `.memspec/config.yaml` was only honored by
+the `memspec stores` listing command. Every retrieval path (search,
+context, MCP) constructed a single `MemspecStore` directly and ignored
+the configured layers, so records from lower-priority stores were
+silently unreachable.
+
+### Bug fixes
+
+- **Layered stores honored by retrieval (`#2`).** `searchPayload`,
+  `runContext`, and the MCP `memspec_get` handler now wrap their store
+  construction in `CompositeStore.forCwd(cwd)`. With no `stores:`
+  config present, behaviour is byte-identical to v0.6.0 (single-layer
+  composite). When `stores:` is configured, records from all layers
+  surface in search, context, and MCP retrieval — matching what
+  `memspec stores` has been advertising all along.
+
+  Reported and root-caused by [@KongFuzi1](https://github.com/KongFuzi1)
+  (Mika Tsernobrivoi) on 2026-05-31. Fix scope follows their suggestion
+  exactly. Thank you.
+
+### Internal
+
+- New `CompositeStore.forCwd(cwd)` static helper. Loads the project
+  config and returns a CompositeStore wired to the configured layers,
+  or a single-layer composite when no `stores:` is set. Used by the
+  three retrieval entry points.
+- New `CompositeStore.loadSuperseded()` method, mirroring the existing
+  `loadActive()` and `loadAll()` surface so the v0.6 `include_superseded`
+  feature works across layered stores.
+
+### Tests
+
+- New `test/layered-stores-retrieval.test.ts` (7 cases): repro from
+  `#2`, no-layering regression guard, layer-precedence honoured,
+  read-only layer write rejection, MCP search across layers, MCP get
+  across layers.
+- Total test count: 212 → 219.
+
+### Known follow-up
+
+`SPEC.md §12.4` mentions auto-detection of `~/.memspec` even without
+explicit config. v0.6.1 only fixes the explicit-config case; the
+auto-detection path is unchanged. If that promise matters, file a
+follow-up issue — out of scope for this patch.
+
 ## 0.6.0 — 2026-06-30
 
 **Linked Notes.** Vocabulary cleanup release: the feature formerly known
