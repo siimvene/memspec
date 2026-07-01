@@ -26,8 +26,6 @@
     "test": "node --import tsx --test test/**/*.test.ts",
     "schema": "node --import tsx scripts/generate-schema.ts",
     "schema:check": "node --import tsx scripts/generate-schema.ts /tmp/memspec-schema-check.md && diff -u SCHEMA.md /tmp/memspec-schema-check.md",
-    "sim:gen": "npm run build && node scripts/sim/gen-fixture.mjs",
-    "sim:eval": "npm run build && node scripts/sim/eval.mjs",
     "check": "npm run build && npm run schema:check && npm test",
     "prepublishOnly": "npm run check"
   },

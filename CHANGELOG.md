@@ -1,20 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Tooling
-
-- **Simulated-memory dev fixture (`scripts/sim/`).** A deterministic, committed corpus of a fictional company's ~190-record project memory (typed edges, temporal validity, supersede chains, staleness, near-duplicates, conflicts) plus a labeled query set, for internal retrieval testing. `npm run sim:eval` scores the current build per query pattern and lists the failures. Built to expose headroom, not to score 1.000: queries use user-language phrasing with a deliberate lexical gap from the answer and include near-miss distractors, so a keyword-only ranker is punished, not rewarded. Current run flags ~4/10 patterns as headroom — chiefly that edge/archive expansion recovers records BM25 misses but ranks them below every direct match. Not shipped in the npm package.
-- **Simulated-corpus version sweep (`scripts/sim/bench.mjs` → `SIM-BENCHMARK.md`).** Runs every released version's search against the same committed fixture and renders one row per version. Measures the real capability progression: v0.5 unlocks edge-walk reachability and temporal `as_of` ranking; v0.6 unlocks archived-record retrieval; precision and cluster-completeness headroom stay flat across all versions. Local dev artifact, not shipped.
-
-### Fixes (tooling)
-
-- **Benchmark sweeps now isolate each version in its own process.** Both `run-bench.mjs` and the sim sweep previously loaded every version's build into one Node process via cache-busted dynamic imports — but Node only busts the exact specifier, so each version's transitive deps (`fts`/`store`/`schema`) resolved to whichever version loaded first, silently benchmarking one build N times. Each version now runs in a fresh child process (full module graph), and the worker is staged to `/tmp` so an old-tag checkout can't delete it mid-sweep. The default-path retrieval numbers are unchanged (now genuinely verified, not an artifact of shared module state).
-
-### Docs
-
-- **BENCHMARK.md re-run across released versions.** Replaces the v0.5-branch condition matrix (and its carry-forward note) with one measured row per version — v0.4 → v0.7, each pinned to its release tag — on the LongMemEval and LoCoMo slices. Confirms empirically what the carry-forward note only asserted: retrieval ranking is identical v0.4 → v0.7, per-question, not just in aggregate (no release touched the scoring path). The edge-expansion and real-store sections are dropped: expansion is a measured no-op on edge-free datasets, and the real-store eval was pinned to a machine-local snapshot that isn't reproducible from the repo. `scripts/run-bench.mjs` now sweeps version tags instead of feature branches, and `scripts/bench-README.md` documents the version-tag protocol.
-
 ## 0.7.0 — 2026-06-30
 
 **Dream pass.** First-party periodic reflection over the store. Plus a README pivot to lead with verification and drift detection, an explicit comparison against `AGENTS.md`, two documented trust profiles, and a relaxed Node engine floor.

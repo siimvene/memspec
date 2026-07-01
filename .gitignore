@@ -3,5 +3,3 @@ dist/
 .memspec/.index.db
 .omc/
 coverage/
-# Regenerable simulated-memory fixture (recreate with `npm run sim:gen`)
-scripts/sim/fixture/

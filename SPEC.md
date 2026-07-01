@@ -30,15 +30,13 @@ API parameter names are unchanged from v0.5; callers work as-is.
 
 ### Changes in v0.5 (Connected + Measured)
 
-v0.5 adds two retrieval-side features and the project's first homegrown
-retrieval eval harness. All additions are backward-compatible: new
-fields and parameters are optional; missing values preserve v0.4
+v0.5 adds two retrieval-side features. All additions are backward-compatible:
+new fields and parameters are optional; missing values preserve v0.4
 behaviour.
 
 - **Follow linked notes from `memspec_search`.** New optional `expand_edges` flag follows the named links on each search match and surfaces the linked notes as additional results. `edge_types` filter narrows which link types are followed (default: all six — `refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`); `expand_depth` caps link-following depth at 1–3 hops (default 1). Linked-note hits carry an `expanded_via: {from_id, edge_type, hops}` field so callers can see why a record surfaced. Hop scoring is link-following order, no numeric decay; outbound only.
 - **Temporal validity intervals.** New optional `valid_from` and `valid_to` ISO8601 fields on `MemoryFrontmatter`. `memspec_search` accepts an `as_of` filter that drops records whose validity window excludes the given timestamp. Orthogonal to `check_by` (which is a review schedule, not a truth window). Missing bounds mean "always valid."
 - **`memspec_remember` and `memspec_get` validity wiring.** Remember accepts `valid_from` / `valid_to` at write time on both MCP and CLI surfaces; get returns them when present.
-- **BENCHMARK.md + `scripts/run-bench.mjs`.** Reproducible retrieval-only eval harness against the public LongMemEval-S dataset. Reports Recall@5/10, MRR, and latency p50/p99. Not paper-comparable (different protocol, smaller sample) but a real measurement baseline for future regressions.
 
 ### Changes in v0.4 (Graph Primitives + Final Shim Cleanup)
 

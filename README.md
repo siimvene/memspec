@@ -26,7 +26,6 @@ Agents `remember` claims and `observe` notes; everything lands as markdown under
 - **Hybrid search.** SQLite FTS5 + BM25 by default; optional dense embeddings rerank via OpenAI-compatible endpoints or Ollama.
 - **MCP server.** Eleven tools, first-class integration with Claude Code, Cursor, Codex.
 - **Witnessed claims.** Every memory carries `verified_with` (`anchor | operator | evidence | assertion`) — provenance, not a confidence score.
-- **Reproducible benchmarks.** [`BENCHMARK.md`](BENCHMARK.md) ships measured retrieval numbers on LongMemEval and LoCoMo, one row per released version (v0.4 → v0.7); `scripts/run-bench.mjs` reproduces them.
 - **Dream pass** (v0.7+). Periodic reflection script (`memspec-dream`) reads the last N days of memspec writes and git log, asks an LLM to surface stale memories, supersede candidates, verify candidates, missing relations, and behavioural rules worth promoting. Output is review material, never auto-applied.
 - **Zero infrastructure.** `npm install -g memspec` + `memspec init`. No accounts, no API keys, no hosted services.
 
@@ -117,8 +116,6 @@ Two engines, picked at `memspec init`:
 - **Hybrid**: FTS5 candidates plus embeddings rerank. OpenAI-compatible endpoints or Ollama.
 
 Index rebuilds on demand from the markdown files. Lose the index, lose speed — not data.
-
-See [BENCHMARK.md](BENCHMARK.md) for retrieval numbers on LongMemEval and LoCoMo, measured per released version.
 
 ## Trust profiles
 
@@ -232,7 +229,6 @@ Inspired by [Aaron Fulkerson's Exo](https://aaronfulkerson.com/2026/05/23/meet-e
 
 - [SPEC.md](SPEC.md) — design rationale and frontmatter schema
 - [SCHEMA.md](SCHEMA.md) — generated field reference (regenerated from Zod via `npm run schema`)
-- [BENCHMARK.md](BENCHMARK.md) — retrieval benchmarks
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [MIGRATION-v0.3.md](MIGRATION-v0.3.md) — v0.2/v0.3 → v0.4+ upgrade path
 - [AGENTS-ADDON.md](AGENTS-ADDON.md) — block to paste into `AGENTS.md` / `CLAUDE.md` if `init` couldn't patch your repo
