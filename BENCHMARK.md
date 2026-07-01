@@ -18,6 +18,8 @@ For v0.5-graph and v0.5-integration we report both **baseline** (no edge expansi
 **Generated:** 2026-06-29T23:30Z (real-store append)
 **Harness:** `scripts/run-bench.mjs`
 
+> **Carry-forward note (v0.6 / v0.7).** Numbers below are pinned to v0.5 branch tips. v0.6 renamed the search-time "graph traversal" surface to "linked notes" without changing retrieval ranking; v0.6.1 fixed layered-store retrieval (orthogonal to scoring); v0.7 added the `memspec-dream` reflection script (offline, no retrieval). None of these touch the ranking path, so the v0.5 baselines carry forward unchanged. The "graph expansion" / "edge expansion" terminology below refers to what v0.6 now calls *linked-note following*; behaviour identical.
+
 A third section evaluates Siim's actual `~/.memspec/` operator store (with organic typed edges) to test the hypothesis that graph expansion was flat in the synthetic runs because the harness never created edges. The real-store run answers that question.
 
 ## Results

@@ -1,8 +1,8 @@
 # Memspec
 
-**The problem:** AI coding agents wake up with amnesia. Every session starts cold — no memory of what was decided, what failed, what the project's tribal knowledge says. Teams paper over this with scattered markdown files, prompt stuffing, or hosted memory APIs that lock you into a vendor.
+**Memspec is Git-backed project memory for AI coding agents, with verification and drift detection.** Claims about code are anchored to file SHAs; when the code changes, memspec flags the claim for review instead of letting facts rot silently. Duplicate rejection, typed supersede chains, and per-claim provenance turn memory into testable claims, not a notes file.
 
-**Memspec is the spec + tooling for living project memory that stays in your repo.** Markdown files under `.memspec/` are the canonical source of truth. Memspec layers structured lifecycle, full-text and hybrid search, linked-note traversal, and an MCP server on top — without standing up a backend service.
+Markdown files under `.memspec/` are the canonical source of truth: human-readable, git-diffable, greppable. Lose the index, lose speed — not data. No backend service. No hosted memory API. No vendor lock-in.
 
 ## Architecture
 
@@ -27,6 +27,7 @@ Agents `remember` claims and `observe` notes; everything lands as markdown under
 - **MCP server.** Eleven tools, first-class integration with Claude Code, Cursor, Codex.
 - **Witnessed claims.** Every memory carries `verified_with` (`anchor | operator | evidence | assertion`) — provenance, not a confidence score.
 - **Reproducible benchmarks.** [`BENCHMARK.md`](BENCHMARK.md) ships measured retrieval numbers on LongMemEval, LoCoMo, and a real-store eval; `scripts/run-bench.mjs` reproduces them.
+- **Dream pass** (v0.7+). Periodic reflection script (`memspec-dream`) reads the last N days of memspec writes and git log, asks an LLM to surface stale memories, supersede candidates, verify candidates, missing relations, and behavioural rules worth promoting. Output is review material, never auto-applied.
 - **Zero infrastructure.** `npm install -g memspec` + `memspec init`. No accounts, no API keys, no hosted services.
 
 ## Install
@@ -47,16 +48,31 @@ cd memspec && npm install && npm run build && npm link
 ```bash
 memspec init                                            # interactive setup, creates .memspec/
 
-memspec remember fact "Auth uses JWT" \
+memspec remember fact "Auth uses JWT" \                 # write a claim, anchor it to code
   --source agent --tags auth --anchor src/auth/jwt.ts
 
 memspec search "auth"                                   # BM25; --expand-edges follows linked notes
 
-memspec supersede ms_01HXK... \
-  --reason "Migrated to OAuth" --body "Now OAuth2 + PKCE"
+memspec reconcile                                       # find anchored claims whose code drifted
+memspec verify ms_01HXK... --evidence "still JWT"       # confirm still true; refreshes timestamp
 
-memspec status                                          # housekeeping readout
+memspec supersede ms_01HXK... \                         # or replace with a corrected version
+  --reason "Migrated to OAuth" --body "Now OAuth2 + PKCE"
 ```
+
+The `anchor → reconcile → verify | supersede` loop is the differentiator: claims about code stay accountable to the code.
+
+## Why not just AGENTS.md?
+
+| Approach | Reviewable in Git | Code-anchored | Lifecycle | Search | Self-hosted |
+|---|---|---|---|---|---|
+| `AGENTS.md` / `CLAUDE.md` | yes | no | none | grep | yes |
+| `MEMORY.md` / scratchpad | yes | no | none | grep | yes |
+| Vector DB (Chroma, Qdrant) | no | no | manual | semantic | yes |
+| Hosted memory API (Mem0, Letta) | no | no | hosted | hosted | no |
+| **Memspec** | per-claim | yes | typed states | FTS5 + optional hybrid | yes |
+
+If project memory fits in a paragraph in a single file, `AGENTS.md` is fine. Memspec is for when memory grows into a list of claims that need to track code reality, expire, supersede, and link to each other.
 
 ## Memory model
 
@@ -103,6 +119,23 @@ Two engines, picked at `memspec init`:
 Index rebuilds on demand from the markdown files. Lose the index, lose speed — not data.
 
 See [BENCHMARK.md](BENCHMARK.md) for retrieval numbers on LongMemEval, LoCoMo, and a real-store eval.
+
+## Trust profiles
+
+Memspec doesn't enforce a write policy; the agent's instruction file does (see [AGENTS-ADDON.md](AGENTS-ADDON.md)). Two reference profiles:
+
+**Operator solo** (default). The agent writes facts, decisions, procedures, and observations freely. Duplicate rejection, anchor drift, and supersede chains catch bad writes. Friction-free; relies on `git log` to undo mistakes. Suits single-operator setups where memspec is your own agent infrastructure.
+
+**Team review.** For shared repos with multiple writers:
+
+- Observations: agent writes freely.
+- Facts: agent writes only when anchored to code; anchorless facts route to a PR for review.
+- Decisions: drafted by agent, merged by human.
+- Procedures: agent-written, reviewed at first use.
+- Operator-tier claims: never overridden without `--override-operator` and a reason in the supersede record.
+- Secrets: never stored. Anywhere. Ever.
+
+Pick the profile in your `AGENTS.md` / `CLAUDE.md` and the agent will follow it. The store records every write, so deviations show up in `git log`.
 
 ## MCP server
 
@@ -174,6 +207,26 @@ Frontmatter fields per record: `id`, `kind`, `type`, `state`, `source`, `source_
 - `memspec-consolidate.js` — on commit, prompts the agent to write memories about what just shipped
 
 Configurable in `.memspec/config.yaml`. Pass `--no-install-hooks` to skip. See [`hooks/`](hooks/) for the scripts.
+
+## Dream pass
+
+A periodic reflection over the store. Reads the last N days of memspec writes + git log, asks an LLM to surface stale memories, supersede / merge candidates, verify candidates, missing typed relations, and behavioural rules worth promoting to your agent instruction file. **Proposals only — never auto-applied.**
+
+```bash
+memspec-dream                          # weekly default (7 days, current .memspec/)
+memspec-dream 14                       # custom window
+MEMSPEC_DREAM_AUTOCOMMIT=1 memspec-dream
+```
+
+Output lands at `<store>/dream/YYYY-MM-DD.md` for a human to review. Defaults to invoking `claude` (Claude Code CLI) headlessly; override with `MEMSPEC_LLM_BIN` and `MEMSPEC_LLM_ARGS` for other CLIs.
+
+Cron example (Sunday 22:00 local):
+
+```cron
+0 22 * * 0  cd /path/to/project && MEMSPEC_DREAM_AUTOCOMMIT=1 memspec-dream
+```
+
+Inspired by [Aaron Fulkerson's Exo](https://aaronfulkerson.com/2026/05/23/meet-exo/) and the [`dream-skill`](https://github.com/grandamenium/dream-skill) prior art.
 
 ## Docs
 

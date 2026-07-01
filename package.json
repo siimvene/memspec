@@ -1,15 +1,17 @@
 {
   "name": "memspec",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Structured memory for AI agents - spec plus CLI",
   "type": "module",
   "bin": {
     "memspec": "./dist/cli.js",
-    "memspec-mcp": "./dist/mcp.js"
+    "memspec-mcp": "./dist/mcp.js",
+    "memspec-dream": "./scripts/dream.sh"
   },
   "files": [
     "dist",
     "hooks",
+    "scripts/dream.sh",
     "AGENTS-ADDON.md",
     "SPEC.md",
     "MIGRATION-v0.3.md",
@@ -42,7 +44,7 @@
     "url": "git+https://github.com/siimvene/memspec.git"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

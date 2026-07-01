@@ -1,4 +1,4 @@
-# Memspec Specification v0.5
+# Memspec Specification v0.7
 
 ## Abstract
 
@@ -9,6 +9,24 @@ This document is the portable specification. It is implementation-agnostic — a
 ### Relationship to OKF
 
 Google Cloud's [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) shares Memspec's file surface — markdown body, YAML frontmatter, directory-of-files, no SDK. It standardizes the *static* half of agent knowledge: catalogs of external assets (tables, metrics, runbooks, API endpoints) authored by enrichment agents or humans. Memspec covers the *working-memory* half: claims an agent writes about its own decisions, fixes, and discoveries during work, with first-class lifecycle — witness, supersession, conflict edges, drift detection. A Memspec memory is structurally a valid OKF concept (its `type` is one of `fact`, `decision`, or `procedure`). The formats are complementary, not competing.
+
+### Changes in v0.7 (Dream pass)
+
+v0.7 adds a periodic reflection tool and relaxes the runtime floor. No
+schema changes; existing stores work as-is.
+
+- **`memspec-dream` bin.** Periodic LLM-driven reflection over the store. Reads the last N days of memspec writes and git log, asks a headless LLM CLI to surface stale memories, supersede / merge candidates, verify candidates, missing typed relations, and behavioural rules worth promoting to the agent's instruction file. Output is review material at `<store>/dream/YYYY-MM-DD.md`, never auto-applied. Env-configurable (`MEMSPEC_ROOT`, `MEMSPEC_LLM_BIN`, `MEMSPEC_LLM_ARGS`, `MEMSPEC_DREAM_AUTOCOMMIT`). Defaults to `claude -p`; works with any LLM CLI that reads stdin and writes stdout. Designed to run weekly via cron.
+- **Node engine floor relaxed.** `engines.node` dropped from `>=22` to `>=20.0.0`. The source uses only APIs stable since Node 18; the real floor is the dependency tree (`commander@14`, `better-sqlite3@12`), both of which support Node 20 LTS.
+
+### Changes in v0.6 (Linked Notes vocabulary + layered-store retrieval fix)
+
+v0.6 is a vocabulary cleanup release with one targeted retrieval bugfix.
+API parameter names are unchanged from v0.5; callers work as-is.
+
+- **Vocabulary swap: "graph traversal on search" is now "follow links from each match into its linked notes."** Search-time link-following is no longer described as "graph expansion"; the conceptual surface is named links between records, not an abstract graph structure. No behaviour change.
+- **`include_superseded`** (new, optional) on `memspec_search`. When set with `expand_edges`, lets link-following reach `superseded` / archived records as targets. Search matches themselves stay active-only. Default false; v0.5 callers unaffected.
+- **Layered stores honored by retrieval.** Bugfix (`#2`, KongFuzi1): the `stores:` config block in `.memspec/config.yaml` was previously only honored by the `memspec stores` listing command. `searchPayload`, `runContext`, and the MCP `memspec_get` handler now wrap their store construction in `CompositeStore.forCwd(cwd)`, so configured layers surface in search, context, and MCP retrieval. With no `stores:` config present, behaviour is identical to v0.5. **Known follow-up:** §12.4's auto-detection of `~/.memspec/` applies only to the `memspec stores` listing path; retrieval still requires an explicit `stores:` block to reach lower-priority layers.
+- **Build hygiene.** `dist/` is wiped before every build (v0.6.2); a `postbuild` step restores the executable bit on `dist/cli.js` and `dist/mcp.js`. `memspec --version` (and the MCP server version) now reads `package.json` rather than a hardcoded literal (v0.6.3).
 
 ### Changes in v0.5 (Connected + Measured)
 
@@ -196,7 +214,7 @@ Any agent or human can supersede a record. A supersede signal contains:
 - **reason**: Why it's wrong or stale (free text). Persisted durably on both records.
 - **replacement** (optional): New content that supersedes the target.
 - **title** (optional): Fresh title for the replacement — superseded knowledge often no longer fits the old title.
-- **merge_from** (optional, planned): List of duplicate ids to collapse atomically into one survivor.
+- **merge_from** (optional, v0.3+): List of duplicate ids to collapse atomically into one survivor.
 
 ### 4.2 Supersede Processing
 
@@ -235,6 +253,7 @@ A retrieval query contains:
 - **expand_edges** (optional, v0.5+): If true, follow the named links on each search match to surface linked notes as additional results. Default: false.
 - **edge_types** (optional, v0.5+): Restrict link-following to specific link types. Default: all six (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). No-op when `expand_edges` is false.
 - **expand_depth** (optional, v0.5+): Cap on how many hops to follow, 1–3. Default: 1. No-op when `expand_edges` is false.
+- **include_superseded** (optional, v0.6+): When true with `expand_edges`, allows link-following to reach `superseded` / archived records as targets. Search matches themselves stay active-only. Default: false. No-op when `expand_edges` is false.
 - **as_of** (optional, v0.5+): ISO8601 timestamp. Drops records whose `valid_from`/`valid_to` window excludes this instant. Records without validity bounds are always returned.
 
 ### 5.2 Response
@@ -403,7 +422,7 @@ Agent reads and writes markdown files in `.memspec/`. No server, no dependencies
 
 ### 8.2 MCP Server
 
-Optional MCP server. v0.4 exposes eleven tools:
+Optional MCP server. Eleven tools (stable since v0.4):
 
 - `memspec_search` — ranked retrieval with optional type filter and profile;
   result objects carry `verified_with`, `stale`, `conflicts_with`, and the
@@ -429,7 +448,7 @@ Optional MCP server. v0.4 exposes eleven tools:
 - `memspec_status` — store health: counts by type/state/witness, stale,
   drifted anchors, declared and inferred conflicts, schema violations,
   sweep candidates
-- `memspec_export` — dump the memory graph (nodes + edges) as JSONL,
+- `memspec_export` — dump records and their named links as JSONL,
   GraphML, or DOT for visualization in Gephi, Cytoscape, or graphviz
 
 The v0.3 deprecation aliases were removed in v0.4: `memspec_add` and
@@ -444,14 +463,18 @@ The v0.3 CLI deprecation shims (`add`, `correct`, `promote`, `consolidate`,
 
 ### 8.3 CLI
 
-Optional command-line interface (primary v0.3 commands):
+Optional command-line interface (primary commands):
 - `memspec remember {type} "{title}" --source {who} [--anchor {files...}] [--pin] [--check-by {ts|never}]`
 - `memspec observe "{text}" [--ttl {dur}]` — point-in-time observation with hard expiry
 - `memspec supersede {id} --reason "{reason}" [--body "{new content}"] [--title] [--merge-from {ids}] [--override-operator]`
 - `memspec verify {id} [--evidence "{what you checked}"]`
 - `memspec anchor {id} {files...}` / `memspec reconcile [--since {ref}]`
-- `memspec search "{query}"` / `memspec context [--query] [--budget]`
+- `memspec relate --from {id} --to {id} --type {refines|supports|depends_on|conflicts_with}` (v0.4+)
+- `memspec search "{query}" [--expand-edges] [--include-superseded] [--as-of {iso}]` / `memspec context [--query] [--budget]`
 - `memspec status` — the single maintenance readout
+- `memspec export --format {jsonl|graphml|dot}` (v0.4+)
+
+Separate from the `memspec` CLI, v0.7 ships a `memspec-dream` bin: a periodic LLM-driven reflection script over the store. See README "Dream pass" for usage and the cron contract.
 
 ---
 
@@ -628,6 +651,8 @@ If no `stores` configuration is provided:
 - If `~/.memspec/` exists, it is included automatically (priority 0, writable)
 
 This means a global store is available without configuration — just `memspec init` in your home directory.
+
+**Known limitation (tracked follow-up to v0.6.1):** auto-detection of `~/.memspec/` currently applies only to the `memspec stores` listing path. Retrieval paths (`memspec search`, `memspec context`, and the MCP `memspec_get` / `memspec_search` handlers) still require an explicit `stores:` block in `.memspec/config.yaml` to surface records from a lower-priority layer. Until that gap closes, configure layered stores explicitly if you rely on retrieval seeing the global tier.
 
 ### 12.5 Use Cases
 

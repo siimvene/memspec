@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.0 — 2026-06-30
+
+**Dream pass.** First-party periodic reflection over the store. Plus a README pivot to lead with verification and drift detection, an explicit comparison against `AGENTS.md`, two documented trust profiles, and a relaxed Node engine floor.
+
+### Features
+
+- **`memspec-dream`** (new bin). Reads the last N days of memspec writes + git log, asks a headless LLM CLI to surface stale memories, supersede / merge candidates, verify candidates, missing typed relations, and behavioural rules worth promoting to your agent instruction file. Output is review material, never auto-applied. Defaults to `claude -p`; override with `MEMSPEC_LLM_BIN` / `MEMSPEC_LLM_ARGS` to use any other headless CLI. Optional autocommit behind `MEMSPEC_DREAM_AUTOCOMMIT=1`. Designed to run weekly via cron. Inspired by Aaron Fulkerson's Exo and the `dream-skill` prior art.
+
+### Docs
+
+- **README opener rewritten.** Leads with "Git-backed project memory for AI coding agents, with verification and drift detection." Anchors + drift detection + claim governance are the differentiators; the previous opener buried them under generic "structured memory" framing.
+- **Quick start restructured** to demonstrate the `anchor → reconcile → verify | supersede` loop — the killer flow, not generic CRUD.
+- **New "Why not just AGENTS.md?" section** with a five-row comparison table covering `AGENTS.md` / `MEMORY.md` scratchpads, vector DBs, hosted memory APIs, and memspec. Explicit "if your memory fits in one paragraph, don't use memspec" framing.
+- **New "Trust profiles" section.** Two reference policies: *operator solo* (default, friction-free, suits single-operator setups) and *team review* (anchor-required facts, human-merged decisions, never-stored secrets). Memspec doesn't enforce; the instruction file does.
+- **Dream pass documented** with usage, env vars, and a cron example.
+
+### Engineering
+
+- **Node engine floor dropped to `>=20.0.0`.** The `>=22` requirement was self-imposed — the source code uses only stable APIs available since Node 18, and the dependency tree's real floor is Node 20 (driven by `commander@14` and `better-sqlite3@12`). Pinning to 22 in early 2026, while Node 20 was still the current LTS, blocked teams on otherwise-supported environments for no technical reason.
+
+### Bug fixes
+
+- **`memspec-consolidate` hook prompt no longer instructs the agent to call removed commands.** The shipped hook at `hooks/memspec-consolidate.js` was telling agents to run `memspec add` and `memspec correct` — both deleted in v0.4. Any agent that followed the prompt got CLI errors and had to guess the replacements. Prompt now uses the current surface: `memspec remember` (with `--anchor` inline), `memspec supersede` (with `--merge-from` for collapses), `memspec verify`, `memspec anchor`, `memspec reconcile`, `memspec status`.
+
+### Docs
+
+- **SPEC.md caught up to shipping reality.** Title bumped `v0.5 → v0.7`. New "Changes in v0.6" and "Changes in v0.7" sections at the top. §5.1 documents the `include_superseded` query parameter (v0.6+). §8.2 drops the "v0.4 exposes" label (no new tools since v0.4). §8.3 adds the `relate` / `export` CLI surface and a pointer to `memspec-dream`. §4.1 drops the stale "(planned)" qualifier on `merge_from` (it shipped in v0.3). §12.4 calls out the known gap in retrieval-path auto-detection of `~/.memspec/` (tracked since v0.6.1).
+- **BENCHMARK.md** gets a one-paragraph carry-forward note: v0.5 baselines hold for v0.6 / v0.7 because none of those releases touch the retrieval ranking path. Vocabulary in the body still says "graph expansion" — pinned to v0.5 branch tips; aliased to "linked-note following" in the header note.
+
 ## 0.6.3 — 2026-06-30
 
 Patch release. Fixes a stale hardcoded version string. No API or runtime

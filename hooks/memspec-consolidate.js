@@ -18,10 +18,10 @@ const CONSOLIDATION_PROMPT = `## Memspec Consolidation
 
 You just committed code. Before continuing, review what you learned this session and update project memory:
 
-1. **Reconcile**: Run \`memspec reconcile\` — it lists memories whose anchored files your commit touched. For each candidate: \`memspec verify\` (still true), \`memspec correct\` (now wrong), or \`memspec anchor\` (still true, re-baseline).
-2. **New knowledge**: Did you discover facts about the codebase, make decisions, or establish procedures? Write them with \`memspec add\`. Anchor code-state facts to their files with \`memspec anchor <id> <files...>\`.
-3. **Stale memories**: Did your work invalidate any existing memories? Correct them with \`memspec correct\`.
-4. **Quick check**: Run \`memspec status\` to see current store health.
+1. **Reconcile**: Run \`memspec reconcile\` — it lists anchored memories whose files your commit touched. For each candidate: \`memspec verify <id> --evidence "..."\` (still true), \`memspec supersede <id> --reason "..." --body "..."\` (now wrong), or \`memspec anchor <id> <files...>\` (still true, re-baseline).
+2. **New knowledge**: Did you discover facts, make decisions, or establish procedures? Write them with \`memspec remember {fact|decision|procedure} "title" --source agent\`. Anchor code-state claims to their files with \`--anchor <files...>\` in the same call.
+3. **Stale memories**: Did your work invalidate any existing memories? Supersede them with \`memspec supersede <id> --reason "..." [--body "..."]\`. Use \`--merge-from <ids>\` to collapse duplicates into one survivor.
+4. **Quick check**: Run \`memspec status\` for current store health (counts, witness, stale, drift, conflicts).
 
 Be selective — only write memories that would help a future agent starting cold. Don't dump session transcripts.`;
 
