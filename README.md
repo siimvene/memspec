@@ -26,7 +26,7 @@ Agents `remember` claims and `observe` notes; everything lands as markdown under
 - **Hybrid search.** SQLite FTS5 + BM25 by default; optional dense embeddings rerank via OpenAI-compatible endpoints or Ollama.
 - **MCP server.** Eleven tools, first-class integration with Claude Code, Cursor, Codex.
 - **Witnessed claims.** Every memory carries `verified_with` (`anchor | operator | evidence | assertion`) — provenance, not a confidence score.
-- **Reproducible benchmarks.** [`BENCHMARK.md`](BENCHMARK.md) ships measured retrieval numbers on LongMemEval, LoCoMo, and a real-store eval; `scripts/run-bench.mjs` reproduces them.
+- **Reproducible benchmarks.** [`BENCHMARK.md`](BENCHMARK.md) ships measured retrieval numbers on LongMemEval and LoCoMo, one row per released version (v0.4 → v0.7); `scripts/run-bench.mjs` reproduces them.
 - **Dream pass** (v0.7+). Periodic reflection script (`memspec-dream`) reads the last N days of memspec writes and git log, asks an LLM to surface stale memories, supersede candidates, verify candidates, missing relations, and behavioural rules worth promoting. Output is review material, never auto-applied.
 - **Zero infrastructure.** `npm install -g memspec` + `memspec init`. No accounts, no API keys, no hosted services.
 
@@ -118,7 +118,7 @@ Two engines, picked at `memspec init`:
 
 Index rebuilds on demand from the markdown files. Lose the index, lose speed — not data.
 
-See [BENCHMARK.md](BENCHMARK.md) for retrieval numbers on LongMemEval, LoCoMo, and a real-store eval.
+See [BENCHMARK.md](BENCHMARK.md) for retrieval numbers on LongMemEval and LoCoMo, measured per released version.
 
 ## Trust profiles
 
