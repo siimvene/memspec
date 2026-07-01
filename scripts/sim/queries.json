@@ -1,0 +1,154 @@
+{
+  "base": "2025-01-01T00:00:00Z",
+  "queries": [
+    {
+      "pattern": "edge-walk",
+      "metric": "recall@5",
+      "query": "which database does the billing service keep invoices in",
+      "targets": [
+        "ms_00000000000000000000000001"
+      ],
+      "distractors": [
+        "ms_00000000000000000000000002",
+        "ms_00000000000000000000000003"
+      ],
+      "opts": {
+        "expandEdges": true,
+        "expandDepth": 1
+      },
+      "rationale": "answer record never says \"billing\"; billing record never names the DB — only the depends_on edge bridges them"
+    },
+    {
+      "pattern": "temporal",
+      "metric": "top1-correct",
+      "query": "where is production hosted",
+      "as_of": "2025-03-02T00:00:00Z",
+      "targets": [
+        "ms_00000000000000000000000004"
+      ],
+      "distractors": [
+        "ms_00000000000000000000000005",
+        "ms_00000000000000000000000006"
+      ],
+      "opts": {
+        "asOf": "2025-03-02T00:00:00Z"
+      },
+      "rationale": "three eras exist; only the colo era is valid at 2025-03-02"
+    },
+    {
+      "pattern": "temporal",
+      "metric": "top1-correct",
+      "query": "where is production hosted",
+      "as_of": "2025-09-18T00:00:00Z",
+      "targets": [
+        "ms_00000000000000000000000005"
+      ],
+      "distractors": [
+        "ms_00000000000000000000000004",
+        "ms_00000000000000000000000006"
+      ],
+      "opts": {
+        "asOf": "2025-09-18T00:00:00Z"
+      },
+      "rationale": "three eras exist; only the cloud era is valid at 2025-09-18"
+    },
+    {
+      "pattern": "temporal",
+      "metric": "top1-correct",
+      "query": "where is production hosted",
+      "as_of": "2026-02-05T00:00:00Z",
+      "targets": [
+        "ms_00000000000000000000000006"
+      ],
+      "distractors": [
+        "ms_00000000000000000000000004",
+        "ms_00000000000000000000000005"
+      ],
+      "opts": {
+        "asOf": "2026-02-05T00:00:00Z"
+      },
+      "rationale": "three eras exist; only the sovereign era is valid at 2026-02-05"
+    },
+    {
+      "pattern": "archive-chain",
+      "metric": "recall@5",
+      "query": "why did we stop using long-lived api keys",
+      "targets": [
+        "ms_00000000000000000000000007"
+      ],
+      "distractors": [
+        "ms_00000000000000000000000008"
+      ],
+      "opts": {
+        "expandEdges": true,
+        "includeSuperseded": true,
+        "expandDepth": 1
+      },
+      "rationale": "the rationale lives in the superseded record; the active record does not mention static keys"
+    },
+    {
+      "pattern": "direct",
+      "metric": "recall@5",
+      "query": "redis cache eviction policy",
+      "targets": [
+        "ms_00000000000000000000000009"
+      ],
+      "distractors": [
+        "ms_00000000000000000000000010"
+      ],
+      "opts": {},
+      "rationale": "sanity control — wording overlaps the target; should rank 1"
+    },
+    {
+      "pattern": "precision",
+      "metric": "top1-correct",
+      "query": "what gets dropped from the cache when memory runs low",
+      "targets": [
+        "ms_00000000000000000000000009"
+      ],
+      "distractors": [
+        "ms_00000000000000000000000010"
+      ],
+      "opts": {},
+      "rationale": "\"runs low on memory\" lexically matches the OOM record; correct answer is the cache-eviction record"
+    },
+    {
+      "pattern": "paraphrase-hard",
+      "metric": "recall@5",
+      "query": "how does the system decide which entries to discard under memory pressure",
+      "targets": [
+        "ms_00000000000000000000000009"
+      ],
+      "distractors": [
+        "ms_00000000000000000000000010"
+      ],
+      "opts": {},
+      "rationale": "no rare term overlap with the answer (allkeys-lru); expected headroom for a semantic backend"
+    },
+    {
+      "pattern": "multi-answer",
+      "metric": "multi-recall@10",
+      "query": "how do we observe what production is doing",
+      "targets": [
+        "ms_00000000000000000000000011",
+        "ms_00000000000000000000000012",
+        "ms_00000000000000000000000013"
+      ],
+      "distractors": [],
+      "opts": {},
+      "rationale": "observability spans three records; measures completeness, not single best hit"
+    },
+    {
+      "pattern": "conflict",
+      "metric": "multi-recall@10",
+      "query": "what do we use for feature flags",
+      "targets": [
+        "ms_00000000000000000000000014",
+        "ms_00000000000000000000000015"
+      ],
+      "distractors": [],
+      "opts": {},
+      "rationale": "two unresolved conflicting decisions both exist; both should be retrievable"
+    }
+  ]
+}
