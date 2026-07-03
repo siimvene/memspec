@@ -1,0 +1,188 @@
+{
+    "@context": {
+        "@version": 1.1,
+        "@base": "https://memspec.dev/mem/",
+        "@vocab": "https://memspec.dev/vocab#",
+
+        "memspec": "https://memspec.dev/vocab#",
+        "prov": "http://www.w3.org/ns/prov#",
+        "dcterms": "http://purl.org/dc/terms/",
+        "skos": "http://www.w3.org/2004/02/skos/core#",
+        "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+        "xsd": "http://www.w3.org/2001/XMLSchema#",
+
+        "id": "@id",
+        "type": "@type",
+
+        "kind": "memspec:kind",
+
+        "state": {
+            "@id": "memspec:state",
+            "@type": "@id",
+            "@context": { "@base": "https://memspec.dev/vocab#" }
+        },
+
+        "created": { "@id": "dcterms:created", "@type": "xsd:dateTime" },
+
+        "source": {
+            "@id": "prov:wasAttributedTo",
+            "@type": "@id",
+            "@context": { "@base": "https://memspec.dev/source/" }
+        },
+
+        "source_kind": {
+            "@id": "memspec:sourceKind",
+            "@type": "@id",
+            "@context": { "@base": "https://memspec.dev/vocab#" }
+        },
+
+        "tags": {
+            "@id": "dcterms:subject",
+            "@container": "@set",
+            "@type": "@id",
+            "@context": { "@base": "https://memspec.dev/tag/" }
+        },
+
+        "check_by": { "@id": "memspec:checkBy", "@type": "xsd:dateTime" },
+        "last_verified": { "@id": "memspec:lastVerified", "@type": "xsd:dateTime" },
+
+        "verified_with": {
+            "@id": "memspec:verifiedWith",
+            "@type": "@id",
+            "@context": { "@base": "https://memspec.dev/vocab#" }
+        },
+
+        "supersedes": {
+            "@id": "prov:wasRevisionOf",
+            "@container": "@set",
+            "@type": "@id"
+        },
+        "supersede_reason": "memspec:supersedeReason",
+
+        "conflicts_with": {
+            "@id": "memspec:conflictsWith",
+            "@container": "@set",
+            "@type": "@id"
+        },
+
+        "depends_on": {
+            "@id": "dcterms:requires",
+            "@container": "@set",
+            "@type": "@id"
+        },
+
+        "supports": {
+            "@id": "memspec:supports",
+            "@container": "@set",
+            "@type": "@id"
+        },
+
+        "anchors": {
+            "@id": "memspec:anchor",
+            "@container": "@set",
+            "@context": {
+                "file": "memspec:anchorFile",
+                "line": { "@id": "memspec:anchorLine", "@type": "xsd:integer" },
+                "sha": "memspec:anchorSha",
+                "type": "memspec:anchorType"
+            }
+        },
+
+        "ext": {
+            "@id": "memspec:ext",
+            "@context": {
+                "legacy_confidence": { "@id": "memspec:legacyConfidence", "@type": "xsd:decimal" },
+                "confirmations": { "@id": "memspec:confirmations", "@type": "xsd:integer" },
+                "confirmed_by": { "@id": "memspec:confirmedBy", "@container": "@set" },
+                "importance": { "@id": "memspec:importance", "@type": "xsd:integer" },
+                "openclaw_type": "memspec:openclawType",
+                "promoted_at": { "@id": "memspec:promotedAt", "@type": "xsd:dateTime" }
+            }
+        }
+    },
+
+    "@graph": [
+        {
+            "@id": "memspec:fact",
+            "@type": "rdfs:Class",
+            "rdfs:label": "Fact",
+            "rdfs:comment": "A durable claim about the world or the system. Decays via check_by."
+        },
+        {
+            "@id": "memspec:decision",
+            "@type": "rdfs:Class",
+            "rdfs:label": "Decision",
+            "rdfs:comment": "A design choice with rationale. Longer decay than facts."
+        },
+        {
+            "@id": "memspec:procedure",
+            "@type": "rdfs:Class",
+            "rdfs:label": "Procedure",
+            "rdfs:comment": "A workflow, runbook, or how-to. May be anchored to source files."
+        },
+        {
+            "@id": "memspec:observation",
+            "@type": "rdfs:Class",
+            "rdfs:label": "Observation",
+            "rdfs:comment": "Short-lived session observation. Decays fast (7d default)."
+        },
+
+        {
+            "@id": "memspec:active",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "active",
+            "skos:definition": "Live memory returned by default queries."
+        },
+        {
+            "@id": "memspec:superseded",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "superseded",
+            "skos:definition": "Replaced by a newer record; retained for history."
+        },
+        {
+            "@id": "memspec:retired",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "retired",
+            "skos:definition": "No longer relevant. Distinct from superseded — nothing replaces it."
+        },
+
+        {
+            "@id": "memspec:anchor",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "anchor",
+            "skos:definition": "Strongest witness: claim points at concrete artifact (file, commit, output)."
+        },
+        {
+            "@id": "memspec:operator",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "operator",
+            "skos:definition": "Human authorship / witness. Used as both source_kind (record written by a human) and verified_with (claim asserted by a human); protected from agent overwrite in either role."
+        },
+        {
+            "@id": "memspec:evidence",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "evidence",
+            "skos:definition": "Derived from tool output the agent observed at write time."
+        },
+        {
+            "@id": "memspec:assertion",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "assertion",
+            "skos:definition": "Weakest witness: agent-asserted without direct evidence."
+        },
+
+        {
+            "@id": "memspec:agent",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "agent",
+            "skos:definition": "Record written by an autonomous agent."
+        },
+        {
+            "@id": "memspec:import",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "import",
+            "skos:definition": "Record migrated from a prior system (e.g., openclaw-import)."
+        }
+    ]
+}
