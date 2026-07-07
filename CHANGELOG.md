@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.1 — 2026-07-07
+
+**Linked-data projection + repo cleanup.** No runtime or storage changes; the CLI/MCP behaviour is identical to 0.7.0.
+
+### Features
+
+- **JSON-LD context + linked-data schema doc.** New `context.jsonld` maps every frontmatter field to standard vocabularies (Dublin Core, PROV-O, SKOS) where they exist and memspec-specific terms where they don't, enabling projection of a store to RDF via YAML-LD / JSON-LD. `SCHEMA-LD.md` is a human-readable companion with rationale per field, complementary to the auto-generated `SCHEMA.md`. Verified against a live 257-record store; class + concept vocabularies match the `src/lib/schema.ts` enum surface.
+
+### Engineering
+
+- Removed benchmarking and simulation tooling from the repo.
+- Bumped `package-lock.json`, which had been left at 0.6.3 across the 0.7.0 release.
+
 ## 0.7.0 — 2026-06-30
 
 **Dream pass.** First-party periodic reflection over the store. Plus a README pivot to lead with verification and drift detection, an explicit comparison against `AGENTS.md`, two documented trust profiles, and a relaxed Node engine floor.
