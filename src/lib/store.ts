@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { defaultConfigYaml, type ConfigGenerationOptions } from './config.js';
 import { FtsIndex } from './fts.js';
 import { parseMemoryFile, serializeMemoryFile } from './frontmatter.js';
@@ -63,7 +63,17 @@ export class MemspecStore {
   readonly warnings: LoadWarning[] = [];
 
   constructor(root?: string) {
-    this.root = root ? resolve(root, '.memspec') : this.findRoot();
+    if (!root) {
+      this.root = this.findRoot();
+      return;
+    }
+    // Idempotent `.memspec` resolution: a path that already points at a store
+    // (e.g. MEMSPEC_ROOT=~/.memspec) is used as-is; otherwise `root` is treated
+    // as the parent and `.memspec` is appended. This keeps the CLI (`--store
+    // global` → homedir) and the MCP server (MEMSPEC_ROOT → store dir) in sync
+    // instead of doubling to `~/.memspec/.memspec`.
+    const resolved = resolve(root);
+    this.root = basename(resolved) === '.memspec' ? resolved : join(resolved, '.memspec');
   }
 
   private findRoot(): string {
