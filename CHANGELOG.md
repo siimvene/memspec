@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.2 — 2026-07-14
+
+**Bugfix: MCP/CLI store-root parity.** The MCP server read an empty phantom store while the CLI read the real one, whenever `MEMSPEC_ROOT` (or `--cwd`) pointed at a `.memspec` directory itself.
+
+### Fixes
+
+- **Idempotent `.memspec` resolution in `MemspecStore`.** The constructor appended `.memspec` to any path it was given, so a root that already ended in `.memspec` (e.g. `MEMSPEC_ROOT=~/.memspec`) doubled to `~/.memspec/.memspec` and resolved to a non-existent, empty store. The MCP server (`memspec_search`, `memspec_status`, …) hit this via `CompositeStore.forCwd`, returning 0 results against a populated store, while the CLI dodged it through `--store global` → `homedir()`. Resolution is now idempotent: a path whose basename is `.memspec` is used as-is; otherwise `.memspec` is appended. CLI and MCP now resolve to the same store. Regression tests in `test/store-root.test.ts`.
+
 ## 0.7.1 — 2026-07-07
 
 **Linked-data projection + repo cleanup.** No runtime or storage changes; the CLI/MCP behaviour is identical to 0.7.0.
