@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Transcript ingestion, stage 1 + dream-pass surfacing.**
+
+### Features
+
+- **`memspec normalize` command.** Normalizes harness session logs into trajectory-v1-shaped records (roles `meta/user/reasoning/assistant/tool`, after Letta's Trajectory format; own implementation, no dependency). Tool-agnostic core + per-harness adapters — shipped: `claude-code` (`~/.claude/projects/*/*.jsonl`; pairs `tool_use`/`tool_result` by id since results arrive as user-role lines) and `codex` (`~/.codex/sessions/**/rollout-*.jsonl`; drops `developer` boilerplate and `event_msg` duplicates). Output is LOCAL ONLY under `<store>/local/trajectories/` (`local/` must be gitignored — transcripts carry secrets and full file contents). Deterministic, zero LLM tokens; idempotent via a mtime+size watermark in `<store>/local/state.json`. Truncation: tool input 500 / output 1500 / thinking 2000 / text 10000 chars. Verified on 102 real sessions across both harnesses (113MB → 9MB). Tests in `test/normalize.test.ts`.
+
+- **Dream-pass surfacing in the session-start hook.** `hooks/memspec-session-start.js` now reports unreviewed dream passes (`<home store>/dream/YYYY-MM-DD.md` without a `_Reviewed:` line): section counts, open questions, and review instructions are appended to the session-start context. Always checks the personal store, even when a project store wins resolution. Review marker is a `_Reviewed: <date> — <summary>` line under the title, git-synced across machines.
+
 ## 0.7.2 — 2026-07-14
 
 **Bugfix: MCP/CLI store-root parity.** The MCP server read an empty phantom store while the CLI read the real one, whenever `MEMSPEC_ROOT` (or `--cwd`) pointed at a `.memspec` directory itself.

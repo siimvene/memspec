@@ -11,6 +11,7 @@ import { runRelate, RELATION_TYPES, type RelationType } from './commands/relate.
 import { runRemember } from './commands/remember.js';
 import { runInit } from './commands/init.js';
 import { runMigrate } from './commands/migrate.js';
+import { runNormalize } from './commands/normalize.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch, type SearchExpandDepth } from './commands/search.js';
 import { EDGE_TYPES, type EdgeType } from './lib/graph-walk.js';
@@ -271,6 +272,17 @@ program
   .option('--dry-run', 'list candidates without prompting')
   .action(async (options: { cwd?: string; dryRun?: boolean }) => {
     console.log(await runSweep(options));
+  });
+
+program
+  .command('normalize')
+  .description('Normalize harness session transcripts into local trajectory-v1 records (stage 1 of transcript ingestion; output is local-only, never synced)')
+  .option('--cwd <path>', 'project root')
+  .option('--source <name>', 'restrict to one harness adapter (claude-code | codex)')
+  .option('--dry-run', 'report without writing')
+  .option('--verbose', 'list each normalized session')
+  .action((options: { cwd?: string; source?: string; dryRun?: boolean; verbose?: boolean }) => {
+    console.log(runNormalize(options));
   });
 
 program

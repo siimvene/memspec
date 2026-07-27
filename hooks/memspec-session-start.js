@@ -43,6 +43,45 @@ function findMemspecRoot(cwd) {
   return null;
 }
 
+// Dream passes land in <store>/dream/YYYY-MM-DD.md with no review state.
+// A file counts as reviewed when it contains a "_Reviewed:" line (added by
+// the agent after the operator walks through it; git-synced stores keep the
+// marker consistent across machines). Dream is a personal-store feature, so
+// the check targets the home store regardless of which store won resolution.
+function pendingDreamNotice(memspecRoot) {
+  try {
+    const dreamDir = path.join(memspecRoot, 'dream');
+    if (!fs.existsSync(dreamDir)) return '';
+    const pending = fs
+      .readdirSync(dreamDir)
+      .filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+      .sort()
+      .map((f) => ({ name: f, body: fs.readFileSync(path.join(dreamDir, f), 'utf8') }))
+      .filter((d) => !/^_?Reviewed:/im.test(d.body));
+    if (!pending.length) return '';
+
+    const latest = pending[pending.length - 1];
+    const counts = [];
+    for (const m of latest.body.matchAll(/^## +(.+)$/gm)) {
+      const section = latest.body.slice(m.index + m[0].length).split(/^## /m)[0];
+      const items = (section.match(/^- /gm) || []).length;
+      if (items) counts.push(`${items} ${m[1].trim().toLowerCase()}`);
+    }
+    const questions = (latest.body.split(/^## OPEN QUESTIONS$/m)[1] || '')
+      .split(/^## /m)[0]
+      .split('\n')
+      .filter((l) => l.startsWith('- '))
+      .map((l) => l.replace(/\*\*/g, '').slice(2, 120));
+
+    let notice = `## Dream pass pending review\n\n${latest.name.replace('.md', '')} (${counts.join(', ')}) at dream/${latest.name} — proposals only, nothing auto-applied. Offer to walk the operator through it; after review, prepend a "_Reviewed: <date> — <disposition summary>_" line under the title and commit.`;
+    if (questions.length) notice += `\nOpen questions needing the operator: ${questions.join(' | ')}`;
+    if (pending.length > 1) notice += `\n(${pending.length - 1} older unreviewed pass(es) also pending.)`;
+    return notice;
+  } catch {
+    return '';
+  }
+}
+
 function emit(additionalContext) {
   const result = {
     hookSpecificOutput: {
@@ -107,12 +146,16 @@ function runHook(data) {
     }
 
     const context = (child.stdout || '').trim();
-    if (!context) {
+    // Dream passes live only in the personal store, even when a project
+    // store won resolution — surface them regardless of cwd.
+    const dreamNotice = pendingDreamNotice(path.join(os.homedir(), '.memspec'));
+    const combined = [context, dreamNotice].filter(Boolean).join('\n\n');
+    if (!combined) {
       emit('');
       return;
     }
 
-    emit(context);
+    emit(combined);
   } catch (e) {
     if (process.env.MEMSPEC_HOOK_DEBUG) {
       process.stderr.write(`memspec-session-start: error ${e && e.message}\n`);
