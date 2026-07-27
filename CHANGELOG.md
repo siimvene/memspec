@@ -12,6 +12,12 @@
 
 Scheduling (stage 3) is deliberately wall-clock-free: run `normalize` + `distill` + `reduce` from any wake-driven daily job (macOS launchd fires missed slots on wake; reduce and distill self-gate). Tests in `test/distill.test.ts`.
 
+**Multi-store: pointer files + scope claims (anti-pollination).**
+
+- **`.memspec.yaml` pointer file.** A repo without its own store can declare its store layers (same `stores:` schema as config.yaml, paths resolved against the pointer's directory) — this is how a service repo binds to a sibling team store while keeping a personal store as a read layer. A `.memspec/` directory closer to cwd always wins. Honored by retrieval (`search`/`context`/MCP via `CompositeStore.forCwd`) and writes.
+- **Ambiguous writes refuse.** In a pointer-file repo with more than one writable layer, `remember` without `--store <name>` errors with the candidate list instead of guessing — a silently-guessed store is how team knowledge leaks into the personal store and vice versa. Single writable layer keeps working flag-free; non-pointer repos are unchanged.
+- **`claims:` in store config + claim-routed reduce.** A store's config.yaml can declare the cwd patterns whose knowledge it owns (`~/git/kleidia`, `~/work/**`). `memspec reduce` routes each session digest to the highest-priority claiming store; sessions nobody claims are **held local** and never cross a sync boundary — they stay uncovered and route automatically once a claim appears. No claims configured anywhere = legacy single-store behaviour, byte-identical. Tests in `test/registry.test.ts`.
+
 ## 0.8.0 — 2026-07-27
 
 **Transcript ingestion, stage 1 + dream-pass surfacing.**

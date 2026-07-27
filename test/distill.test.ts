@@ -99,7 +99,7 @@ test('reduce: merges fresh digests once, then no-ops; --force required within wi
   withStub(stub, () => runDistill({ cwd: target }));
 
   const first = runReduce({ cwd: target, force: true });
-  assert.match(first, /reduced 1 session digest\(s\)/);
+  assert.match(first, /reduced 1 -> /);
   const outDir = join(target, '.memspec', 'digests');
   const files = await readdir(outDir);
   assert.equal(files.length, 1);

@@ -2,6 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
+import { loadConfig } from '../lib/config.js';
+import { claimsOf, matchesClaim, resolveLayerPath } from '../lib/registry.js';
 import { MemspecStore } from '../lib/store.js';
 import type { TrajectoryRecord } from './normalize.js';
 
@@ -284,35 +286,78 @@ export function runReduce(options: ReduceOptions): string {
   const now = new Date();
   const period = now.toISOString().slice(0, 10);
   const host = hostname().split('.')[0];
-  const outDir = join(root, 'digests');
-  const outFile = join(outDir, `${period}-${host}.md`);
 
-  const byCwd = new Map<string, Array<{ key: string; body: string }>>();
+  // Scope-claim routing: each digest goes to the store that claims its cwd
+  // (highest-priority claim wins); a session nobody claims stays local rather
+  // than crossing a sync boundary by default. When neither this store nor any
+  // configured layer declares claims, legacy behaviour holds: everything
+  // reduces into this store.
+  const registry: Array<{ root: string; priority: number; claims: string[] }> = [];
+  for (const layer of loadConfig(root).stores ?? []) {
+    const layerRoot = new MemspecStore(resolveLayerPath(layer.path, join(root, '..'))).root;
+    if (!registry.some((r) => r.root === layerRoot)) {
+      registry.push({ root: layerRoot, priority: layer.priority, claims: claimsOf(layerRoot) });
+    }
+  }
+  if (!registry.some((r) => r.root === root)) {
+    registry.push({ root, priority: -1, claims: claimsOf(root) });
+  }
+  registry.sort((a, b) => b.priority - a.priority);
+  const claimsConfigured = registry.some((r) => r.claims.length > 0);
+
+  const byStore = new Map<string, typeof fresh>();
+  const unclaimed: typeof fresh = [];
   for (const d of fresh) {
-    const list = byCwd.get(d.cwd) ?? [];
+    const target = claimsConfigured
+      ? registry.find((r) => r.claims.length > 0 && matchesClaim(r.claims, d.cwd))
+      : { root };
+    if (!target) {
+      unclaimed.push(d);
+      continue;
+    }
+    const list = byStore.get(target.root) ?? [];
     list.push(d);
-    byCwd.set(d.cwd, list);
+    byStore.set(target.root, list);
   }
 
-  const parts: string[] = [
-    `# Experience digest — ${period} (${host})`,
-    '',
-    `_${fresh.length} session(s) since last reduce. Produced by \`memspec reduce\` from local session digests; raw trajectories never leave the machine._`,
-    '',
-  ];
-  for (const [cwd, list] of byCwd) {
-    parts.push(`## ${cwd}`, '');
-    for (const d of list) {
-      const body = d.body.replace(/^---[\s\S]*?---\n*/, '');
-      parts.push(`### session ${d.key}`, '', redactSecrets(body).trim(), '');
+  const outputs: string[] = [];
+  for (const [storeRoot, digests] of byStore) {
+    const byCwd = new Map<string, typeof fresh>();
+    for (const d of digests) {
+      const list = byCwd.get(d.cwd) ?? [];
+      list.push(d);
+      byCwd.set(d.cwd, list);
     }
+    const parts: string[] = [
+      `# Experience digest — ${period} (${host})`,
+      '',
+      `_${digests.length} session(s) since last reduce. Produced by \`memspec reduce\` from local session digests; raw trajectories never leave the machine._`,
+      '',
+    ];
+    for (const [cwd, list] of byCwd) {
+      parts.push(`## ${cwd}`, '');
+      for (const d of list) {
+        const body = d.body.replace(/^---[\s\S]*?---\n*/, '');
+        parts.push(`### session ${d.key}`, '', redactSecrets(body).trim(), '');
+      }
+    }
+    const outDir = join(storeRoot, 'digests');
+    const outFile = join(outDir, `${period}-${host}.md`);
+    if (!options.dryRun) {
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(outFile, parts.join('\n'));
+    }
+    outputs.push(`${digests.length} -> ${outFile}`);
   }
 
   if (!options.dryRun) {
-    mkdirSync(outDir, { recursive: true });
-    writeFileSync(outFile, parts.join('\n'));
-    state.reduced = { at: now.toISOString(), covered: [...covered, ...fresh.map((d) => d.key)] };
+    // Unclaimed digests stay out of `covered` so they route once claims exist.
+    const routedKeys = [...byStore.values()].flat().map((d) => d.key);
+    state.reduced = { at: now.toISOString(), covered: [...covered, ...routedKeys] };
     saveState(stateFile, state);
   }
-  return `reduced ${fresh.length} session digest(s) -> ${outFile}${options.dryRun ? ' (dry-run)' : ''}`;
+  const unclaimedNote = unclaimed.length
+    ? `; ${unclaimed.length} unclaimed session(s) held local (no store claims their cwd)`
+    : '';
+  return `reduced ${outputs.length ? outputs.join(', ') : 'nothing'}${unclaimedNote}${options.dryRun ? ' (dry-run)' : ''}`;
 }

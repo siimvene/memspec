@@ -8,6 +8,7 @@ import {
   rankByLexicalCloseness,
 } from '../lib/inference.js';
 import { effectiveSourceKind, inferSourceKind } from '../lib/source.js';
+import { findPointer, POINTER_FILENAME, resolveLayerPath } from '../lib/registry.js';
 import { MemspecStore } from '../lib/store.js';
 import { MEMORY_TYPES, type CodeAnchor, type MemoryType, type VerifiedWith } from '../lib/types.js';
 
@@ -149,7 +150,33 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     );
   }
 
-  const store = new MemspecStore(options.cwd);
+  // Pointer-file repos (no local .memspec) declare their layers explicitly.
+  // Writes must name a target when more than one writable layer is in scope —
+  // a silently-guessed store is how team knowledge leaks into the personal
+  // store and vice versa.
+  const pointer = findPointer(options.cwd);
+  let storeCwd = options.cwd;
+  if (pointer) {
+    const writable = pointer.stores.filter((s) => s.writable);
+    let target = writable.length === 1 ? writable[0] : undefined;
+    if (options.store) {
+      target = pointer.stores.find((s) => s.name === options.store);
+      if (!target) {
+        throw new Error(
+          `no layer named '${options.store}' in ${pointer.dir}/${POINTER_FILENAME} (have: ${pointer.stores.map((s) => s.name).join(', ')})`
+        );
+      }
+      if (!target.writable) throw new Error(`layer '${target.name}' is not writable`);
+    }
+    if (!target) {
+      throw new Error(
+        `ambiguous write target: ${writable.length} writable layers in scope (${writable.map((s) => s.name).join(', ')}) — pass --store <name> to say where this memory belongs`
+      );
+    }
+    storeCwd = resolveLayerPath(target.path, pointer.dir);
+  }
+
+  const store = new MemspecStore(storeCwd);
   store.init();
 
   const config = loadConfig(store.root);

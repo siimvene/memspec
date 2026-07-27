@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { MemspecStore, type StoreSearchOptions, type LoadWarning } from './store.js';
 import { loadConfig, type StoreLayerConfig } from './config.js';
+import { findPointer } from './registry.js';
 import type { MemoryItem, MemoryFrontmatter } from './types.js';
 
 export interface StoreLayer {
@@ -84,6 +85,12 @@ export class CompositeStore {
    * ignored.
    */
   static forCwd(cwd?: string): CompositeStore {
+    // A `.memspec.yaml` pointer file (repo without its own store) declares
+    // the layers explicitly; a `.memspec/` directory closer to cwd wins.
+    const pointer = findPointer(cwd);
+    if (pointer) {
+      return new CompositeStore(pointer.stores, pointer.dir);
+    }
     const probe = new MemspecStore(cwd);
     const config = loadConfig(probe.root);
     if (config.stores && config.stores.length > 0) {
