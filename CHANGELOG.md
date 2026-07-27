@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**Transcript ingestion complete (stages 2-5): distill, reduce, dream diff.**
+
+### Features
+
+- **`memspec distill` command (stage 2).** Per-session LLM pass over normalized trajectories into short memory-formation digests at `<store>/local/digests/<source>/<session>.md`. Incremental by design — runs as sessions close, so a heavy week never becomes one un-fittable batch. Cheap model by default (`MEMSPEC_DISTILL_BIN`/`MEMSPEC_DISTILL_ARGS`, default `claude --model haiku -p`; falls back to `MEMSPEC_LLM_BIN`). Skip-rules for trivial sessions, per-run cap (`--limit`, default 25), 3-strike failure watermark, prompt budget (~400k chars) that keeps head+tail of giant sessions and elides the middle. Secret redaction (key/token/JWT/private-key shapes) applied to both prompt and digest.
+- **`memspec reduce` command (stage 4).** Deterministic merge (zero LLM tokens) of fresh per-session digests into a committed experience digest at `<store>/digests/<date>-<hostname>.md` — hostname keeps multi-machine stores conflict-free. Self-gates to >= 6 days since last reduce (`--force` to override); raw trajectories and per-session digests stay local, only the redacted reduce output is committed.
+- **Dream diffs digests against memory writes (stage 5).** `scripts/dream.sh` now feeds recent experience digests into the prompt and adds an `UNRECORDED WORK` section: work that demonstrably happened per the digests but produced no memory record — recognition failures write-time discipline structurally misses — each with a ready-to-run `memspec remember` proposal.
+
+Scheduling (stage 3) is deliberately wall-clock-free: run `normalize` + `distill` + `reduce` from any wake-driven daily job (macOS launchd fires missed slots on wake; reduce and distill self-gate). Tests in `test/distill.test.ts`.
+
 ## 0.8.0 — 2026-07-27
 
 **Transcript ingestion, stage 1 + dream-pass surfacing.**

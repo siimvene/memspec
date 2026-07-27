@@ -12,6 +12,7 @@ import { runRemember } from './commands/remember.js';
 import { runInit } from './commands/init.js';
 import { runMigrate } from './commands/migrate.js';
 import { runNormalize } from './commands/normalize.js';
+import { runDistill, runReduce } from './commands/distill.js';
 import { runImportOpenClaw } from './lib/import-openclaw.js';
 import { runSearch, type SearchExpandDepth } from './commands/search.js';
 import { EDGE_TYPES, type EdgeType } from './lib/graph-walk.js';
@@ -283,6 +284,27 @@ program
   .option('--verbose', 'list each normalized session')
   .action((options: { cwd?: string; source?: string; dryRun?: boolean; verbose?: boolean }) => {
     console.log(runNormalize(options));
+  });
+
+program
+  .command('distill')
+  .description('Distill normalized trajectories into per-session digests via a cheap LLM (stage 2 of transcript ingestion; MEMSPEC_DISTILL_BIN/ARGS, default: claude --model haiku -p)')
+  .option('--cwd <path>', 'project root')
+  .option('--limit <n>', 'max sessions to distill this run (default 25)')
+  .option('--dry-run', 'report without calling the LLM or writing')
+  .option('--verbose', 'list each distilled session')
+  .action((options: { cwd?: string; limit?: string; dryRun?: boolean; verbose?: boolean }) => {
+    console.log(runDistill(options));
+  });
+
+program
+  .command('reduce')
+  .description('Merge per-session digests into a committed experience digest (stage 4; deterministic, no LLM; no-op unless >=6 days since last reduce)')
+  .option('--cwd <path>', 'project root')
+  .option('--force', 'reduce now even if the last reduce was recent')
+  .option('--dry-run', 'report without writing')
+  .action((options: { cwd?: string; force?: boolean; dryRun?: boolean }) => {
+    console.log(runReduce(options));
   });
 
 program

@@ -70,9 +70,11 @@ if [ -d "$ROOT/.git" ] || git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; th
   RECENT_LOG=$(git -C "$ROOT" log --since="$DAYS days ago" --pretty=format:"%h %ad %s" --date=short 2>/dev/null || true)
 fi
 STALE_FILES=$(grep -rl "^stale: true" "$ROOT/memory" "$ROOT/observations" 2>/dev/null | grep -v "$ROOT/archive" | head -15 || true)
+# Experience digests from transcript ingestion (`memspec reduce`), if any
+DIGEST_FILES=$(find "$ROOT/digests" -name "*.md" -mtime -"$DAYS" 2>/dev/null | head -5 || true)
 
 # Bail early on empty week
-if [ -z "$RECENT_FILES" ] && [ -z "$RECENT_LOG" ] && [ -z "$STALE_FILES" ]; then
+if [ -z "$RECENT_FILES" ] && [ -z "$RECENT_LOG" ] && [ -z "$STALE_FILES" ] && [ -z "$DIGEST_FILES" ]; then
   {
     echo "# Memspec Dream Pass — $TODAY"
     echo ""
@@ -126,6 +128,16 @@ HEADER
     echo
   done | head -500
 
+  if [ -n "$DIGEST_FILES" ]; then
+    echo "# Experience digests (what sessions actually did, distilled from transcripts)"
+    echo
+    for f in $DIGEST_FILES; do
+      echo "--- $f ---"
+      head -200 "$f"
+      echo
+    done | head -1200
+  fi
+
   cat <<'INSTRUCTIONS'
 
 # Your task
@@ -164,6 +176,16 @@ type, one-line rationale.
 Behavioural patterns observed in the window but not yet formalised in the
 agent's instruction file (`AGENTS.md`, `CLAUDE.md`, or equivalent). For each:
 pattern (cite evidence), proposed section + exact wording.
+
+## UNRECORDED WORK
+Only when experience digests are present: diff them against the memory
+records written in the window. List work that demonstrably happened (per
+the digests) but produced NO corresponding memory write — completed fixes,
+decisions, or discoveries the sessions forgot to record. These are
+recognition failures that write-time discipline structurally misses. For
+each: what happened (cite the digest session), why it deserves a record,
+and a ready-to-run `memspec remember <type> "<title>" --source agent`
+proposal.
 
 ## OPEN QUESTIONS
 Things that keep recurring where a memory or rule would close the gap.
