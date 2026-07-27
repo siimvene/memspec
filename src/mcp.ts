@@ -29,7 +29,7 @@ const defaultCwd = typeof values.cwd === 'string' ? values.cwd : process.env.MEM
 
 const server = new McpServer({
   name: 'memspec',
-  version: '0.8.0',
+  version: '0.9.0',
 });
 
 function renderSearchText(payload: { query: string; results: SearchResult[] }): string {

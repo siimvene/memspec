@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-07-27
 
 **Transcript ingestion complete (stages 2-5): distill, reduce, dream diff.**
 

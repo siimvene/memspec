@@ -21,7 +21,9 @@ Agents `remember` claims and `observe` notes; everything lands as markdown under
 - **Linked notes** (v0.5+). Records reference other records by id (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). Search can follow these links one or more hops to surface neighbours alongside direct matches; `--include-superseded` lets link-following reach archived predecessors (v0.6+).
 - **Temporal validity** (v0.5+). Optional `valid_from` / `valid_to` per memory. Search with `--as-of <iso>` filters by world-state truth window, orthogonal to the `check_by` review schedule.
 - **Operator-tier storage** (v0.4+). Records sourced by the operator land in a separate filesystem path with stricter overwrite protection (`--override-operator` required to supersede).
-- **Layered stores** (v0.6+). A project `.memspec/` and a global `~/.memspec/` merge at retrieval time — project records take priority, global merges as a lower layer. Every search, context, and MCP path honours the configured `stores:` layers.
+- **Layered stores** (v0.6+). A project `.memspec/` and a global `~/.memspec/` merge at retrieval time — project records take priority, global merges as a lower layer. Every search, context, and MCP path honours the configured `stores:` layers. A repo without its own store can bind to external stores via a `.memspec.yaml` pointer file (v0.9+).
+- **Scope claims** (v0.9+). Stores declare which working directories they own; ingestion routes knowledge to the claiming store and holds unclaimed content local, so nothing crosses a sync boundary by default — team knowledge stays out of personal stores and vice versa.
+- **Transcript ingestion** (v0.9+). `normalize` → `distill` → `reduce` turns raw harness session logs (Claude Code, Codex) into weekly experience digests; the dream pass diffs them against memory writes to catch work that happened but was never recorded. Raw transcripts never leave the machine.
 - **Dedup-aware writes.** `remember` refuses near-duplicate claims and points at the existing record, so memory accretes corrections via `supersede` instead of silent duplicates.
 - **Hybrid search.** SQLite FTS5 + BM25 by default; optional dense embeddings rerank via OpenAI-compatible endpoints or Ollama.
 - **MCP server.** Eleven tools, first-class integration with Claude Code, Cursor, Codex.
@@ -163,6 +165,37 @@ For manual `.mcp.json` setup:
 memspec init --cwd ~/.memspec
 ```
 
+## Multi-store: pointer files & scope claims
+
+Different orgs lay memory out differently — store beside the code, store in a sibling team repo, one personal umbrella. Two declarations make any layout explicit and keep knowledge from leaking across store boundaries:
+
+**Pointer file.** A repo with no store of its own carries a `.memspec.yaml` at its root binding it to the stores that serve it (paths resolve against the pointer's directory; a `.memspec/` directory closer to cwd always wins):
+
+```yaml
+# service-repo/.memspec.yaml — memory lives in the sibling team repo
+stores:
+  - name: team
+    path: ../platform-team-specs
+    priority: 10
+    writable: true
+  - name: personal
+    path: ~/.memspec
+    priority: 0
+    writable: true
+```
+
+Reads fan out across the layers. Writes must be unambiguous: with more than one writable layer in scope, `remember` refuses until you say `--store team` or `--store personal` — a silently-guessed store is how team knowledge ends up in a personal repo.
+
+**Scope claims.** A store's `config.yaml` declares the working directories whose knowledge it owns:
+
+```yaml
+claims:
+  - ~/work/platform/**
+  - ~/git/my-project
+```
+
+Ingestion (`memspec reduce`) routes each session's digest to the claiming store. Sessions nobody claims are **held local** — they never cross a sync boundary, and route automatically the day a claim appears. No claims configured anywhere = classic single-store behaviour.
+
 ## Store layout
 
 ```
@@ -191,6 +224,9 @@ Frontmatter fields per record: `id`, `kind`, `type`, `state`, `source`, `source_
 | `memspec verify <id> [--evidence "..."]` | Mark a memory still true; checks anchors |
 | `memspec anchor <id> <files...>` | Link a memory to file SHAs |
 | `memspec reconcile` | Find anchored memories with drifted code |
+| `memspec normalize [--source <harness>]` | Session logs → local trajectory records (deterministic, local-only) |
+| `memspec distill [--limit <n>]` | Trajectories → per-session digests via a cheap LLM |
+| `memspec reduce [--force]` | Per-session digests → committed experience digest, routed by claims |
 | `memspec status` | Health readout (counts, witness, stale, drift, conflicts) |
 | `memspec sweep` | Interactively retire stale items (operator-only removal path) |
 | `memspec export --format <jsonl\|graphml\|dot>` | Export records and links to stdout |
@@ -200,7 +236,7 @@ Frontmatter fields per record: `id`, `kind`, `type`, `state`, `source`, `source_
 
 `memspec init` installs two hooks at `~/.claude/hooks/`:
 
-- `memspec-session-start.js` — runs `memspec context` and injects memory into the session prompt so the agent doesn't have to remember to search
+- `memspec-session-start.js` — runs `memspec context` and injects memory into the session prompt so the agent doesn't have to remember to search; also surfaces unreviewed dream passes (counts + open questions) until a `_Reviewed:` marker lands (v0.8+)
 - `memspec-consolidate.js` — on commit, prompts the agent to write memories about what just shipped
 
 Configurable in `.memspec/config.yaml`. Pass `--no-install-hooks` to skip. See [`hooks/`](hooks/) for the scripts.
@@ -224,6 +260,23 @@ Cron example (Sunday 22:00 local):
 ```
 
 Inspired by [Aaron Fulkerson's Exo](https://aaronfulkerson.com/2026/05/23/meet-exo/) and the [`dream-skill`](https://github.com/grandamenium/dream-skill) prior art.
+
+## Transcript ingestion
+
+The dream pass can only consolidate what sessions bothered to write down. Transcript ingestion closes that gap by distilling what sessions actually *did* (v0.9+):
+
+```
+memspec normalize   # harness logs -> trajectory records   (deterministic, 0 tokens, local/)
+memspec distill     # trajectories -> per-session digests   (cheap LLM, incremental, local/)
+memspec reduce      # digests -> experience digest           (deterministic, committed, claim-routed)
+```
+
+- **normalize** reads Claude Code (`~/.claude/projects/`) and Codex (`~/.codex/sessions/`) session logs into trajectory-v1-shaped records (after [Letta's Trajectory](https://www.letta.com/blog/trajectory/) format; own implementation). Adapter per harness — adding one is a small PR.
+- **distill** runs each session through a cheap model (`MEMSPEC_DISTILL_BIN`/`MEMSPEC_DISTILL_ARGS`, default `claude --model haiku -p`) into a ~250-word digest: what happened, decisions, fixes, discoveries, loose ends. Incremental with a per-run cap, so a heavy week never becomes one un-fittable batch. Secret shapes are redacted.
+- **reduce** merges fresh digests into `<store>/digests/<date>-<hostname>.md` — the only artifact that gets committed. Raw transcripts, trajectories, and per-session digests stay in the gitignored `local/` and never leave the machine.
+- The **dream pass** then reads experience digests alongside memspec writes and reports `UNRECORDED WORK`: things that demonstrably happened but produced no memory — with ready-to-run `memspec remember` proposals.
+
+Scheduling is wall-clock-free by design: run all three from any wake-driven daily job (macOS launchd fires missed slots on wake; `distill` and `reduce` self-gate). Laptops that were off simply catch up on next wake — data is delayed, never lost.
 
 ## Docs
 
