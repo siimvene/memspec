@@ -389,41 +389,54 @@ test('a strong low-priority hit survives a full high-priority layer (v0.10 fusio
   );
 });
 
-test('a record present in both layers outranks a comparable single-layer record', async () => {
+test('a record duplicated across layers gets no boost for existing twice', async () => {
   const sharedId = `ms_${ulid()}`;
   const projectOnlyId = `ms_${ulid()}`;
+  const centralOnlyId = `ms_${ulid()}`;
 
   const { composite } = await makeFusionFixture(
-    [{
-      id: sharedId,
-      title: 'Gateway timeout budget',
-      body: 'Gateway timeout budget as recorded centrally.',
-      created: '2026-01-01T00:00:00.000Z',
-    }],
     [
+      {
+        id: centralOnlyId,
+        title: 'Gateway timeout escalation',
+        body: 'Gateway timeout escalation path, central only.',
+        created: '2026-06-01T00:00:00.000Z',
+      },
       {
         id: sharedId,
         title: 'Gateway timeout budget',
-        body: 'Gateway timeout budget as recorded in the project.',
+        body: 'Gateway timeout budget as recorded centrally.',
         created: '2026-01-01T00:00:00.000Z',
       },
+    ],
+    [
       {
         id: projectOnlyId,
         title: 'Gateway timeout retries',
         body: 'Gateway timeout retry policy, project only.',
         created: '2026-06-01T00:00:00.000Z',
       },
+      {
+        id: sharedId,
+        title: 'Gateway timeout budget',
+        body: 'Gateway timeout budget as recorded in the project.',
+        created: '2026-01-01T00:00:00.000Z',
+      },
     ],
   );
 
-  // Pure-recency ranking pins the per-layer order deterministically: inside the
-  // project layer the newer project-only record ranks first and the shared
-  // record second. Fusion still has to lift the shared record to the top,
-  // because it also scores a rank in the central layer.
+  // Pure-recency ranking pins each layer's internal order deterministically:
+  // the newer single-layer record is rank 1 and the shared record is rank 2,
+  // in BOTH layers. Contributions are combined with max, so the shared record
+  // scores 1/(60+2) — its best rank anywhere — and stays behind both rank-1
+  // records. Under a summing RRF it would score 2/(60+2) and wrongly lead,
+  // which is the regression this pins: duplication across separate corpora is
+  // a migration artefact, not corroboration.
   const ranking = { relevance: 0, recency: 1 };
   const ids = composite.search('gateway timeout', { limit: 5, ranking }).map((item) => item.id);
 
-  assert.deepEqual(ids, [sharedId, projectOnlyId]);
+  // projectOnly and centralOnly tie on score; layer priority breaks it.
+  assert.deepEqual(ids, [projectOnlyId, centralOnlyId, sharedId]);
 });
 
 test('an id in both layers is deduped to the higher-priority copy', async () => {

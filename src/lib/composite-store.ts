@@ -10,8 +10,15 @@ import type { MemoryItem, MemoryFrontmatter } from './types.js';
  * Reciprocal Rank Fusion damping constant. 60 is the value from Cormack et
  * al. (2009) and the de-facto default everywhere RRF is used; it flattens the
  * head of the curve so a rank-1 and a rank-3 hit stay within ~3% of each
- * other, which is what lets a record present in two layers outrank one that
- * merely tops a single layer.
+ * other, keeping near-equal hits near-equal across layers whose absolute
+ * scores are not comparable.
+ *
+ * Note the departure from textbook RRF: contributions are combined with `max`,
+ * not `sum` (see `search`). Classic RRF fuses several rankers over ONE corpus,
+ * so agreement between them is genuine corroboration worth adding up. Here the
+ * layers are DIFFERENT corpora, so the same id in two layers means the record
+ * was physically duplicated — an artefact of incomplete migration, not
+ * evidence of relevance.
  */
 const RRF_K = 60;
 
@@ -173,7 +180,7 @@ export class CompositeStore {
   }
 
   /**
-   * v0.10 — search across all layers with weighted Reciprocal Rank Fusion.
+   * v0.10 — search across all layers with max-combined Reciprocal Rank Fusion.
    *
    * The previous implementation asked every layer for `limit` results and
    * concatenated them in priority order, so relevance never crossed a layer
@@ -192,6 +199,11 @@ export class CompositeStore {
    * so any multiplicative weighting would zero the global layer out entirely.
    * Priority survives only as a deterministic tie-break and as the authority
    * for which copy of a duplicated id is returned.
+   *
+   * An id found in several layers takes the MAX of its per-layer
+   * contributions, not the sum — i.e. it is scored on its best rank anywhere.
+   * See the note on RRF_K for why summing is wrong when layers are separate
+   * corpora rather than separate rankers over one corpus.
    */
   search(query: string, options: StoreSearchOptions = {}): MemoryItem[] {
     const limit = options.limit ?? 10;
@@ -232,7 +244,12 @@ export class CompositeStore {
         const contribution = 1 / (RRF_K + rank);
         const existing = fused.get(item.id);
         if (existing) {
-          existing.score += contribution;
+          // `max`, not `sum`. Duplication across layers is a migration
+          // artefact, not corroboration, so a record is scored on its best
+          // showing anywhere rather than boosted for existing twice. Without
+          // this, records transiently present in both a global and a project
+          // store during migration would outrank better single-layer hits.
+          existing.score = Math.max(existing.score, contribution);
           existing.bestRank = Math.min(existing.bestRank, rank);
         } else {
           fused.set(item.id, {
