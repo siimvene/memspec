@@ -275,6 +275,225 @@ test('mcp memspec_search honors layered stores (#2 — MCP regression guard)', a
   }
 });
 
+// --- v0.10 cross-layer rank fusion ------------------------------------------
+
+/**
+ * v0.10 — `CompositeStore.search` used to hand every layer the caller's limit
+ * and concatenate in priority order, so a full top layer hid every lower one.
+ * These fixtures build stores directly (no CLI spawn) so record ids, titles and
+ * `created` timestamps are all under the test's control.
+ */
+
+interface SeedRecord {
+  id: string;
+  title: string;
+  body: string;
+  created?: string;
+}
+
+function seedFrontmatter(record: SeedRecord) {
+  const created = record.created ?? '2026-01-01T00:00:00.000Z';
+  return {
+    id: record.id,
+    title: record.title,
+    body: record.body,
+    kind: 'claim' as const,
+    type: 'fact' as const,
+    source: 'test',
+    source_kind: 'agent' as const,
+    tags: [],
+    created,
+    last_verified: created,
+    check_by: 'never',
+    verified_with: 'assertion' as const,
+    state: 'active' as const,
+  };
+}
+
+function seedStore(root: string, records: SeedRecord[]): MemspecStore {
+  const store = new MemspecStore(root);
+  store.init();
+  for (const record of records) store.writeItem(seedFrontmatter(record));
+  return store;
+}
+
+/** Two-layer composite: `central` at priority 0, `project` at priority 10. */
+async function makeFusionFixture(central: SeedRecord[], project: SeedRecord[]): Promise<{
+  centralDir: string;
+  projectDir: string;
+  centralStore: MemspecStore;
+  projectStore: MemspecStore;
+  composite: CompositeStore;
+}> {
+  const centralDir = await makeTempProject();
+  const projectDir = await makeTempProject();
+  const centralStore = seedStore(centralDir, central);
+  const projectStore = seedStore(projectDir, project);
+
+  const composite = new CompositeStore(
+    [
+      { name: 'central', path: join(centralDir, '.memspec'), priority: 0, writable: false },
+      { name: 'project', path: '.memspec', priority: 10, writable: true },
+    ],
+    projectDir,
+  );
+
+  return { centralDir, projectDir, centralStore, projectStore, composite };
+}
+
+test('single-layer composite delegates untouched to MemspecStore.search', async () => {
+  const target = await makeTempProject();
+  const store = seedStore(target, Array.from({ length: 6 }, (_, i) => ({
+    id: `ms_${ulid()}`,
+    title: `Retrieval pipeline note ${i}`,
+    body: `Retrieval pipeline detail number ${i} about the search path.`,
+  })));
+
+  const composite = new CompositeStore([], target);
+  assert.equal(composite.layers.length, 1, 'fixture must be single-layer');
+
+  for (const options of [{ limit: 3 }, { limit: 10 }, {}]) {
+    assert.deepEqual(
+      composite.search('retrieval pipeline', options).map((item) => item.id),
+      store.search('retrieval pipeline', options).map((item) => item.id),
+      `single-layer search must match MemspecStore for ${JSON.stringify(options)}`,
+    );
+  }
+});
+
+test('a strong low-priority hit survives a full high-priority layer (v0.10 fusion repro)', async () => {
+  const centralId = `ms_${ulid()}`;
+  const projectIds = [`ms_${ulid()}`, `ms_${ulid()}`, `ms_${ulid()}`];
+
+  const { composite, projectStore } = await makeFusionFixture(
+    [{
+      id: centralId,
+      title: 'Deployment rollback procedure',
+      body: 'Deployment rollback deployment steps for the deployment pipeline.',
+    }],
+    projectIds.map((id, i) => ({
+      id,
+      title: `Deployment note ${i}`,
+      body: `Passing mention of deployment ${i}.`,
+    })),
+  );
+
+  // Premise: the high-priority layer alone already fills the caller's limit.
+  assert.equal(projectStore.search('deployment', { limit: 3 }).length, 3);
+
+  const ids = composite.search('deployment', { limit: 3 }).map((item) => item.id);
+  assert.equal(ids.length, 3);
+  assert.ok(
+    ids.includes(centralId),
+    `central-layer hit must survive fusion; got ${JSON.stringify(ids)}`,
+  );
+});
+
+test('a record present in both layers outranks a comparable single-layer record', async () => {
+  const sharedId = `ms_${ulid()}`;
+  const projectOnlyId = `ms_${ulid()}`;
+
+  const { composite } = await makeFusionFixture(
+    [{
+      id: sharedId,
+      title: 'Gateway timeout budget',
+      body: 'Gateway timeout budget as recorded centrally.',
+      created: '2026-01-01T00:00:00.000Z',
+    }],
+    [
+      {
+        id: sharedId,
+        title: 'Gateway timeout budget',
+        body: 'Gateway timeout budget as recorded in the project.',
+        created: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        id: projectOnlyId,
+        title: 'Gateway timeout retries',
+        body: 'Gateway timeout retry policy, project only.',
+        created: '2026-06-01T00:00:00.000Z',
+      },
+    ],
+  );
+
+  // Pure-recency ranking pins the per-layer order deterministically: inside the
+  // project layer the newer project-only record ranks first and the shared
+  // record second. Fusion still has to lift the shared record to the top,
+  // because it also scores a rank in the central layer.
+  const ranking = { relevance: 0, recency: 1 };
+  const ids = composite.search('gateway timeout', { limit: 5, ranking }).map((item) => item.id);
+
+  assert.deepEqual(ids, [sharedId, projectOnlyId]);
+});
+
+test('an id in both layers is deduped to the higher-priority copy', async () => {
+  const sharedId = `ms_${ulid()}`;
+
+  const { composite } = await makeFusionFixture(
+    [{
+      id: sharedId,
+      title: 'Cache eviction policy — central original',
+      body: 'Cache eviction policy written by the central layer.',
+    }],
+    [
+      {
+        id: sharedId,
+        title: 'Cache eviction policy — project override',
+        body: 'Cache eviction policy written by the project layer.',
+      },
+      {
+        id: `ms_${ulid()}`,
+        title: 'Cache warming notes',
+        body: 'Cache warming, unrelated to eviction policy.',
+      },
+    ],
+  );
+
+  const results = composite.search('cache eviction policy', { limit: 10 });
+  const hits = results.filter((item) => item.id === sharedId);
+  assert.equal(hits.length, 1, 'duplicated id must appear exactly once');
+  assert.equal(hits[0].title, 'Cache eviction policy — project override');
+  assert.match(hits[0].body, /written by the project layer/);
+});
+
+test('a layer whose search throws is skipped, others still answer', async () => {
+  const centralId = `ms_${ulid()}`;
+  const projectId = `ms_${ulid()}`;
+
+  const { composite } = await makeFusionFixture(
+    [{ id: centralId, title: 'Sharding strategy', body: 'Sharding strategy, central.' }],
+    [{ id: projectId, title: 'Sharding rollout', body: 'Sharding rollout, project.' }],
+  );
+
+  const central = composite.getLayer('central');
+  const project = composite.getLayer('project');
+  assert.ok(central && project);
+
+  central.store.search = () => {
+    throw new Error('corrupt index');
+  };
+  assert.deepEqual(composite.search('sharding', { limit: 5 }).map((item) => item.id), [projectId]);
+
+  project.store.search = () => {
+    throw new Error('corrupt index too');
+  };
+  assert.deepEqual(composite.search('sharding', { limit: 5 }), []);
+});
+
+test('fused results respect the caller limit', async () => {
+  const make = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => ({
+    id: `ms_${ulid()}`,
+    title: `${prefix} throughput report ${i}`,
+    body: `${prefix} throughput measurement ${i}.`,
+  }));
+
+  const { composite } = await makeFusionFixture(make('central', 8), make('project', 8));
+
+  assert.equal(composite.search('throughput', { limit: 4 }).length, 4);
+  assert.equal(composite.search('throughput', { limit: 12 }).length, 12);
+  assert.equal(composite.search('throughput').length, 10, 'default limit is 10');
+});
+
 test('mcp memspec_get finds records across layers by id', async () => {
   const { project, centralId } = await makeLayeredProjects();
 

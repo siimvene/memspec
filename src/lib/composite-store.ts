@@ -6,6 +6,15 @@ import { loadConfig, type StoreLayerConfig } from './config.js';
 import { findPointer } from './registry.js';
 import type { MemoryItem, MemoryFrontmatter } from './types.js';
 
+/**
+ * Reciprocal Rank Fusion damping constant. 60 is the value from Cormack et
+ * al. (2009) and the de-facto default everywhere RRF is used; it flattens the
+ * head of the curve so a rank-1 and a rank-3 hit stay within ~3% of each
+ * other, which is what lets a record present in two layers outrank one that
+ * merely tops a single layer.
+ */
+const RRF_K = 60;
+
 export interface StoreLayer {
   name: string;
   store: MemspecStore;
@@ -163,23 +172,88 @@ export class CompositeStore {
     return items;
   }
 
-  /** Search across all layers */
+  /**
+   * v0.10 — search across all layers with weighted Reciprocal Rank Fusion.
+   *
+   * The previous implementation asked every layer for `limit` results and
+   * concatenated them in priority order, so relevance never crossed a layer
+   * boundary: if the top layer filled the limit, a perfect match in a lower
+   * layer was invisible. Priority acted as an absolute gate, not a ranking
+   * signal.
+   *
+   * Merging the underlying scores is not an option. `MemspecStore.search`
+   * discards its score, and that score is normalized per result set (divided
+   * by the max raw relevance inside that one store's candidate pool), so the
+   * top hit of any query is 1.0 regardless of absolute quality. Each layer
+   * also carries its own FTS index, so BM25 IDF statistics differ per store.
+   * Cross-layer score comparison is therefore meaningless — we fuse on RANK.
+   *
+   * Layers contribute equally: priority values are 10 (project) / 0 (global),
+   * so any multiplicative weighting would zero the global layer out entirely.
+   * Priority survives only as a deterministic tie-break and as the authority
+   * for which copy of a duplicated id is returned.
+   */
   search(query: string, options: StoreSearchOptions = {}): MemoryItem[] {
-    const seen = new Set<string>();
-    const allResults: MemoryItem[] = [];
+    const limit = options.limit ?? 10;
+    const active = this.layers.filter((layer) => layer.store.exists);
 
-    for (const layer of this.layers) {
-      if (!layer.store.exists) continue;
-      const results = layer.store.search(query, options);
-      for (const item of results) {
-        if (!seen.has(item.id)) {
-          seen.add(item.id);
-          allResults.push(item);
-        }
+    if (active.length === 0) return [];
+    // Single layer: delegate untouched. Routing this through fusion would
+    // change the per-layer limit, which changes the per-set normalization
+    // denominator inside MemspecStore.search and silently reorders results.
+    // `forCwd` promises byte-identical behaviour to a bare MemspecStore here.
+    if (active.length === 1) return active[0].store.search(query, options);
+
+    // Over-fetch so fusion has material below the caller's cut.
+    const perLayerLimit = Math.max(limit * 2, 20);
+
+    interface FusedEntry {
+      item: MemoryItem;
+      priority: number;
+      bestRank: number;
+      score: number;
+    }
+    const fused = new Map<string, FusedEntry>();
+
+    // Layers are sorted priority-descending, so the first layer holding an id
+    // is the authoritative copy.
+    for (const layer of active) {
+      let results: MemoryItem[];
+      try {
+        results = layer.store.search(query, { ...options, limit: perLayerLimit });
+      } catch {
+        // A broken layer (corrupt index, unreadable file) must not fail the
+        // whole query — the remaining layers still have answers.
+        continue;
       }
+
+      results.forEach((item, index) => {
+        const rank = index + 1;
+        const contribution = 1 / (RRF_K + rank);
+        const existing = fused.get(item.id);
+        if (existing) {
+          existing.score += contribution;
+          existing.bestRank = Math.min(existing.bestRank, rank);
+        } else {
+          fused.set(item.id, {
+            item,
+            priority: layer.priority,
+            bestRank: rank,
+            score: contribution,
+          });
+        }
+      });
     }
 
-    return allResults.slice(0, options.limit ?? 10);
+    return Array.from(fused.values())
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.priority !== a.priority) return b.priority - a.priority;
+        if (a.bestRank !== b.bestRank) return a.bestRank - b.bestRank;
+        return a.item.id < b.item.id ? -1 : a.item.id > b.item.id ? 1 : 0;
+      })
+      .slice(0, limit)
+      .map((entry) => entry.item);
   }
 
   /** Find by ID across all layers (highest priority first) */
