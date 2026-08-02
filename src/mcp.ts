@@ -69,8 +69,9 @@ server.tool(
     expand_depth: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe('v0.5: how many hops to follow when expanding linked notes (1–3). Default 1 — single hop.'),
     as_of: z.string().optional().describe('ISO 8601 timestamp; drop results whose world-state validity window excludes this point. Records without valid_from/valid_to are treated as always valid. Orthogonal to check_by staleness.'),
     include_superseded: z.boolean().optional().describe('v0.6: when true with expand_edges, allow link-following to reach superseded/archived notes as targets (search matches themselves stay active-only). Default false.'),
+    scope: z.string().optional().describe('Active project scope for this query, e.g. "kleidia". Returns only records that are unscoped, marked "universal", or scoped to this name. State it explicitly whenever you know which project you are working on: this server may have been started with a working directory unrelated to that project, and scope derived from the working directory would then be wrong. Omit it to fall back to working-directory derivation (and to no filtering at all when the store declares no `scopes:`).'),
   },
-  async ({ query, type, limit, profile, full, expand_edges, edge_types, expand_depth, as_of, include_superseded }) => {
+  async ({ query, type, limit, profile, full, expand_edges, edge_types, expand_depth, as_of, include_superseded, scope }) => {
     try {
       const payload = searchPayload(query, {
         cwd: defaultCwd,
@@ -83,6 +84,7 @@ server.tool(
         expandDepth: expand_depth as SearchExpandDepth | undefined,
         asOf: as_of,
         includeSuperseded: include_superseded,
+        scope,
       });
 
       return {
@@ -172,9 +174,10 @@ interface RememberArgs {
   depends_on?: string[];
   valid_from?: string;
   valid_to?: string;
+  scope?: string;
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on, valid_from, valid_to }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on, valid_from, valid_to, scope }: RememberArgs) {
   try {
     const cwd = storeName === 'global' ? homedir() : defaultCwd;
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
@@ -191,6 +194,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       dependsOn: depends_on,
       validFrom: valid_from,
       validTo: valid_to,
+      scope,
     });
 
     let text = result.message;
@@ -210,6 +214,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       verified_with: result.verified_with,
       anchor_warnings: result.anchorWarnings,
       duplicates: result.duplicates ?? null,
+      scope: result.scope ?? null,
     };
     if (result.autoAttached) {
       // Phase 5 — mid-band edge attached at write time. Array shape so a
@@ -244,6 +249,7 @@ server.tool(
     depends_on: z.array(z.string()).optional().describe('Memory ids this record depends on (forms a typed edge — presupposes the target)'),
     valid_from: z.string().optional().describe('ISO 8601 timestamp when the world-state truth becomes valid (v0.5 temporal validity; orthogonal to check_by)'),
     valid_to: z.string().optional().describe('ISO 8601 timestamp when the world-state truth ceases to hold (v0.5 temporal validity; orthogonal to check_by)'),
+    scope: z.string().optional().describe('Project scope this record belongs to, e.g. "kleidia". Only readers with that active scope will see it; "universal" marks it visible from every scope. State it explicitly whenever you know which project the knowledge belongs to: this server may have been started with a working directory unrelated to that project, and scope derived from the working directory would then be wrong. Omit it to fall back to working-directory derivation (and to writing no scope at all when nothing matches).'),
   },
   handleRemember,
 );

@@ -9,6 +9,7 @@ import {
 } from '../lib/inference.js';
 import { effectiveSourceKind, inferSourceKind } from '../lib/source.js';
 import { findPointer, POINTER_FILENAME, resolveLayerPath } from '../lib/registry.js';
+import { assertKnownScope, resolveScopeForCwd } from '../lib/scope.js';
 import { MemspecStore } from '../lib/store.js';
 import { MEMORY_TYPES, type CodeAnchor, type MemoryType, type VerifiedWith } from '../lib/types.js';
 
@@ -32,6 +33,12 @@ export interface RememberOptions {
   validFrom?: string;
   /** v0.5 Phase 2 — ISO 8601 timestamp at which the world-state truth ceases to hold. Orthogonal to check_by. */
   validTo?: string;
+  /**
+   * Read-side partition for this record. Overrides the scope derived from
+   * `cwd` via the store's `scopes:` config. Pass `universal` to classify the
+   * record as visible everywhere; omit both and no `scope` field is written.
+   */
+  scope?: string;
 }
 
 export interface DuplicateMatch {
@@ -61,6 +68,8 @@ export interface RememberResult {
   anchorWarnings: string[];
   duplicates?: DuplicateMatch[];
   autoAttached?: AutoAttachedEdge;
+  /** Scope stamped on the record; absent when nothing matched and nothing was passed. */
+  scope?: string;
 }
 
 /**
@@ -185,6 +194,15 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const tags = parseTags(options.tags);
   const incomingSourceKind = inferSourceKind(source);
 
+  // Scope derivation reads the WORKING directory, not the resolved store path:
+  // a pointer file can send the write to a store that lives somewhere else
+  // entirely, but the record still belongs to the project being worked on.
+  // No explicit value and no matching pattern means no `scope` field at all —
+  // absent and `universal` are different classifications, not synonyms.
+  const scope = options.scope !== undefined
+    ? assertKnownScope(config.scopes, options.scope)
+    : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
+
   // Phase 5 — neighbour walk over same-type active records.
   // `store.search` is BM25-ranked and unbounded; we use it as a candidate
   // funnel and apply the (deterministic, explainable) lexical predicates
@@ -192,7 +210,9 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   let duplicates: DuplicateMatch[] | undefined;
   let autoAttached: AutoAttachedEdge | undefined;
   try {
-    const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT });
+    // Scoped so a same-titled record in another project isn't treated as a
+    // duplicate of this one. Unscoped and universal records stay visible.
+    const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT, scope });
 
     // High band — exact-title refusal. The v0.3 dedup-refusal promise lives
     // here. Surfaces every same-type record that normalises to the same title.
@@ -283,6 +303,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     body: options.body ?? '',
   };
 
+  if (scope) {
+    itemData.scope = scope;
+  }
+
   if (anchorResolution.anchors.length > 0) {
     itemData.anchors = anchorResolution.anchors;
   }
@@ -340,6 +364,9 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const filePath = store.writeItem(itemData);
 
   const lines = [`Created ${type} memory ${id} at ${filePath}`];
+  if (scope) {
+    lines.push(`Scope: ${scope}`);
+  }
   if (anchorResolution.anchors.length > 0) {
     lines.push(`Anchored to ${anchorResolution.anchors.length} file(s):`);
     for (const a of anchorResolution.anchors) {
@@ -365,5 +392,6 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     anchorWarnings: anchorResolution.warnings,
     duplicates: duplicates && duplicates.length > 0 ? duplicates : undefined,
     autoAttached,
+    scope,
   };
 }

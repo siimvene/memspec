@@ -1,7 +1,9 @@
+import { resolve } from 'node:path';
 import { CompositeStore } from '../lib/composite-store.js';
 import { getProfile, loadConfig } from '../lib/config.js';
 import { EDGE_TYPES, expandGraph, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
+import { assertKnownScope, resolveScopeForCwd } from '../lib/scope.js';
 import { type StoreSearchOptions } from '../lib/store.js';
 import { MEMORY_TYPES, type LifecycleState, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits } from '../lib/usage.js';
@@ -50,6 +52,12 @@ export interface SearchOptions {
    * search built its expansion map from active records only.
    */
   includeSuperseded?: boolean;
+  /**
+   * Active scope for this query. Overrides the scope derived from `cwd` via
+   * the store's `scopes:` config. When neither resolves, no scope filtering
+   * happens at all.
+   */
+  scope?: string;
 }
 
 /**
@@ -249,10 +257,19 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
 
   const explicitType = options.type ? assertMemoryType(options.type) : undefined;
   const types = explicitType ? [explicitType] : parseProfileTypes(profile.types);
+
+  // Active scope: stated by the caller, or derived from cwd via `scopes:`.
+  // Undefined (no config, or a cwd nothing claims) means no filtering — a
+  // store without scoping behaves exactly as it did before scopes existed.
+  const activeScope = options.scope !== undefined
+    ? assertKnownScope(config.scopes, options.scope)
+    : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
+
   const storeOptions: StoreSearchOptions = {
     limit,
     types,
     minConfidence: profile.min_confidence ?? 0,
+    scope: activeScope,
     ranking: profile.ranking,
   };
   // v0.5 Phase 2 — temporal validity filter. Parse asOf up front (before the

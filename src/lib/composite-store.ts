@@ -204,6 +204,11 @@ export class CompositeStore {
    * contributions, not the sum — i.e. it is scored on its best rank anywhere.
    * See the note on RRF_K for why summing is wrong when layers are separate
    * corpora rather than separate rankers over one corpus.
+   *
+   * `options.scope` is forwarded verbatim to every layer, where it constrains
+   * the FTS candidate set before that layer's limit is applied. Fusing
+   * post-filtered pages would reintroduce exactly the starvation the
+   * candidate-set filter exists to prevent.
    */
   search(query: string, options: StoreSearchOptions = {}): MemoryItem[] {
     const limit = options.limit ?? 10;

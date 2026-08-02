@@ -34,6 +34,27 @@ export interface AnchorsConfig {
   repo_search_paths?: string[];
 }
 
+/**
+ * Map of scope name → working-directory path patterns. Patterns use the same
+ * semantics as `claims:` (see `matchesClaim` in registry.ts): `~` expands to
+ * the home directory, a pattern without wildcards claims that path and
+ * everything under it, `*` matches within a segment and `**` across segments.
+ */
+export type ScopesConfig = Record<string, string[]>;
+
+/**
+ * Thrown when config.yaml parses as YAML but declares something structurally
+ * invalid. Unlike every other parse failure in `loadConfig` (which falls back
+ * to defaults) this propagates: a typo in a scope pattern must be loud, not a
+ * silently empty scope that hides every record in the project.
+ */
+export class MemspecConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MemspecConfigError';
+  }
+}
+
 export interface MemspecConfig {
   decay: Record<string, string>;
   profiles: Record<string, MemspecProfile>;
@@ -41,6 +62,14 @@ export interface MemspecConfig {
   stabilization: StabilizationConfig;
   stores?: StoreLayerConfig[];
   anchors?: AnchorsConfig;
+  /** Read-side routing: which records are visible from which working directories. */
+  scopes?: ScopesConfig;
+  /**
+   * Write-side routing for `memspec reduce`: working directories whose
+   * experience digests this store owns. Typed here so typos surface; the
+   * runtime consumer is still `claimsOf()` in registry.ts.
+   */
+  claims?: string[];
 }
 
 export interface MemspecProfile {
@@ -74,6 +103,73 @@ const DEFAULT_CONFIG: MemspecConfig = {
     auto_promote_confidence: 0.9,
   },
 };
+
+/**
+ * Scope name reserved for records that are explicitly visible everywhere.
+ * Declaring it as a scope would make `scope: universal` mean two things.
+ */
+const RESERVED_SCOPE_NAMES = new Set(['universal']);
+
+/**
+ * Path patterns are matched against a resolved cwd. A relative pattern would
+ * resolve against whatever directory the process happens to be in, which is
+ * never what the author meant — reject it instead of matching by accident.
+ */
+function assertPatternList(value: unknown, label: string, configPath: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new MemspecConfigError(
+      `${configPath}: ${label} must be a non-empty list of path patterns`,
+    );
+  }
+  return value.map((pattern) => {
+    if (typeof pattern !== 'string' || pattern.trim().length === 0) {
+      throw new MemspecConfigError(
+        `${configPath}: ${label} must contain only non-empty path patterns (got ${JSON.stringify(pattern)})`,
+      );
+    }
+    const trimmed = pattern.trim();
+    if (!trimmed.startsWith('~') && !trimmed.startsWith('/')) {
+      throw new MemspecConfigError(
+        `${configPath}: ${label} pattern "${trimmed}" must be absolute or start with "~" — ` +
+          'relative patterns resolve against the current working directory and never match reliably',
+      );
+    }
+    return trimmed;
+  });
+}
+
+export function parseScopesConfig(raw: unknown, configPath: string): ScopesConfig | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new MemspecConfigError(
+      `${configPath}: scopes must be a mapping of scope name to path patterns`,
+    );
+  }
+
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length === 0) return undefined;
+
+  const scopes: ScopesConfig = {};
+  for (const [name, patterns] of entries) {
+    if (name.trim().length === 0 || /\s/.test(name)) {
+      throw new MemspecConfigError(
+        `${configPath}: scope name ${JSON.stringify(name)} must be a non-empty token without whitespace`,
+      );
+    }
+    if (RESERVED_SCOPE_NAMES.has(name)) {
+      throw new MemspecConfigError(
+        `${configPath}: "${name}" is a reserved scope name — records marked \`scope: ${name}\` are visible from every scope, so it cannot also name a directory-bound scope`,
+      );
+    }
+    scopes[name] = assertPatternList(patterns, `scopes.${name}`, configPath);
+  }
+  return scopes;
+}
+
+export function parseClaimsConfig(raw: unknown, configPath: string): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  return assertPatternList(raw, 'claims', configPath);
+}
 
 export function loadConfig(root: string): MemspecConfig {
   const configPath = join(root, 'config.yaml');
@@ -115,6 +211,9 @@ export function loadConfig(root: string): MemspecConfig {
         }
       : undefined;
 
+    const scopes = parseScopesConfig(data.scopes, configPath);
+    const claims = parseClaimsConfig(data.claims, configPath);
+
     return {
       decay: { ...DEFAULT_CONFIG.decay, ...(data.decay as Record<string, string> ?? {}) },
       profiles: { ...DEFAULT_CONFIG.profiles, ...(data.profiles as MemspecConfig['profiles'] ?? {}) },
@@ -122,8 +221,14 @@ export function loadConfig(root: string): MemspecConfig {
       stabilization,
       stores,
       anchors,
+      scopes,
+      claims,
     };
-  } catch {
+  } catch (err) {
+    // Structural config errors are the one failure we refuse to swallow —
+    // silently falling back to defaults would turn a typo'd scope pattern into
+    // an invisible retrieval filter.
+    if (err instanceof MemspecConfigError) throw err;
     return DEFAULT_CONFIG;
   }
 }
@@ -197,6 +302,18 @@ profiles:
 #   enabled: true
 #   min_confirmations: 2
 #   auto_promote_confidence: 0.9
+`;
+
+  yaml += `
+# Record scoping (optional)
+# Partitions one store by working directory so a query issued in one project
+# doesn't surface records from every other project sharing the store. A record
+# with no scope is visible everywhere (the default); scope: universal is
+# explicitly visible everywhere; any other value is visible only when that
+# scope is active. Patterns use the same syntax as claims: below.
+# scopes:
+#   kleidia: [~/git/kleidia, ~/git/kleidia-docs]
+#   plg: ['~/piletilevi/**']
 `;
 
   yaml += `

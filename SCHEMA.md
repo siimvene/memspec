@@ -178,6 +178,14 @@ field/state names into this v0.3+ shape before validation.
 - **Required:** no
 - **Description:** Extension bag for non-schema fields (e.g. `ext.confirmations`, `ext.last_verification`, `ext.legacy_confidence`). Conventions documented in `src/lib/types.ts`.
 
+## Other
+
+### `scope`
+
+- **Type:** `string`
+- **Required:** no
+- **Description:** Read-side partition matching a `scopes:` key in config.yaml. Absent means visible from every scope (the default for pre-scoping records); `universal` means explicitly visible everywhere; any other value restricts the record to that one active scope.
+
 ## Supporting types
 
 ### `MemoryKind`

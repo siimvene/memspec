@@ -33,6 +33,7 @@ export function parseMemoryFile(content: string, filePath: string): MemoryItem {
     source: data.source,
     source_kind: data.source_kind,
     tags: data.tags,
+    scope: data.scope,
     check_by: data.check_by,
     stale: data.stale,
     last_verified: data.last_verified,
@@ -68,6 +69,7 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   frontmatter.source = item.source;
   if (item.source_kind) frontmatter.source_kind = item.source_kind;
   frontmatter.tags = item.tags;
+  if (item.scope) frontmatter.scope = item.scope;
   frontmatter.check_by = item.check_by;
 
   if (item.stale) frontmatter.stale = item.stale;

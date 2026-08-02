@@ -72,6 +72,7 @@ program
   .option('--check-by <value>', 'ISO timestamp or "never"')
   .option('--anchor <file...>', 'project-root-relative file paths to anchor this claim to')
   .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
+  .option('--scope <name>', 'record scope; overrides the scope derived from cwd via config `scopes:` ("universal" = visible everywhere)')
   .option('--pin', 'always surface this claim in boot context (operator-only; CLI flag, not on the MCP surface)')
   .option('--refines <id...>', 'memory id this record refines/elaborates on (parent stays valid; repeatable)')
   .option('--supports <id...>', 'memory id this record provides evidence for (repeatable)')
@@ -80,7 +81,7 @@ program
   .option('--valid-to <iso>', 'ISO 8601 timestamp — world-state truth window ends at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .action((type: string, title: string, options: {
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
-    refines?: string[]; supports?: string[]; dependsOn?: string[]; validFrom?: string; validTo?: string;
+    refines?: string[]; supports?: string[]; dependsOn?: string[]; validFrom?: string; validTo?: string; scope?: string;
   }) => {
     if (options.store === 'global') {
       options.cwd = homedir();
@@ -99,6 +100,7 @@ program
       dependsOn: options.dependsOn,
       validFrom: options.validFrom,
       validTo: options.validTo,
+      scope: options.scope,
     });
     console.log(result.message);
     if (result.duplicates && result.duplicates.length > 0) {
@@ -220,9 +222,10 @@ program
   .option('--expand-depth <n>', 'v0.5: BFS hop depth for edge expansion (1, 2, or 3; default 1)')
   .option('--as-of <iso>', 'ISO 8601 timestamp; drop results whose world-state validity window excludes this point (records without valid_from/valid_to are always returned)')
   .option('--include-superseded', 'v0.6: when set with --expand-edges, allow expansion to reach superseded/archived records as targets (seeds stay active-only)')
+  .option('--scope <name>', 'active scope; overrides the scope derived from cwd via config `scopes:`. Returns records that are unscoped, "universal", or scoped to this name')
   .action((query: string, options: {
     cwd?: string; type?: string; profile?: string; limit?: string; json?: boolean; full?: boolean;
-    expandEdges?: boolean; edgeTypes?: string; expandDepth?: string; asOf?: string; includeSuperseded?: boolean;
+    expandEdges?: boolean; edgeTypes?: string; expandDepth?: string; asOf?: string; includeSuperseded?: boolean; scope?: string;
   }) => {
     let edgeTypes: EdgeType[] | undefined;
     if (options.edgeTypes) {
@@ -255,6 +258,7 @@ program
       expandDepth,
       asOf: options.asOf,
       includeSuperseded: options.includeSuperseded,
+      scope: options.scope,
     }));
   });
 

@@ -46,6 +46,12 @@ export interface StoreSearchOptions {
   limit?: number;
   types?: MemoryType[];
   minConfidence?: number;
+  /**
+   * Active scope. Records are returned when their own `scope` is absent,
+   * `universal`, or equal to this value. Undefined disables scope filtering
+   * entirely (the state every store without a `scopes:` config is in).
+   */
+  scope?: string;
   ranking?: {
     relevance?: number;
     confidence?: number;
@@ -280,6 +286,7 @@ export class MemspecStore {
       limit = 10,
       types,
       minConfidence = 0,
+      scope,
       ranking,
     } = options;
 
@@ -291,7 +298,11 @@ export class MemspecStore {
     const cachePath = join(this.root, '.fts.db');
     const fts = FtsIndex.openOrBuild(cachePath, this.activeSourceFiles(), activeItems);
     try {
-      const matches = fts.search(query, { limit: limit * 2, types, minConfidence });
+      // `scope` is handed to FTS rather than applied to `matches` on purpose:
+      // the candidate pool is `limit * 2` rows wide, so a post-filter would
+      // return nothing for a scope whose records rank below the out-of-scope
+      // majority.
+      const matches = fts.search(query, { limit: limit * 2, types, minConfidence, scope });
 
       if (matches.length === 0) return [];
 

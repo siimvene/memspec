@@ -47,6 +47,8 @@ export const memoryFrontmatterSchema = z.object({
     .describe('Trust tier inferred from `source` at write time: `operator` (human), `agent`, or `import`.'),
   tags: z.array(z.string()).default([])
     .describe('Free-form tag list for filtering and search.'),
+  scope: z.string().min(1).optional()
+    .describe('Read-side partition matching a `scopes:` key in config.yaml. Absent means visible from every scope (the default for pre-scoping records); `universal` means explicitly visible everywhere; any other value restricts the record to that one active scope.'),
   check_by: isoOrNever
     .describe('ISO 8601 deadline or `"never"`; when it passes the record is flagged `stale: true` at read time but never deleted (renamed from `decay_after`).'),
   stale: z.boolean().optional()

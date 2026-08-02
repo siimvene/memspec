@@ -37,6 +37,13 @@ export interface MemoryFrontmatter {
   source: string;
   source_kind?: SourceKind; // trust tier inferred from source at write time
   tags: string[];
+  /**
+   * Read-side partition. Absent = visible from every scope (the pre-scoping
+   * default); `universal` = explicitly visible everywhere; any other name =
+   * visible only when that scope is active. Single-valued by design — a record
+   * belongs to one project or to everyone.
+   */
+  scope?: string;
   check_by: string; // ISO 8601 or "never" — renamed from decay_after; flag-only, never deletes
   stale?: boolean; // set when check_by passes; cleared by verify; removal only via sweep
   last_verified?: string; // ISO 8601 — when this memory was last confirmed true (defaults to created)

@@ -12,12 +12,21 @@
 
 import Database from 'better-sqlite3';
 import { existsSync, statSync, unlinkSync } from 'node:fs';
+import { SCOPE_UNIVERSAL } from './scope.js';
 import type { MemoryItem } from './types.js';
 
 export interface FtsSearchOptions {
   limit?: number;
   types?: string[];
   minConfidence?: number;
+  /**
+   * Active scope. When set, the candidate set is constrained inside SQL to
+   * records that are unscoped, `universal`, or scoped to this name. This has
+   * to happen before LIMIT, not after: a scope holding three records can't
+   * compete for a twenty-row page against three hundred out-of-scope records
+   * that match the same terms.
+   */
+  scope?: string;
   ranking?: {
     relevance?: number;
     confidence?: number;
@@ -41,19 +50,27 @@ export class FtsIndex {
       const hasSchema = this.db
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='items'")
         .get() !== undefined;
-      this.fresh = !hasSchema;
+      // A cache written by an older memspec has the right tables but not the
+      // right columns. mtime says it's fresh, so nothing else would catch it —
+      // drop and recreate, then let openOrBuild repopulate.
+      const staleSchema = hasSchema && !this.hasCurrentSchema();
+      if (staleSchema) {
+        this.db.exec('DROP TABLE IF EXISTS items_fts; DROP TABLE IF EXISTS items;');
+      }
+      this.fresh = !hasSchema || staleSchema;
     } else {
       this.db = new Database(':memory:');
       this.fresh = true;
     }
 
     if (this.fresh) {
-      // Item metadata table for type/recency filtering
+      // Item metadata table for type/recency/scope filtering
       this.db.exec(`
         CREATE TABLE items (
           id TEXT PRIMARY KEY,
           type TEXT NOT NULL,
-          created TEXT NOT NULL
+          created TEXT NOT NULL,
+          scope TEXT
         );
       `);
 
@@ -70,14 +87,30 @@ export class FtsIndex {
     }
   }
 
+  /** Does the on-disk `items` table carry every column this version queries? */
+  private hasCurrentSchema(): boolean {
+    try {
+      const columns = this.db.prepare('PRAGMA table_info(items)').all() as Array<{ name: string }>;
+      const names = new Set(columns.map((c) => c.name));
+      return names.has('scope');
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Open an on-disk FTS cache if it's still valid (cache mtime newer than every
-   * source file mtime). Stale caches are unlinked and rebuilt. Returns a populated
-   * FtsIndex the caller can search against directly.
+   * source file mtime, schema matching this version). Stale caches are unlinked
+   * or recreated and rebuilt. Returns a populated FtsIndex the caller can search
+   * against directly.
    */
   static openOrBuild(cachePath: string, sourceFiles: string[], items: MemoryItem[]): FtsIndex {
     if (existsSync(cachePath) && isCacheFresh(cachePath, sourceFiles)) {
-      return new FtsIndex(cachePath);
+      const cached = new FtsIndex(cachePath);
+      // `fresh` here means the constructor had to recreate the schema, i.e. the
+      // file was written by an older version — the rows are gone with it.
+      if (cached.fresh) cached.populate(items);
+      return cached;
     }
     // Stale or missing — drop the old file before constructing.
     if (existsSync(cachePath)) {
@@ -93,7 +126,7 @@ export class FtsIndex {
    */
   populate(items: MemoryItem[]): void {
     const insertItem = this.db.prepare(
-      'INSERT OR REPLACE INTO items (id, type, created) VALUES (?, ?, ?)',
+      'INSERT OR REPLACE INTO items (id, type, created, scope) VALUES (?, ?, ?, ?)',
     );
     const insertFts = this.db.prepare(
       'INSERT INTO items_fts (id, title, tags, body) VALUES (?, ?, ?, ?)',
@@ -102,7 +135,9 @@ export class FtsIndex {
     const batch = this.db.transaction((items: MemoryItem[]) => {
       for (const item of items) {
         // observations have no type; bucket them as 'observation' so type filters work uniformly
-        insertItem.run(item.id, item.type ?? 'observation', item.created);
+        // scope absent stays NULL — "visible from everywhere", distinct from
+        // the explicit 'universal' value the filter also lets through.
+        insertItem.run(item.id, item.type ?? 'observation', item.created, item.scope ?? null);
         insertFts.run(item.id, item.title, item.tags.join(' '), item.body);
       }
     });
@@ -122,19 +157,20 @@ export class FtsIndex {
     const {
       limit = 10,
       types,
+      scope,
     } = options;
 
     const terms = query.trim().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];
 
-    let results = this.runFtsQuery(terms, false, 'AND', types, limit);
+    let results = this.runFtsQuery(terms, false, 'AND', types, scope, limit);
     if (results.length === 0) {
-      results = this.runFtsQuery(terms, true, 'AND', types, limit);
+      results = this.runFtsQuery(terms, true, 'AND', types, scope, limit);
     }
     if (results.length === 0 && terms.length > 1) {
-      results = this.runFtsQuery(terms, false, 'OR', types, limit);
+      results = this.runFtsQuery(terms, false, 'OR', types, scope, limit);
       if (results.length === 0) {
-        results = this.runFtsQuery(terms, true, 'OR', types, limit);
+        results = this.runFtsQuery(terms, true, 'OR', types, scope, limit);
       }
     }
 
@@ -146,6 +182,7 @@ export class FtsIndex {
     prefix: boolean,
     operator: 'AND' | 'OR',
     types: string[] | undefined,
+    scope: string | undefined,
     limit: number,
   ): FtsScoredResult[] {
     const ftsTerms = terms.map((t) => {
@@ -168,6 +205,14 @@ export class FtsIndex {
     if (types && types.length > 0) {
       sql += ` AND items.type IN (${types.map(() => '?').join(',')})`;
       params.push(...types);
+    }
+
+    // Scope predicate sits inside the same WHERE clause as MATCH, so LIMIT is
+    // applied to the in-scope candidate set. Filtering the returned page
+    // instead would starve small scopes out of existence.
+    if (scope) {
+      sql += ' AND (items.scope IS NULL OR items.scope = ? OR items.scope = ?)';
+      params.push(SCOPE_UNIVERSAL, scope);
     }
 
     // bm25() returns negative values (lower = better match)
