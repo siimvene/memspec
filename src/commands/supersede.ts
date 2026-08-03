@@ -22,10 +22,11 @@ export interface SupersedeOptions {
   overrideOperator?: boolean;
   source?: string;
   /**
-   * Scope for the survivor. Overrides the scope inherited from the records
-   * being collapsed. Pass `universal` to reclassify the survivor as visible
-   * everywhere; there is deliberately no way to ask for "no scope" here,
-   * because that is what inheritance already produces when nothing agrees.
+   * Scope for the survivor. Overrides inheritance entirely, and is the answer
+   * to the error a merge of disagreeing scopes raises. Pass `universal` to
+   * reclassify the survivor as visible everywhere; there is deliberately no way
+   * to ask for "no scope" here, because absent means "not yet classified" and a
+   * caller who has been asked to classify is past that.
    */
   scope?: string;
 }
@@ -59,20 +60,31 @@ function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason:
 }
 
 /**
- * Scope the survivor inherits from the records collapsing into it.
+ * Scope the survivor inherits from the records collapsing into it: unanimity,
+ * or a refusal to guess.
  *
- * Contributors with no scope abstain rather than vote: they are already
- * visible from every scope, so they cannot disagree with anyone. A genuine
- * disagreement resolves to absent, never to one of the competing names —
- * under-scoping leaves a record visible where it wasn't before, over-scoping
- * makes it vanish from every project but one, and only the second is
- * unrecoverable from the reader's side.
+ * No silent rule can be right here, because the two failure directions are
+ * mutually exclusive. Resolving `alpha` + `beta` to absent republishes the
+ * merged content to `gamma` and every other unrelated scope — the exact
+ * pollination scoping exists to prevent. Resolving absent + `alpha` to `alpha`
+ * hides content that every scope could previously read. Treating absent as an
+ * abstention rather than a value only picks one of those losses; it does not
+ * avoid either. So a mixed set is a question for the caller, the same way
+ * `remember` refuses to pick a store when more than one is writable.
+ *
+ * A plain supersede has exactly one contributor, so it is trivially unanimous
+ * and keeps inheriting silently — the common path pays nothing for this.
  */
 function inheritedScope(contributors: MemoryItem[]): string | undefined {
-  const scopes = new Set(
-    contributors.map((item) => item.scope).filter((scope): scope is string => Boolean(scope)),
+  const scopes = new Set(contributors.map((item) => item.scope));
+  if (scopes.size <= 1) return [...scopes][0];
+
+  const conflicting = [...scopes].map((scope) => scope ?? '(none)').sort().join(', ');
+  throw new Error(
+    `Cannot infer the survivor's scope: the records being merged carry ${conflicting}. ` +
+    'Say where the merged knowledge belongs with an explicit scope — ' +
+    '--scope <name> for one project, or --scope universal if it belongs everywhere.',
   );
-  return scopes.size === 1 ? [...scopes][0] : undefined;
 }
 
 /**
@@ -201,7 +213,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       ...target,
       // The survivor absorbs records from possibly-different scopes, so its own
       // stamp is re-derived from the whole contributing set rather than kept.
-      // Undefined drops the field on serialisation, which is the safe direction.
+      // Only reached once that set agreed, or the caller named a scope.
       scope: survivorScope,
       supersedes: merged,
       supersede_reason: baseReason,

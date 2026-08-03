@@ -507,48 +507,121 @@ test('an explicit scope on supersede overrides inheritance', async () => {
   );
 });
 
-test('a merge whose scoped contributors agree keeps that scope', async () => {
+/**
+ * The merge rule is unanimity or refusal. Every silent tie-break loses
+ * something, and the two losses point opposite ways: collapsing alpha + beta to
+ * absent republishes the content to every unrelated scope, while collapsing
+ * absent + alpha to alpha hides content that used to be readable everywhere.
+ * The tests below pin both refusals, and the frictionless unanimous paths that
+ * make the refusal affordable.
+ */
+test('a merge whose contributors all carry the same scope keeps it', async () => {
   const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
   const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
   const agreeing = seed(project, 'Alpha routing detail', 'Tenant routing lives in the gateway.', 'alpha');
-  // Unscoped contributors abstain: they are already visible everywhere, so
-  // they cannot disagree with anyone.
-  const abstaining = seed(project, 'Routing note', 'Written before scoping existed.');
+  const alsoAgreeing = seed(project, 'Alpha routing aside', 'Routing is table-driven.', 'alpha');
 
   const result = runSupersede(targetId, {
     cwd: project,
     reason: 'three notes describing one thing',
     body: 'Consolidated alpha routing.',
     source: 'test',
-    mergeFrom: [agreeing, abstaining],
+    mergeFrom: [agreeing, alsoAgreeing],
   });
 
   assert.equal(scopeOf(project, result.survivor_id), 'alpha');
   assert.equal(result.superseded_ids.length, 3);
 });
 
-test('a merge whose scoped contributors disagree yields an unscoped survivor', async () => {
+test('a merge whose contributors are all unscoped leaves the survivor unscoped', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  // cwd resolves to alpha, so a survivor that derived rather than inherited
+  // would arrive stamped — unanimous absence must survive the merge.
+  await appendConfig(project, renderScopes({ alpha: [project], beta: ['/nowhere/beta'] }));
+  const targetId = seed(project, 'Legacy ledger fact', 'Written before scoping existed.');
+
+  const result = runSupersede(targetId, {
+    cwd: project,
+    reason: 'two legacy notes describing one thing',
+    body: 'Consolidated legacy ledger.',
+    source: 'test',
+    mergeFrom: [seed(project, 'Legacy ledger aside', 'Also written before scoping existed.')],
+  });
+
+  assert.equal(scopeOf(project, result.survivor_id), undefined);
+  const written = await readFile(new MemspecStore(project).findById(result.survivor_id)!.filePath, 'utf8');
+  assert.doesNotMatch(written, /^scope:/m, 'absent and universal are different states — absent must stay absent');
+});
+
+test('a merge whose scoped contributors disagree is refused', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
+  const foreign = seed(project, 'Beta gateway routing', 'The beta gateway routes by tenant.', 'beta');
+
+  assert.throws(
+    () => runSupersede(targetId, {
+      cwd: project,
+      reason: 'same claim, two projects',
+      body: 'Both gateways route by tenant.',
+      source: 'test',
+      mergeFrom: [foreign],
+    }),
+    (error: Error) => {
+      assert.match(error.message, /alpha/, 'the caller has to be told which scopes collided');
+      assert.match(error.message, /beta/);
+      assert.match(error.message, /universal/, 'universal is the answer when the merged claim really is global');
+      return true;
+    },
+  );
+
+  // Refused before anything moved: both records are still active and readable
+  // from their own scopes.
+  assert.equal(scopeOf(project, targetId), 'alpha');
+  assert.equal(scopeOf(project, foreign), 'beta');
+});
+
+test('a merge of an unscoped record with a scoped one is refused', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
+  // Inheriting alpha here would hide a record beta could previously read, which
+  // is a loss in the opposite direction to the alpha+beta case above.
+  const unscoped = seed(project, 'Routing note', 'Written before scoping existed.');
+
+  assert.throws(
+    () => runSupersede(targetId, {
+      cwd: project,
+      reason: 'a legacy note describing the same routing',
+      body: 'Consolidated routing.',
+      source: 'test',
+      mergeFrom: [unscoped],
+    }),
+    /\(none\)/,
+    'the absent contributor must read as a value, not as "undefined"',
+  );
+});
+
+test('an explicit scope settles a merge the inference refuses', async () => {
   const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
   const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
   const foreign = seed(project, 'Beta gateway routing', 'The beta gateway routes by tenant.', 'beta');
 
   const result = runSupersede(targetId, {
     cwd: project,
-    reason: 'same claim, two projects',
-    body: 'Both gateways route by tenant.',
+    reason: 'both gateways behave the same way',
+    body: 'Every gateway routes by tenant.',
     source: 'test',
     mergeFrom: [foreign],
+    scope: 'universal',
   });
 
-  // Picking a winner would delete the survivor from the loser's scope; staying
-  // absent only leaves it visible where it already was.
-  assert.equal(scopeOf(project, result.survivor_id), undefined);
+  assert.equal(scopeOf(project, result.survivor_id), 'universal');
   for (const scope of ['alpha', 'beta']) {
-    assert.equal(searchPayload('gateways', { cwd: project, scope }).count, 1, `${scope} must still reach the survivor`);
+    assert.equal(searchPayload('gateway', { cwd: project, scope }).count, 1, `${scope} must reach the survivor`);
   }
 });
 
-test('a merge with no replacement body re-derives the surviving record own scope', async () => {
+test('a merge with no replacement body enforces the same rule on the surviving record', async () => {
   const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
 
   const agreeingSurvivor = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
@@ -561,17 +634,28 @@ test('a merge with no replacement body re-derives the surviving record own scope
   assert.equal(scopeOf(project, agreeingSurvivor), 'alpha', 'agreement leaves the survivor stamp untouched');
 
   const conflictedSurvivor = seed(project, 'Alpha settlement ledger', 'Settlement runs after cutoff.', 'alpha');
+  const foreign = seed(project, 'Beta settlement ledger', 'Settlement runs after cutoff.', 'beta');
+  assert.throws(
+    () => runSupersede(conflictedSurvivor, {
+      cwd: project,
+      reason: 'the same ledger claim arrived from beta',
+      source: 'test',
+      mergeFrom: [foreign],
+    }),
+    /alpha, beta/,
+  );
+  assert.equal(scopeOf(project, conflictedSurvivor), 'alpha', 'a refused merge leaves the survivor untouched');
+  assert.equal(scopeOf(project, foreign), 'beta', 'and does not archive the contributor');
+
+  // Naming the scope resolves it, on the branch where the target itself survives.
   runSupersede(conflictedSurvivor, {
     cwd: project,
     reason: 'the same ledger claim arrived from beta',
     source: 'test',
-    mergeFrom: [seed(project, 'Beta settlement ledger', 'Settlement runs after cutoff.', 'beta')],
+    mergeFrom: [foreign],
+    scope: 'universal',
   });
-  assert.equal(
-    scopeOf(project, conflictedSurvivor),
-    undefined,
-    'absorbing a foreign record widens the survivor rather than keeping a stamp that now hides half its content',
-  );
+  assert.equal(scopeOf(project, conflictedSurvivor), 'universal');
 });
 
 test('retracting a record leaves its scope on the archived copy', async () => {
