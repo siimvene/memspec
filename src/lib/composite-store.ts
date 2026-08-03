@@ -279,7 +279,7 @@ export class CompositeStore {
   }
 
   /**
-   * Union of the scopes stamped on active records across every layer. A scope
+   * Union of the scopes stamped on records across every layer. A scope
    * that only exists in the global layer is still a real scope from the
    * project's point of view, so validation has to see all of them.
    */

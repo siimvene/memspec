@@ -59,17 +59,24 @@ export function resolveScopeForCwd(scopes: ScopesConfig | undefined, cwd: string
  * to be writable before anything is stamped with it — there is no way to tell
  * "new scope" from "typo" at write time, and refusing both would make new
  * scopes uncreatable on a store with no `scopes:` block.
+ *
+ * Pass it as a thunk: resolving it means re-parsing every record in the store,
+ * and a name the config already declares never needs the inventory at all.
  */
 export function assertKnownScope(
   scopes: ScopesConfig | undefined,
   name: string,
-  scopesInUse: readonly string[] = [],
+  scopesInUse: readonly string[] | (() => readonly string[]) = [],
 ): string {
   const trimmed = name.trim();
   if (trimmed.length === 0) throw new Error('scope must be a non-empty name');
   if (trimmed === SCOPE_UNIVERSAL) return trimmed;
 
-  const known = new Set<string>([...Object.keys(scopes ?? {}), ...scopesInUse]);
+  const declared = new Set<string>(Object.keys(scopes ?? {}));
+  if (declared.has(trimmed)) return trimmed;
+
+  const inUse = typeof scopesInUse === 'function' ? scopesInUse() : scopesInUse;
+  const known = new Set<string>([...declared, ...inUse]);
   // Nothing to validate against — no config, no stamped record. Every name is
   // equally unknown and the filter is a no-op, so accepting keeps a fresh
   // store usable instead of failing on its first scoped call.

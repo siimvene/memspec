@@ -82,6 +82,14 @@ function seed(
   return id;
 }
 
+/** Move a seeded record into `archive/` as superseded, so it survives only there. */
+function archiveAsSuperseded(project: string, id: string): void {
+  const store = new MemspecStore(project);
+  const item = store.findById(id);
+  assert.ok(item, `seeded record ${id} must be loadable before it can be archived`);
+  store.moveToArchive(item, 'superseded');
+}
+
 // --- backward compatibility --------------------------------------------------
 
 test('no scopes: config means no filtering at all', async () => {
@@ -485,6 +493,41 @@ test('a typo is rejected against the scopes present in a store with no scopes: b
     () => searchPayload('ledger', { cwd: project, scope: 'kleida' }),
     /unknown scope "kleida"/,
     'a typo must not silently degrade to "unscoped and universal records only"',
+  );
+});
+
+/**
+ * The inventory has to cover every record state, not just the active ones.
+ * A scope whose last record was superseded is still a real name, and
+ * `--include-superseded` exists precisely to reach into that archive — being
+ * refused at the scope check is the one thing that makes the flag unusable.
+ */
+test('a scope surviving only on a superseded record is still a known scope name', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  seed(project, 'Alpha widget record', 'Alpha scope widget configuration.', 'alpha');
+  archiveAsSuperseded(project, seed(project, 'Beta secret record', 'Confidential beta-only content.', 'beta'));
+
+  assert.deepEqual(
+    new MemspecStore(project).scopesInUse().sort(),
+    ['alpha', 'beta'],
+    'the inventory is every scope stamped in the store, not every scope stamped on an active record',
+  );
+  assert.doesNotThrow(
+    () => searchPayload('secret', { cwd: project, scope: 'beta', includeSuperseded: true }),
+    'the archive is the only place beta lives, and it was explicitly asked for',
+  );
+});
+
+test('a scope matching neither config nor any archived record is still rejected', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  archiveAsSuperseded(project, seed(project, 'Beta secret record', 'Confidential beta-only content.', 'beta'));
+
+  assert.throws(
+    () => searchPayload('secret', { cwd: project, scope: 'btea', includeSuperseded: true }),
+    /unknown scope "btea"/,
+    'widening the inventory to archived records must not widen it to everything',
   );
 });
 

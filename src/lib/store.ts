@@ -256,16 +256,18 @@ export class MemspecStore {
   }
 
   /**
-   * Distinct `scope` values stamped on active records. Feeds scope-name
+   * Distinct `scope` values stamped on records in any state. Feeds scope-name
    * validation: records are stamped before the `scopes:` config block is
    * written, so the config is not a complete inventory of the scopes that
-   * exist. Only consulted when an explicit scope isn't already declared in
-   * config, so the extra load stays off the common path.
+   * exist. Archived records count too — a scope whose last record was
+   * superseded is still a real name, and `--include-superseded` can legitimately
+   * ask for it. Callers pass this as a thunk so the walk only happens when the
+   * config didn't already settle the question.
    */
   scopesInUse(): string[] {
     if (!this.exists) return [];
     const seen = new Set<string>();
-    for (const item of this.loadActive()) {
+    for (const item of this.loadAll()) {
       if (item.scope) seen.add(item.scope);
     }
     return [...seen];

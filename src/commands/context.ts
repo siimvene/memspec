@@ -331,7 +331,7 @@ export function runContext(options: ContextOptions): string {
   // Undefined means no filtering, so a store without `scopes:` boots exactly
   // as it did before scoping existed.
   const activeScope = options.scope !== undefined
-    ? assertKnownScope(config.scopes, options.scope, store.scopesInUse())
+    ? assertKnownScope(config.scopes, options.scope, () => store.scopesInUse())
     : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
 
   let header: string;

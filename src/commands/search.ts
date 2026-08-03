@@ -262,7 +262,7 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   // Undefined (no config, or a cwd nothing claims) means no filtering — a
   // store without scoping behaves exactly as it did before scopes existed.
   const activeScope = options.scope !== undefined
-    ? assertKnownScope(config.scopes, options.scope, store.scopesInUse())
+    ? assertKnownScope(config.scopes, options.scope, () => store.scopesInUse())
     : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
 
   const storeOptions: StoreSearchOptions = {
