@@ -6,7 +6,9 @@ import { ulid } from 'ulid';
 import { makeTempProject, runCli } from './helpers.js';
 import { runContext } from '../src/commands/context.js';
 import { searchPayload } from '../src/commands/search.js';
+import { runObserve } from '../src/commands/observe.js';
 import { runRemember } from '../src/commands/remember.js';
+import { runSupersede } from '../src/commands/supersede.js';
 import { parseScopesConfig } from '../src/lib/config.js';
 import { resolveScopeForCwd } from '../src/lib/scope.js';
 import { MemspecStore } from '../src/lib/store.js';
@@ -424,6 +426,187 @@ test('expansion surfaces unscoped and universal neighbours from any scope', asyn
   const ids = payload.results.map((r) => r.id);
   assert.ok(ids.includes(legacyId), 'an unscoped record is visible from every scope, including via expansion');
   assert.ok(ids.includes(universalId), 'a universal record is visible from every scope, including via expansion');
+});
+
+// --- supersede: the correction path ------------------------------------------
+
+/**
+ * Supersede is the documented way to correct stale knowledge, so a replacement
+ * that drops the scope demotes a scoped record back to "visible from every
+ * project" on every single correction — silently reintroducing the pollution
+ * scoping exists to prevent.
+ */
+function scopeOf(project: string, id: string): string | undefined {
+  const item = new MemspecStore(project).findById(id);
+  assert.ok(item, `record ${id} must be loadable`);
+  return item.scope;
+}
+
+test('a replacement inherits the scope of the record it supersedes', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
+
+  const result = runSupersede(targetId, {
+    cwd: project,
+    reason: 'routing changed',
+    body: 'The alpha gateway now routes by region.',
+    source: 'test',
+  });
+
+  assert.equal(scopeOf(project, result.survivor_id), 'alpha', 'a correction to an alpha claim is still alpha knowledge');
+  assert.equal(scopeOf(project, targetId), 'alpha', 'the archived original keeps its own stamp');
+
+  const asBeta = searchPayload('gateway', { cwd: project, scope: 'beta' });
+  assert.equal(asBeta.count, 0, 'the replacement must not leak into another scope');
+});
+
+test('superseding an unscoped record leaves the replacement unscoped', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  // cwd resolves to alpha, so a replacement that derived its scope instead of
+  // inheriting it would arrive stamped — absent must survive the round trip.
+  await appendConfig(project, renderScopes({ alpha: [project], beta: ['/nowhere/beta'] }));
+  const targetId = seed(project, 'Legacy ledger fact', 'Written before scoping existed.');
+
+  const result = runSupersede(targetId, {
+    cwd: project,
+    reason: 'reconciliation moved to hourly',
+    body: 'The ledger reconciles hourly.',
+    source: 'test',
+  });
+
+  assert.equal(scopeOf(project, result.survivor_id), undefined);
+  const written = await readFile(new MemspecStore(project).findById(result.survivor_id)!.filePath, 'utf8');
+  assert.doesNotMatch(written, /^scope:/m, 'absent and universal are different states — absent must stay absent');
+});
+
+test('an explicit scope on supersede overrides inheritance', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
+
+  const result = runSupersede(targetId, {
+    cwd: project,
+    reason: 'this was beta knowledge all along',
+    body: 'The beta gateway routes by tenant.',
+    source: 'test',
+    scope: 'beta',
+  });
+
+  assert.equal(scopeOf(project, result.survivor_id), 'beta');
+
+  assert.throws(
+    () => runSupersede(seed(project, 'Another alpha note', 'Alpha detail.', 'alpha'), {
+      cwd: project,
+      reason: 'typo scope',
+      body: 'Replacement.',
+      source: 'test',
+      scope: 'btea',
+    }),
+    /unknown scope "btea"/,
+    'a typo must fail loudly rather than hide the survivor from every scope',
+  );
+});
+
+test('a merge whose scoped contributors agree keeps that scope', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
+  const agreeing = seed(project, 'Alpha routing detail', 'Tenant routing lives in the gateway.', 'alpha');
+  // Unscoped contributors abstain: they are already visible everywhere, so
+  // they cannot disagree with anyone.
+  const abstaining = seed(project, 'Routing note', 'Written before scoping existed.');
+
+  const result = runSupersede(targetId, {
+    cwd: project,
+    reason: 'three notes describing one thing',
+    body: 'Consolidated alpha routing.',
+    source: 'test',
+    mergeFrom: [agreeing, abstaining],
+  });
+
+  assert.equal(scopeOf(project, result.survivor_id), 'alpha');
+  assert.equal(result.superseded_ids.length, 3);
+});
+
+test('a merge whose scoped contributors disagree yields an unscoped survivor', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
+  const foreign = seed(project, 'Beta gateway routing', 'The beta gateway routes by tenant.', 'beta');
+
+  const result = runSupersede(targetId, {
+    cwd: project,
+    reason: 'same claim, two projects',
+    body: 'Both gateways route by tenant.',
+    source: 'test',
+    mergeFrom: [foreign],
+  });
+
+  // Picking a winner would delete the survivor from the loser's scope; staying
+  // absent only leaves it visible where it already was.
+  assert.equal(scopeOf(project, result.survivor_id), undefined);
+  for (const scope of ['alpha', 'beta']) {
+    assert.equal(searchPayload('gateways', { cwd: project, scope }).count, 1, `${scope} must still reach the survivor`);
+  }
+});
+
+test('a merge with no replacement body re-derives the surviving record own scope', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+
+  const agreeingSurvivor = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
+  runSupersede(agreeingSurvivor, {
+    cwd: project,
+    reason: 'duplicate alpha note',
+    source: 'test',
+    mergeFrom: [seed(project, 'Alpha routing detail', 'Tenant routing lives in the gateway.', 'alpha')],
+  });
+  assert.equal(scopeOf(project, agreeingSurvivor), 'alpha', 'agreement leaves the survivor stamp untouched');
+
+  const conflictedSurvivor = seed(project, 'Alpha settlement ledger', 'Settlement runs after cutoff.', 'alpha');
+  runSupersede(conflictedSurvivor, {
+    cwd: project,
+    reason: 'the same ledger claim arrived from beta',
+    source: 'test',
+    mergeFrom: [seed(project, 'Beta settlement ledger', 'Settlement runs after cutoff.', 'beta')],
+  });
+  assert.equal(
+    scopeOf(project, conflictedSurvivor),
+    undefined,
+    'absorbing a foreign record widens the survivor rather than keeping a stamp that now hides half its content',
+  );
+});
+
+test('retracting a record leaves its scope on the archived copy', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const targetId = seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha');
+
+  runSupersede(targetId, { cwd: project, reason: 'no longer true', source: 'test' });
+
+  assert.equal(scopeOf(project, targetId), 'alpha');
+});
+
+// --- observe -----------------------------------------------------------------
+
+test('observe stamps the scope derived from a matching cwd', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  await appendConfig(project, renderScopes({ alpha: [project], beta: ['/nowhere/beta'] }));
+
+  const derived = runObserve({ cwd: project, text: 'The deploy script printed a checksum mismatch.' });
+  assert.equal(derived.scope, 'alpha');
+  assert.match(await readFile(derived.filePath, 'utf8'), /^scope: alpha$/m);
+
+  const explicit = runObserve({ cwd: project, text: 'The beta dashboard was empty.', scope: 'beta' });
+  assert.equal(explicit.scope, 'beta', 'an explicit scope overrides cwd derivation');
+});
+
+test('observe writes no scope field when the cwd matches nothing', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  await appendConfig(project, renderScopes({ alpha: ['/nowhere/alpha'] }));
+
+  const result = runObserve({ cwd: project, text: 'No scope claims this directory.' });
+
+  assert.equal(result.scope, undefined);
+  assert.doesNotMatch(await readFile(result.filePath, 'utf8'), /^scope:/m);
 });
 
 // --- store selection vs. working directory -----------------------------------

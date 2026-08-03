@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import { effectiveSourceKind } from '../lib/source.js';
+import { assertKnownScope } from '../lib/scope.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_DECAY_DAYS, type MemoryItem, type MemoryType } from '../lib/types.js';
 
@@ -20,6 +21,13 @@ export interface SupersedeOptions {
   mergeFrom?: string[];
   overrideOperator?: boolean;
   source?: string;
+  /**
+   * Scope for the survivor. Overrides the scope inherited from the records
+   * being collapsed. Pass `universal` to reclassify the survivor as visible
+   * everywhere; there is deliberately no way to ask for "no scope" here,
+   * because that is what inheritance already produces when nothing agrees.
+   */
+  scope?: string;
 }
 
 export interface SupersedeResult {
@@ -48,6 +56,23 @@ function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason:
     return `${reason} [override_operator used on operator-sourced record]`;
   }
   return reason;
+}
+
+/**
+ * Scope the survivor inherits from the records collapsing into it.
+ *
+ * Contributors with no scope abstain rather than vote: they are already
+ * visible from every scope, so they cannot disagree with anyone. A genuine
+ * disagreement resolves to absent, never to one of the competing names —
+ * under-scoping leaves a record visible where it wasn't before, over-scoping
+ * makes it vanish from every project but one, and only the second is
+ * unrecoverable from the reader's side.
+ */
+function inheritedScope(contributors: MemoryItem[]): string | undefined {
+  const scopes = new Set(
+    contributors.map((item) => item.scope).filter((scope): scope is string => Boolean(scope)),
+  );
+  return scopes.size === 1 ? [...scopes][0] : undefined;
 }
 
 /**
@@ -81,6 +106,14 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   const overrideOperator = options.overrideOperator ?? false;
   const baseReason = options.reason;
 
+  // Validated against the config plus the scopes actually stamped in the store,
+  // resolved as a thunk so a name the config already declares never pays for a
+  // full re-parse of every record.
+  const explicitScope = options.scope !== undefined
+    ? assertKnownScope(loadConfig(store.root).scopes, options.scope, () => store.scopesInUse())
+    : undefined;
+  const survivorScope = explicitScope ?? inheritedScope([target, ...mergeItems]);
+
   // Replacement branch: mint a fresh record. Everything in mergeFrom plus the
   // target collapse into the new survivor.
   if (options.body !== undefined && options.body !== null) {
@@ -94,7 +127,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
 
     const collapsedIds = [target.id, ...mergeItems.map((i) => i.id)];
 
-    store.writeItem({
+    const replacement: Parameters<typeof store.writeItem>[0] = {
       id: newId,
       kind: 'claim',
       type: target.type,
@@ -108,7 +141,14 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       supersede_reason: baseReason,
       title: options.title ?? target.title,
       body: options.body,
-    });
+    };
+    // A correction to a scoped claim is still that scope's knowledge. Omitted
+    // when nothing was inherited: absent and `universal` are different
+    // classifications, so an unscoped target must not gain one here.
+    if (survivorScope) {
+      replacement.scope = survivorScope;
+    }
+    store.writeItem(replacement);
 
     target.state = 'superseded';
     target.superseded_by = newId;
@@ -159,6 +199,10 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     }
     store.updateItem({
       ...target,
+      // The survivor absorbs records from possibly-different scopes, so its own
+      // stamp is re-derived from the whole contributing set rather than kept.
+      // Undefined drops the field on serialisation, which is the safe direction.
+      scope: survivorScope,
       supersedes: merged,
       supersede_reason: baseReason,
     });

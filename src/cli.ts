@@ -124,8 +124,9 @@ program
   .option('--merge-from <ids>', 'comma-separated list of memory ids to collapse into the survivor')
   .option('--override-operator', 'required to supersede operator-sourced records; logged into the reason')
   .option('--source <source>', 'corrector identifier')
+  .option('--scope <name>', 'scope for the survivor; overrides the scope inherited from the records being collapsed ("universal" = visible everywhere)')
   .action((id: string, options: {
-    cwd?: string; reason: string; body?: string; title?: string; mergeFrom?: string; overrideOperator?: boolean; source?: string;
+    cwd?: string; reason: string; body?: string; title?: string; mergeFrom?: string; overrideOperator?: boolean; source?: string; scope?: string;
   }) => {
     const mergeFrom = options.mergeFrom?.split(',').map((s) => s.trim()).filter(Boolean);
     const result = runSupersede(id, {
@@ -136,6 +137,7 @@ program
       mergeFrom,
       overrideOperator: options.overrideOperator,
       source: options.source,
+      scope: options.scope,
     });
     console.log(result.message);
   });
@@ -167,8 +169,9 @@ program
   .option('--cwd <path>', 'project root')
   .option('--ttl <value>', 'duration before expiry (e.g. 7d, 48h, never) — default 7d')
   .option('--source <source>', 'observer identifier (defaults to "agent")')
-  .action((text: string, options: { cwd?: string; ttl?: string; source?: string }) => {
-    const result = runObserve({ cwd: options.cwd, text, ttl: options.ttl, source: options.source });
+  .option('--scope <name>', 'record scope; overrides the scope derived from cwd via config `scopes:` ("universal" = visible everywhere)')
+  .action((text: string, options: { cwd?: string; ttl?: string; source?: string; scope?: string }) => {
+    const result = runObserve({ cwd: options.cwd, text, ttl: options.ttl, source: options.source, scope: options.scope });
     console.log(result.message);
   });
 

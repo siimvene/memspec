@@ -265,9 +265,10 @@ interface SupersedeArgs {
   merge_from?: string[];
   override_operator?: boolean;
   source?: string;
+  scope?: string;
 }
 
-async function handleSupersede({ id, reason, title, body, merge_from, override_operator, source }: SupersedeArgs) {
+async function handleSupersede({ id, reason, title, body, merge_from, override_operator, source, scope }: SupersedeArgs) {
   try {
     const result = runSupersede(id, {
       cwd: defaultCwd,
@@ -277,6 +278,7 @@ async function handleSupersede({ id, reason, title, body, merge_from, override_o
       mergeFrom: merge_from,
       overrideOperator: override_operator,
       source,
+      scope,
     });
     return {
       content: [{ type: 'text' as const, text: result.message }],
@@ -303,6 +305,7 @@ server.tool(
     merge_from: z.array(z.string()).optional().describe('Additional memory ids to collapse into the survivor in a single atomic operation.'),
     override_operator: z.boolean().optional().describe('Required to supersede operator-sourced records; logged into the persisted reason.'),
     source: z.string().optional().describe('Who is performing the supersede'),
+    scope: z.string().optional().describe('Project scope for the surviving record, e.g. "kleidia"; "universal" marks it visible from every scope. Omit it and the survivor inherits the scope of the records it replaces (and stays unscoped when they disagree or carry none). State it explicitly when you are reclassifying the knowledge: this server may have been started with a working directory unrelated to that project, so nothing else here can infer the right answer.'),
   },
   handleSupersede,
 );
@@ -313,17 +316,19 @@ server.tool(
   {
     text: z.string().describe('Observation text. First line becomes the title; the full text is the body.'),
     ttl: z.string().optional().describe('Duration before the observation expires (e.g. "7d", "48h", "never"). Defaults to 7d.'),
+    scope: z.string().optional().describe('Project scope this observation belongs to, e.g. "kleidia". Only readers with that active scope will see it; "universal" marks it visible from every scope. State it explicitly whenever you know which project the moment belongs to: this server may have been started with a working directory unrelated to that project, and scope derived from the working directory would then be wrong. Omit it to fall back to working-directory derivation (and to writing no scope at all when nothing matches).'),
   },
-  async ({ text, ttl }) => {
+  async ({ text, ttl, scope }) => {
     try {
       const resolvedSource = server.server.getClientVersion()?.name ?? 'agent';
-      const result = runObserve({ cwd: defaultCwd, text, ttl, source: resolvedSource });
+      const result = runObserve({ cwd: defaultCwd, text, ttl, source: resolvedSource, scope });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
           id: result.id,
           expires: result.expires,
           source: resolvedSource,
+          scope: result.scope ?? null,
         },
       };
     } catch (err) {

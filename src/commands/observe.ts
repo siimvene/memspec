@@ -1,4 +1,7 @@
+import { resolve } from 'node:path';
 import { ulid } from 'ulid';
+import { loadConfig } from '../lib/config.js';
+import { assertKnownScope, resolveScopeForCwd } from '../lib/scope.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_OBSERVATION_TTL_DAYS } from '../lib/types.js';
 
@@ -17,6 +20,12 @@ export interface ObserveOptions {
    * "agent" and is not bucketed via the source_kind inference table.
    */
   source?: string;
+  /**
+   * Read-side partition for this observation. Overrides the scope derived from
+   * `cwd` via the store's `scopes:` config. Pass `universal` to classify it as
+   * visible everywhere; omit both and no `scope` field is written.
+   */
+  scope?: string;
 }
 
 export interface ObserveResult {
@@ -24,6 +33,8 @@ export interface ObserveResult {
   filePath: string;
   expires: string;
   message: string;
+  /** Scope stamped on the observation; absent when nothing matched and nothing was passed. */
+  scope?: string;
 }
 
 function parseTtlDays(input?: string): number | 'never' {
@@ -73,6 +84,14 @@ export function runObserve(options: ObserveOptions): ObserveResult {
   const store = new MemspecStore(options.cwd);
   store.init();
 
+  // Same derivation as `remember`: an observation captured while working on one
+  // project is that project's noise, and leaving it unscoped puts it in every
+  // other project's retrieval.
+  const config = loadConfig(store.root);
+  const scope = options.scope !== undefined
+    ? assertKnownScope(config.scopes, options.scope)
+    : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
+
   const ttlDays = parseTtlDays(options.ttl);
   const created = new Date();
   const expires = ttlDays === 'never'
@@ -99,6 +118,10 @@ export function runObserve(options: ObserveOptions): ObserveResult {
     body,
   };
 
+  if (scope) {
+    item.scope = scope;
+  }
+
   if (expires !== 'never') {
     item.expires = expires;
   }
@@ -109,6 +132,7 @@ export function runObserve(options: ObserveOptions): ObserveResult {
     id,
     filePath,
     expires,
+    scope,
     message: `Observed ${id} (expires ${expires === 'never' ? 'never' : expires.substring(0, 10)})\n${filePath}`,
   };
 }
