@@ -14,7 +14,11 @@ export async function makeTempProject(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'memspec-'));
 }
 
-export async function runCli(args: string[], cwd?: string): Promise<{ stdout: string; stderr: string }> {
+export async function runCli(
+  args: string[],
+  cwd?: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync(
     process.execPath,
     ['--import', 'tsx', join(REPO_ROOT, 'src/cli.ts'), ...args],
@@ -23,6 +27,9 @@ export async function runCli(args: string[], cwd?: string): Promise<{ stdout: st
       env: {
         ...process.env,
         TZ: 'UTC',
+        // Overrides land last so a test can redirect HOME — and with it the
+        // `--store global` target — away from the operator's real store.
+        ...env,
       },
     },
   );

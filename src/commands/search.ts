@@ -3,7 +3,7 @@ import { CompositeStore } from '../lib/composite-store.js';
 import { getProfile, loadConfig } from '../lib/config.js';
 import { EDGE_TYPES, expandGraph, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
-import { assertKnownScope, resolveScopeForCwd } from '../lib/scope.js';
+import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
 import { type StoreSearchOptions } from '../lib/store.js';
 import { MEMORY_TYPES, type LifecycleState, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits } from '../lib/usage.js';
@@ -262,7 +262,7 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   // Undefined (no config, or a cwd nothing claims) means no filtering — a
   // store without scoping behaves exactly as it did before scopes existed.
   const activeScope = options.scope !== undefined
-    ? assertKnownScope(config.scopes, options.scope)
+    ? assertKnownScope(config.scopes, options.scope, store.scopesInUse())
     : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
 
   const storeOptions: StoreSearchOptions = {
@@ -305,9 +305,25 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   let expansionRecordsById: Map<string, MemoryItem> | undefined;
   if (expandEdges && items.length > 0) {
     const activeItems = store.loadActive();
-    const recordsForWalk: MemoryItem[] = includeSuperseded
+    const walkPool: MemoryItem[] = includeSuperseded
       ? [...store.loadSuperseded(), ...activeItems]
       : activeItems;
+    // The seed pass is scope-filtered inside SQL; the expansion pass reads its
+    // own pool, so without this the filter is bypassed entirely — a hit in
+    // scope A follows a `refines` edge and returns a record from scope B.
+    //
+    // Out-of-scope records are a HARD WALL, not merely excluded from the
+    // results: they're removed from the pool, so the walker can neither
+    // surface them nor traverse THROUGH them. The alternative (traversable
+    // but unreturnable) leaks the foreign graph's shape — at depth 2-3 the
+    // neighbours of a record you're not allowed to see get pulled in, so the
+    // existence and connectivity of another project's knowledge is inferable
+    // from your own result set, and one project's edge edits silently change
+    // another's retrieval. The disconnection risk is bounded: unscoped and
+    // `universal` records stay visible from every scope, so the only paths
+    // this severs are ones that route through a genuinely foreign record —
+    // which is precisely the partition the feature exists to enforce.
+    const recordsForWalk = walkPool.filter((item) => isVisibleFromScope(item.scope, activeScope));
     expansionRecordsById = new Map(recordsForWalk.map((item) => [item.id, item]));
     const edgeTypes = options.edgeTypes && options.edgeTypes.length > 0
       ? options.edgeTypes

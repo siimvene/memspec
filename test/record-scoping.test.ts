@@ -4,9 +4,13 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ulid } from 'ulid';
 import { makeTempProject, runCli } from './helpers.js';
+import { runContext } from '../src/commands/context.js';
 import { searchPayload } from '../src/commands/search.js';
 import { runRemember } from '../src/commands/remember.js';
+import { parseScopesConfig } from '../src/lib/config.js';
+import { resolveScopeForCwd } from '../src/lib/scope.js';
 import { MemspecStore } from '../src/lib/store.js';
+import type { MemoryFrontmatter } from '../src/lib/types.js';
 
 /**
  * Record scoping — the read-side anti-pollination layer.
@@ -52,7 +56,13 @@ async function appendConfig(project: string, block: string): Promise<void> {
  * walk. Bulk seeding is the point: 60 records through `remember` means 60 FTS
  * rebuilds, and the duplicate inference would fight the fixture.
  */
-function seed(project: string, title: string, body: string, scope?: string): string {
+function seed(
+  project: string,
+  title: string,
+  body: string,
+  scope?: string,
+  extra: Partial<MemoryFrontmatter> = {},
+): string {
   const store = new MemspecStore(project);
   const id = `ms_${ulid()}`;
   store.writeItem({
@@ -65,6 +75,7 @@ function seed(project: string, title: string, body: string, scope?: string): str
     tags: [],
     check_by: 'never',
     ...(scope ? { scope } : {}),
+    ...extra,
     title,
     body,
   });
@@ -324,4 +335,223 @@ test('an FTS cache written before the scope column is rebuilt, not trusted', asy
 
   const payload = searchPayload('invalidation', { cwd: project, scope: 'kleidia' });
   assert.equal(payload.count, 1, 'an old-schema cache must be dropped and repopulated');
+});
+
+// --- graph expansion ---------------------------------------------------------
+
+/**
+ * The seed pass is filtered inside SQL, the expansion pass reads its own pool.
+ * Fixing one and not the other means the partition holds until someone passes
+ * expand_edges — at which point a single typed edge walks straight through it.
+ */
+test('graph expansion does not surface a record from another scope', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const betaId = seed(project, 'Beta payment reconciliation', 'Beta reconciles payments hourly.', 'beta');
+  seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha', { refines: [betaId] });
+
+  const payload = searchPayload('gateway', {
+    cwd: project,
+    scope: 'alpha',
+    expandEdges: true,
+  });
+
+  assert.equal(payload.count, 1, 'only the in-scope seed may be returned');
+  assert.ok(
+    !payload.results.some((r) => r.id === betaId),
+    'a refines edge must not carry a beta record into an alpha result set',
+  );
+});
+
+/**
+ * The traversal semantics this codebase chose: an out-of-scope record is a
+ * wall, not a stepping stone. Letting the walk pass through it would leak the
+ * shape of the foreign graph — the neighbours of a record you may not see
+ * would still arrive.
+ */
+test('an out-of-scope record blocks the path rather than acting as an invisible hop', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const farId = seed(project, 'Alpha settlement ledger', 'Settlement runs after cutoff.', 'alpha');
+  const betaId = seed(project, 'Beta payment reconciliation', 'Beta reconciles payments hourly.', 'beta', {
+    refines: [farId],
+  });
+  seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha', { refines: [betaId] });
+
+  const payload = searchPayload('gateway', {
+    cwd: project,
+    scope: 'alpha',
+    expandEdges: true,
+    expandDepth: 2,
+  });
+
+  assert.deepEqual(
+    payload.results.map((r) => r.title),
+    ['Alpha gateway routing'],
+    'neither the beta record nor anything reachable only through it may surface',
+  );
+  assert.ok(!payload.results.some((r) => r.id === farId));
+});
+
+test('expansion still crosses edges inside the active scope', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const siblingId = seed(project, 'Alpha settlement ledger', 'Settlement runs after cutoff.', 'alpha');
+  seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha', { refines: [siblingId] });
+
+  const payload = searchPayload('gateway', { cwd: project, scope: 'alpha', expandEdges: true });
+
+  assert.equal(payload.count, 2, 'the scope filter must not disconnect an in-scope subgraph');
+  const expanded = payload.results.find((r) => r.id === siblingId);
+  assert.equal(expanded?.expanded_via?.edge_type, 'refines');
+});
+
+test('expansion surfaces unscoped and universal neighbours from any scope', async () => {
+  const project = await makeScopedProject({ alpha: ['/nowhere/alpha'], beta: ['/nowhere/beta'] });
+  const legacyId = seed(project, 'Legacy settlement ledger', 'Written before scoping existed.');
+  const universalId = seed(project, 'Universal clock policy', 'Everything is UTC internally.', 'universal');
+  seed(project, 'Alpha gateway routing', 'The alpha gateway routes by tenant.', 'alpha', {
+    refines: [legacyId],
+    depends_on: [universalId],
+  });
+
+  const payload = searchPayload('gateway', { cwd: project, scope: 'alpha', expandEdges: true });
+  const ids = payload.results.map((r) => r.id);
+  assert.ok(ids.includes(legacyId), 'an unscoped record is visible from every scope, including via expansion');
+  assert.ok(ids.includes(universalId), 'a universal record is visible from every scope, including via expansion');
+});
+
+// --- store selection vs. working directory -----------------------------------
+
+test('writing to a store outside the project still derives the scope from cwd', async () => {
+  const globalStore = await makeTempProject();
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', globalStore, '--no-interactive', '--no-install-hooks']);
+  await appendConfig(globalStore, renderScopes({ kleidia: [project], plg: ['/nowhere/plg'] }));
+
+  const result = runRemember('fact', 'Refunds settle on the ledger', {
+    cwd: project,
+    storeRoot: globalStore,
+    body: 'Written to the global store while working on kleidia.',
+    source: 'test',
+  });
+
+  assert.equal(result.scope, 'kleidia', 'the store moved, the project did not');
+  assert.ok(result.filePath.startsWith(join(globalStore, '.memspec')), 'the record still belongs in the named store');
+  const written = await readFile(result.filePath, 'utf8');
+  assert.match(written, /^scope: kleidia$/m);
+});
+
+test('CLI --store global keeps the scope derived from the project cwd', async () => {
+  // HOME is redirected so `--store global` resolves to a throwaway store; the
+  // operator's real ~/.memspec is never touched.
+  const fakeHome = await makeTempProject();
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', fakeHome, '--no-interactive', '--no-install-hooks']);
+  await appendConfig(fakeHome, renderScopes({ kleidia: [project], plg: ['/nowhere/plg'] }));
+
+  const { stdout } = await runCli(
+    [
+      'remember', 'fact', 'Chief architect owns the rollout',
+      '--cwd', project, '--source', 'test', '--store', 'global',
+      '--body', 'Cross-project knowledge, still a kleidia claim.',
+    ],
+    undefined,
+    { HOME: fakeHome },
+  );
+
+  assert.match(stdout, /Scope: kleidia/, '--store global must not erase the scope stamp');
+  const filePath = /at (\S+\.md)/.exec(stdout)?.[1];
+  assert.ok(filePath?.startsWith(join(fakeHome, '.memspec')), `expected a write into the global store, got ${filePath}`);
+  const written = await readFile(filePath!, 'utf8');
+  assert.match(written, /^scope: kleidia$/m);
+});
+
+// --- unknown scope names -----------------------------------------------------
+
+/**
+ * The sequencing that makes this subtle: records are stamped with a scope
+ * before the `scopes:` block is written, so "not in config" cannot mean
+ * "unknown". Validating against the scopes actually present in the store is
+ * what turns a typo from quiet under-retrieval into an error.
+ */
+test('a typo is rejected against the scopes present in a store with no scopes: block', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  seed(project, 'Kleidia ledger note', 'The ledger reconciles nightly.', 'kleidia');
+  seed(project, 'Shared tooling note', 'The ledger is inspected with the same CLI.', 'universal');
+
+  const correct = searchPayload('ledger', { cwd: project, scope: 'kleidia' });
+  assert.equal(correct.count, 2, 'the real scope name still answers');
+
+  assert.throws(
+    () => searchPayload('ledger', { cwd: project, scope: 'kleida' }),
+    /unknown scope "kleida"/,
+    'a typo must not silently degrade to "unscoped and universal records only"',
+  );
+});
+
+test('any scope name is accepted while no scope exists anywhere yet', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  seed(project, 'Unscoped ledger note', 'The ledger reconciles nightly.');
+
+  // Nothing to validate against — no config, no stamped record. Rejecting here
+  // would make a fresh store unusable before its first scoped write.
+  const payload = searchPayload('ledger', { cwd: project, scope: 'kleidia' });
+  assert.equal(payload.count, 1);
+});
+
+// --- context (session priming) -----------------------------------------------
+
+test('context boot list is filtered to the active scope', async () => {
+  const project = await makeScopedProject({ kleidia: ['/nowhere/kleidia'], plg: ['/nowhere/plg'] });
+  seed(project, 'Ticketing checkout flow', 'Checkout is a three-step flow.', 'plg');
+  seed(project, 'Rendering surface adapter', 'The widget lives behind an adapter.', 'kleidia');
+  seed(project, 'Legacy unscoped note', 'Written before scoping existed.');
+
+  const output = runContext({ cwd: project, scope: 'kleidia' });
+  assert.match(output, /Rendering surface adapter/);
+  assert.match(output, /Legacy unscoped note/, 'unscoped records stay visible from every scope');
+  assert.doesNotMatch(output, /Ticketing checkout flow/, 'boot must not prime the session with another project');
+});
+
+test('context query path is filtered to the active scope', async () => {
+  const project = await makeScopedProject({ kleidia: ['/nowhere/kleidia'], plg: ['/nowhere/plg'] });
+  seed(project, 'Foreign deployment note', 'Deployment happens on Thursdays.', 'plg');
+  seed(project, 'Local deployment note', 'Deployment happens on Fridays.', 'kleidia');
+
+  const output = runContext({ cwd: project, scope: 'kleidia', query: 'deployment' });
+  assert.match(output, /Local deployment note/);
+  assert.doesNotMatch(output, /Foreign deployment note/);
+});
+
+test('context derives the active scope from cwd when none is passed', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  await appendConfig(project, renderScopes({ kleidia: [project], plg: ['/nowhere/plg'] }));
+
+  seed(project, 'Foreign deployment note', 'Deployment happens on Thursdays.', 'plg');
+  seed(project, 'Local deployment note', 'Deployment happens on Fridays.', 'kleidia');
+
+  const output = runContext({ cwd: project });
+  assert.match(output, /Local deployment note/);
+  assert.doesNotMatch(output, /Foreign deployment note/);
+});
+
+// --- prototype-polluting scope names -----------------------------------------
+
+/**
+ * `scopes['__proto__'] = [...]` on an object literal writes the prototype
+ * instead of creating an own property, so the scope disappears from every
+ * enumeration while still looking declared in config.yaml.
+ */
+test('a scope literally named __proto__ becomes an own key, not a prototype write', () => {
+  const raw: Record<string, unknown> = Object.create(null);
+  raw['__proto__'] = ['/nowhere/proto'];
+
+  const scopes = parseScopesConfig(raw, 'config.yaml');
+  assert.deepEqual(Object.keys(scopes ?? {}), ['__proto__']);
+  assert.equal(
+    resolveScopeForCwd(scopes, '/nowhere/proto/service'),
+    '__proto__',
+    'a scope that survives parsing must also claim its directories',
+  );
 });

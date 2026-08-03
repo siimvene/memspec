@@ -83,11 +83,12 @@ program
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
     refines?: string[]; supports?: string[]; dependsOn?: string[]; validFrom?: string; validTo?: string; scope?: string;
   }) => {
-    if (options.store === 'global') {
-      options.cwd = homedir();
-    }
     const result = runRemember(type, title, {
       cwd: options.cwd,
+      // `--store global` names a store, not a location. Overwriting `cwd` with
+      // the home directory would tell `remember` we stopped working on this
+      // project, and the record would land in the global store unscoped.
+      storeRoot: options.store === 'global' ? homedir() : undefined,
       body: options.body,
       source: options.source,
       tags: options.tags,
@@ -384,8 +385,9 @@ program
   .option('--type <type>', 'filter by memory type (fact | decision | procedure)')
   .option('--limit <n>', 'max items (hard cap 20)')
   .option('--budget <tokens>', 'token budget for markdown output (default 2000)')
+  .option('--scope <name>', 'active scope; overrides the scope derived from cwd via config `scopes:`')
   .action((options: {
-    cwd?: string; format?: string; query?: string; type?: string; limit?: string; budget?: string;
+    cwd?: string; format?: string; query?: string; type?: string; limit?: string; budget?: string; scope?: string;
   }) => {
     console.log(runContext(options));
   });

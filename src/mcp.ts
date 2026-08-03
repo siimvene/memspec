@@ -179,10 +179,13 @@ interface RememberArgs {
 
 async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on, valid_from, valid_to, scope }: RememberArgs) {
   try {
-    const cwd = storeName === 'global' ? homedir() : defaultCwd;
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
     const result = runRemember(type, title, {
-      cwd,
+      cwd: defaultCwd,
+      // `store: 'global'` picks a store; it does not relocate the session.
+      // Substituting the home directory for cwd would erase the scope this
+      // record derives from and write it visible from every project.
+      storeRoot: storeName === 'global' ? homedir() : undefined,
       body,
       source: resolvedSource,
       tags: tags?.join(','),

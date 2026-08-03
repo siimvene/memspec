@@ -23,6 +23,13 @@ export interface RememberOptions {
   /** File paths to anchor the claim to, resolved against the project root. */
   anchors?: string[];
   store?: string;
+  /**
+   * Directory the target store is resolved from, when it differs from `cwd`.
+   * `--store global` sets this to the home directory: it changes WHERE THE
+   * RECORD IS WRITTEN, not where the agent is working, so `cwd` must keep
+   * pointing at the project for scope derivation to stay correct.
+   */
+  storeRoot?: string;
   /** Operator-only (CLI flag, deliberately absent from the MCP surface): always surface in boot context. */
   pin?: boolean;
   /** v0.4 typed relations — ids this record refines/supports/depends-on (forms a typed edge to each target). */
@@ -163,8 +170,13 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   // Writes must name a target when more than one writable layer is in scope —
   // a silently-guessed store is how team knowledge leaks into the personal
   // store and vice versa.
-  const pointer = findPointer(options.cwd);
-  let storeCwd = options.cwd;
+  // Store selection reads `storeRoot` when the caller named a store that lives
+  // outside the project (`--store global`); everything downstream of the write
+  // target follows it. `options.cwd` is deliberately left alone — see the
+  // scope derivation below.
+  const storeSelectionCwd = options.storeRoot ?? options.cwd;
+  const pointer = findPointer(storeSelectionCwd);
+  let storeCwd = storeSelectionCwd;
   if (pointer) {
     const writable = pointer.stores.filter((s) => s.writable);
     let target = writable.length === 1 ? writable[0] : undefined;
@@ -195,8 +207,11 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const incomingSourceKind = inferSourceKind(source);
 
   // Scope derivation reads the WORKING directory, not the resolved store path:
-  // a pointer file can send the write to a store that lives somewhere else
-  // entirely, but the record still belongs to the project being worked on.
+  // a pointer file (or `--store global`) can send the write to a store that
+  // lives somewhere else entirely, but the record still belongs to the project
+  // being worked on. Routing the write to the global store and thereby
+  // stamping no scope is exactly how cross-project knowledge arrives
+  // unclassified and pollutes every other project's retrieval.
   // No explicit value and no matching pattern means no `scope` field at all —
   // absent and `universal` are different classifications, not synonyms.
   const scope = options.scope !== undefined

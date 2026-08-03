@@ -149,7 +149,11 @@ export function parseScopesConfig(raw: unknown, configPath: string): ScopesConfi
   const entries = Object.entries(raw as Record<string, unknown>);
   if (entries.length === 0) return undefined;
 
-  const scopes: ScopesConfig = {};
+  // Null-prototype: the keys are config-controlled, and `scopes['__proto__'] =
+  // [...]` on a normal object literal writes through to the prototype instead
+  // of creating an own property — the scope then vanishes from Object.keys and
+  // Object.entries, so it silently claims nothing while looking declared.
+  const scopes: ScopesConfig = Object.create(null) as ScopesConfig;
   for (const [name, patterns] of entries) {
     if (name.trim().length === 0 || /\s/.test(name)) {
       throw new MemspecConfigError(

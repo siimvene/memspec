@@ -255,6 +255,22 @@ export class MemspecStore {
     return this.loadAll().filter((item) => item.state === 'superseded');
   }
 
+  /**
+   * Distinct `scope` values stamped on active records. Feeds scope-name
+   * validation: records are stamped before the `scopes:` config block is
+   * written, so the config is not a complete inventory of the scopes that
+   * exist. Only consulted when an explicit scope isn't already declared in
+   * config, so the extra load stays off the common path.
+   */
+  scopesInUse(): string[] {
+    if (!this.exists) return [];
+    const seen = new Set<string>();
+    for (const item of this.loadActive()) {
+      if (item.scope) seen.add(item.scope);
+    }
+    return [...seen];
+  }
+
   findById(id: string): MemoryItem | null {
     return this.loadAll().find((item) => item.id === id) ?? null;
   }

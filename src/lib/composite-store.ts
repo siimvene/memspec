@@ -278,6 +278,20 @@ export class CompositeStore {
       .map((entry) => entry.item);
   }
 
+  /**
+   * Union of the scopes stamped on active records across every layer. A scope
+   * that only exists in the global layer is still a real scope from the
+   * project's point of view, so validation has to see all of them.
+   */
+  scopesInUse(): string[] {
+    const seen = new Set<string>();
+    for (const layer of this.layers) {
+      if (!layer.store.exists) continue;
+      for (const scope of layer.store.scopesInUse()) seen.add(scope);
+    }
+    return [...seen];
+  }
+
   /** Find by ID across all layers (highest priority first) */
   findById(id: string): MemoryItem | null {
     for (const layer of this.layers) {

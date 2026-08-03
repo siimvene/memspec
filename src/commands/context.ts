@@ -1,6 +1,8 @@
+import { resolve } from 'node:path';
 import { checkAnchors, getCodeAnchors, projectRootForStore } from '../lib/anchors.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { loadConfig } from '../lib/config.js';
+import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType } from '../lib/types.js';
 import { recentRetrievalCounts } from '../lib/usage.js';
@@ -12,6 +14,13 @@ export interface ContextOptions {
   limit?: string;
   budget?: string;
   format?: string;
+  /**
+   * Active scope for this boot list. Overrides the scope derived from `cwd`
+   * via the store's `scopes:` config. Same resolution `search` uses — this is
+   * the session-priming path, so an unfiltered one primes every session with
+   * every project.
+   */
+  scope?: string;
 }
 
 const DEFAULT_BUDGET_TOKENS = 2000;
@@ -318,6 +327,13 @@ export function runContext(options: ContextOptions): string {
   const retrievalCounts = recentRetrievalCounts(store.root, USAGE_WINDOW_DAYS);
   const config = loadConfig(store.root);
 
+  // Same resolution as `search`: stated by the caller, else derived from cwd.
+  // Undefined means no filtering, so a store without `scopes:` boots exactly
+  // as it did before scoping existed.
+  const activeScope = options.scope !== undefined
+    ? assertKnownScope(config.scopes, options.scope, store.scopesInUse())
+    : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
+
   let header: string;
   let sections: Sections;
   if (options.query) {
@@ -328,12 +344,16 @@ export function runContext(options: ContextOptions): string {
       limit,
       types: explicitType ? [explicitType] : undefined,
       minConfidence: 0,
+      scope: activeScope,
       ranking: profile?.ranking,
     });
     header = '## Active project memory';
     sections = budgetSections({ attention: [], pinned: [], main: results }, header, budget, limit, now);
   } else {
-    const active = store.loadActive();
+    // The boot list reads records directly rather than through FTS, so the
+    // scope predicate has to be applied here by hand — the SQL filter in
+    // `search` never sees this path.
+    const active = store.loadActive().filter((item) => isVisibleFromScope(item.scope, activeScope));
     const filtered = explicitType ? active.filter((item) => item.type === explicitType) : active;
 
     const attention = findNeedsAttention(

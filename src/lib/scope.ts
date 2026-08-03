@@ -40,19 +40,44 @@ export function resolveScopeForCwd(scopes: ScopesConfig | undefined, cwd: string
 }
 
 /**
- * Validate an explicitly-supplied scope name. A store with no `scopes:` block
- * accepts any name (records can be stamped before the config catches up), but
- * once scopes are declared an unknown name is a typo — and a typo'd scope
- * hides the record from every reader, so it fails loudly at write time.
+ * Validate an explicitly-supplied scope name.
+ *
+ * The config alone is not a complete list of the scopes that exist: records get
+ * stamped with a scope before the `scopes:` block catches up, so requiring a
+ * declared config would reject names that are demonstrably real. The name is
+ * therefore checked against the union of (declared scopes) + (scopes actually
+ * stamped on records) + `universal`.
+ *
+ * Why this has to be loud: a scope nothing matches doesn't return "no results",
+ * it returns "unscoped and universal records only". `--scope kleida` and
+ * `--scope kleidia` both answer, with different answers, and nothing says which
+ * one was the typo. Silent under-retrieval is the worst possible failure for a
+ * memory store — the caller concludes the knowledge isn't there.
+ *
+ * `scopesInUse` is only supplied on the READ path. Writes still validate
+ * against the config alone, because the first record of a brand-new scope has
+ * to be writable before anything is stamped with it — there is no way to tell
+ * "new scope" from "typo" at write time, and refusing both would make new
+ * scopes uncreatable on a store with no `scopes:` block.
  */
-export function assertKnownScope(scopes: ScopesConfig | undefined, name: string): string {
+export function assertKnownScope(
+  scopes: ScopesConfig | undefined,
+  name: string,
+  scopesInUse: readonly string[] = [],
+): string {
   const trimmed = name.trim();
   if (trimmed.length === 0) throw new Error('scope must be a non-empty name');
   if (trimmed === SCOPE_UNIVERSAL) return trimmed;
-  if (!scopes || Object.keys(scopes).length === 0) return trimmed;
-  if (!Object.prototype.hasOwnProperty.call(scopes, trimmed)) {
+
+  const known = new Set<string>([...Object.keys(scopes ?? {}), ...scopesInUse]);
+  // Nothing to validate against — no config, no stamped record. Every name is
+  // equally unknown and the filter is a no-op, so accepting keeps a fresh
+  // store usable instead of failing on its first scoped call.
+  if (known.size === 0) return trimmed;
+
+  if (!known.has(trimmed)) {
     throw new Error(
-      `unknown scope "${trimmed}" — configured scopes: ${Object.keys(scopes).join(', ')} (or "${SCOPE_UNIVERSAL}")`,
+      `unknown scope "${trimmed}" — known scopes: ${[...known].sort().join(', ')} (or "${SCOPE_UNIVERSAL}")`,
     );
   }
   return trimmed;
