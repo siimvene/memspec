@@ -265,6 +265,97 @@ test('reconcile --repair-renames leaves a content-changed move drifted', async (
   assert.equal(anchors[0].file, 'sub/old.py', 'content-changed move is not auto-repaired');
 });
 
+test('reconcile --repair-renames dry-run does not advance the checkpoint (S6)', async () => {
+  // Git-rooted store: projectRoot IS the repo, so the checkpoint logic engages.
+  const target = await makeGitProject();
+  await runCli(['init', '--cwd', target]);
+  await writeFile(join(target, 'mod.py'), 'byte-identical content\n');
+  await gitInTarget(target, ['add', '.']);
+  await gitInTarget(target, ['commit', '--quiet', '-m', 'initial']);
+
+  const id = await newFactId(target, 'Movable module');
+  await anchorFile(target, id, 'mod.py');
+
+  await rename(join(target, 'mod.py'), join(target, 'moved.py'));
+  await gitInTarget(target, ['add', '-A']);
+  await gitInTarget(target, ['commit', '--quiet', '-m', 'rename']);
+
+  // A dry-run repair must NOT write the checkpoint — otherwise the instructed
+  // --apply rerun would diff HEAD..HEAD and find nothing.
+  await assert.rejects(() => runCli(['reconcile', '--cwd', target, '--repair-renames']));
+  await assert.rejects(
+    () => access(join(target, '.memspec', '.reconcile.json')),
+    'dry-run repair must not create/advance the checkpoint',
+  );
+
+  // The apply rerun still sees the rename and re-points the anchor.
+  await assert.rejects(
+    () => runCli(['reconcile', '--cwd', target, '--repair-renames', '--apply']),
+    (error: Error & { stdout?: string }) => {
+      assert.match(error.stdout ?? '', /Rename repair \(APPLIED\)/);
+      assert.match(error.stdout ?? '', new RegExp(`${id}: mod\\.py → moved\\.py`));
+      return true;
+    },
+  );
+  const anchors = (await factData(target, id)).anchors as Array<{ file: string }>;
+  assert.equal(anchors[0].file, 'moved.py');
+});
+
+test('rename repair matches (repo, file), not filename alone (S7)', async () => {
+  const { createHash } = await import('node:crypto');
+  const blobSha = (content: string): string => {
+    const buf = Buffer.from(content);
+    return createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
+  };
+
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  // Two sibling repos, each with an identically-named, identically-content file.
+  const reposDir = join(target, 'repos');
+  const repoA = join(reposDir, 'repoA');
+  const repoB = join(reposDir, 'repoB');
+  const content = 'shared identical bytes\n';
+  for (const repo of [repoA, repoB]) {
+    await mkdir(repo, { recursive: true });
+    await gitInTarget(repo, ['init', '--quiet']);
+    await writeFile(join(repo, 'x.py'), content);
+    await gitInTarget(repo, ['add', '.']);
+    await gitInTarget(repo, ['commit', '--quiet', '-m', 'initial']);
+  }
+
+  // Config: find sibling repos under repos/.
+  await writeFile(join(target, '.memspec', 'config.yaml'),
+    `anchors:\n  repo_search_paths:\n    - ${reposDir}\n`);
+
+  // One record, two anchors sharing the filename x.py but in different repos.
+  const id = await newFactId(target, 'Two-repo record');
+  const sha = blobSha(content);
+  const recPath = join(target, '.memspec', 'memory', 'facts', `${id}.md`);
+  const rec = matter(await readFile(recPath, 'utf8'));
+  rec.data.anchors = [
+    { file: 'x.py', repo: 'repoA', sha },
+    { file: 'x.py', repo: 'repoB', sha },
+  ];
+  await writeFile(recPath, matter.stringify(rec.content, rec.data));
+
+  // Rename x.py in EACH repo to a different name.
+  await rename(join(repoA, 'x.py'), join(repoA, 'a.py'));
+  await gitInTarget(repoA, ['add', '-A']);
+  await gitInTarget(repoA, ['commit', '--quiet', '-m', 'rename A']);
+  await rename(join(repoB, 'x.py'), join(repoB, 'b.py'));
+  await gitInTarget(repoB, ['add', '-A']);
+  await gitInTarget(repoB, ['commit', '--quiet', '-m', 'rename B']);
+
+  await assert.rejects(() => runCli(['reconcile', '--cwd', target, '--repair-renames', '--apply']));
+
+  const anchors = (await factData(target, id)).anchors as Array<{ file: string; repo: string }>;
+  const a = anchors.find((x) => x.repo === 'repoA')!;
+  const b = anchors.find((x) => x.repo === 'repoB')!;
+  assert.equal(a.file, 'a.py', 'repoA anchor gets repoArename');
+  assert.equal(b.file, 'b.py', 'repoB anchor gets repoB rename — not cross-contaminated');
+});
+
 test('reconcile works without git history (drift scan only)', async () => {
   const target = await makeTempProject(); // no git init
   await runCli(['init', '--cwd', target]);

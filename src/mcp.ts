@@ -470,18 +470,17 @@ server.tool(
 
 server.tool(
   'memspec_unrelate',
-  'Remove a typed edge from one memory — the inverse of memspec_relate, and the only way to retract an edge (edges were append-only before v0.10, so a wrong conflicts_with was permanent). Edge types: refines | supports | depends_on | conflicts_with. Refuses on operator-sourced records unless override_operator is set. Every removal is logged durably into the record (who, when, why). Removing an edge that is not present is a reported no-op, not an error.',
+  'Remove a typed edge from one memory — the inverse of memspec_relate, and the only way to retract an edge (edges were append-only before v0.10, so a wrong conflicts_with was permanent). Edge types: refines | supports | depends_on | conflicts_with. Operator-sourced records are read-only over MCP: removing an edge from operator memory is refused here and must be done with `memspec unrelate --override-operator` at a terminal, where a human authorizes it. Every removal is logged durably into the record (who, when, why). Removing an edge that is not present is a reported no-op, not an error.',
   {
     from: z.string().describe('Memory id the edge originates from (the edge is removed from this record)'),
     to: z.string().describe('Memory id the edge points at'),
     type: relationTypeSchema.describe('Edge type to remove: refines | supports | depends_on | conflicts_with'),
     reason: z.string().describe('Why the edge is being removed. Persisted into ext.edge_removals on the record.'),
     source: z.string().optional().describe('Who is removing the edge'),
-    override_operator: z.boolean().optional().describe('Required to remove an edge from an operator-sourced record; logged into the persisted reason.'),
   },
-  async ({ from, to, type, reason, source, override_operator }) => {
+  async ({ from, to, type, reason, source }) => {
     try {
-      const result = runUnrelate({ cwd: defaultCwd, from, to, type, reason, source, overrideOperator: override_operator });
+      const result = runUnrelate({ cwd: defaultCwd, from, to, type, reason, source, channel: 'mcp' });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {

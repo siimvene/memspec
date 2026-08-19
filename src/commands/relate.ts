@@ -83,6 +83,25 @@ export function runRelate(options: RelateOptions): RelateResult {
   const to = store.findById(options.to);
   if (!to) throw new Error(`Memory not found: ${options.to}`);
 
+  // A record must not both conflict with and positively relate to the same
+  // target (S2a): that contradiction is exactly what let overlap-repair strand
+  // a deliberately-asserted conflict. Refuse before writing, both directions.
+  const POSITIVE_TYPES: RelationType[] = ['refines', 'supports', 'depends_on'];
+  if (type === 'conflicts_with') {
+    const positiveHit = POSITIVE_TYPES.find((t) => readEdges(from, t).includes(options.to));
+    if (positiveHit) {
+      throw new Error(
+        `relate refuses conflicts_with → ${options.to}: ${options.from} already declares a positive edge (${positiveHit}) to that target. ` +
+          `Declare one relationship, not both — remove the ${positiveHit} edge first if the conflict is correct.`,
+      );
+    }
+  } else if (readEdges(from, 'conflicts_with').includes(options.to)) {
+    throw new Error(
+      `relate refuses ${type} → ${options.to}: ${options.from} already declares conflicts_with that target. ` +
+        `Declare one relationship, not both — remove the conflict edge first (memspec unrelate) if the ${type} is correct.`,
+    );
+  }
+
   const existing = readEdges(from, type);
   const already = existing.includes(options.to);
   const next = already ? existing : [...existing, options.to];
@@ -137,8 +156,15 @@ export interface UnrelateOptions {
   /** Durable reason for the removal; logged into `ext.edge_removals`. Required. */
   reason: string;
   source?: string;
-  /** Required to remove an edge from an operator-sourced record. */
+  /** Required to remove an edge from an operator-sourced record. Honoured only on the CLI channel. */
   overrideOperator?: boolean;
+  /**
+   * Which surface invoked this (S5). `mcp` callers can never override operator
+   * protection — an autonomous agent self-authorizing to edit operator memory
+   * is not a real gate. The MCP tool omits the override parameter entirely and
+   * always sets this to `mcp`, so operator records refuse regardless of flags.
+   */
+  channel?: 'cli' | 'mcp';
 }
 
 export interface UnrelateResult {
@@ -172,11 +198,16 @@ export function runUnrelate(options: UnrelateOptions): UnrelateResult {
   const from = store.findById(options.from);
   if (!from) throw new Error(`Memory not found: ${options.from}`);
 
-  const overrideOperator = options.overrideOperator ?? false;
+  const viaMcp = options.channel === 'mcp';
+  // MCP can never override; the override flag is honoured only on the CLI.
+  const overrideOperator = !viaMcp && (options.overrideOperator ?? false);
   if (effectiveSourceKind(from) === 'operator' && !overrideOperator) {
     throw new Error(
-      `"${from.id}" is operator-sourced (source: ${from.source}). ` +
-      'Removing an edge from operator knowledge requires override_operator: true; use it only with explicit cause.',
+      viaMcp
+        ? `"${from.id}" is operator-sourced (source: ${from.source}). ` +
+            'Removing an edge from operator memory is not available over MCP; run `memspec unrelate --override-operator` from a terminal, where a human is present to authorize it.'
+        : `"${from.id}" is operator-sourced (source: ${from.source}). ` +
+            'Removing an edge from operator knowledge requires override_operator: true; use it only with explicit cause.',
     );
   }
 

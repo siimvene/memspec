@@ -241,7 +241,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // Widen the window by the caller's declared targets: they are excluded
     // from inference below, so without this a declared parent at rank 1 could
     // push a genuine conflict out of the candidate window entirely.
-    const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0);
+    // Caller-asserted conflicts_with targets count as declared too (M2): they
+    // are excluded from suggestions below, so widen the window by their count
+    // as well or a genuine different conflict could be pushed out of it.
+    const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0) + (options.conflictsWith?.length ?? 0);
     const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
 
     // High band — exact-title refusal. The v0.3 dedup-refusal promise lives
@@ -268,6 +271,9 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       ...(options.refines ?? []),
       ...(options.supports ?? []),
       ...(options.dependsOn ?? []),
+      // A target the caller is asserting a conflict with is already classified;
+      // re-suggesting it as a conflict is noise (M2).
+      ...(options.conflictsWith ?? []),
     ]);
 
     // Mid band — apply the lexical conflict-inference rule, but only SUGGEST

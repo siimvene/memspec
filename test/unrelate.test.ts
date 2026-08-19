@@ -148,3 +148,56 @@ test('relate stamps asserted provenance on conflicts_with edges', async () => {
   const ext = data.ext as Record<string, unknown>;
   assert.equal((ext.edge_sources as Record<string, string>)[b.id], 'asserted');
 });
+
+// --- S5: MCP can never override operator protection -------------------------
+
+test('unrelate over the MCP channel refuses operator records even with override (S5)', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  const op = runRemember('fact', 'Operator claim', { cwd: target, body: 'o', source: 'human:siim' });
+  const to = runRemember('fact', 'Other claim', { cwd: target, body: 't', source: 'agent-a' });
+  runRelate({ cwd: target, from: op.id, to: to.id, type: 'conflicts_with' });
+
+  // Even if a caller smuggles overrideOperator:true, the mcp channel refuses.
+  assert.throws(
+    () => runUnrelate({
+      cwd: target, from: op.id, to: to.id, type: 'conflicts_with',
+      reason: 'x', overrideOperator: true, channel: 'mcp',
+    }),
+    /not available over MCP/,
+  );
+
+  const data = await readData(target, 'operator/facts', op.id);
+  assert.deepEqual(data.conflicts_with, [to.id], 'operator edge untouched over MCP');
+});
+
+// --- S2a: relate refuses contradictory edges to the same target -------------
+
+test('relate refuses conflicts_with to a target already positively related', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  const a = runRemember('fact', 'A', { cwd: target, body: 'a', source: 'agent-a' });
+  const b = runRemember('fact', 'B', { cwd: target, body: 'b', source: 'agent-a' });
+  runRelate({ cwd: target, from: a.id, to: b.id, type: 'refines' });
+
+  assert.throws(
+    () => runRelate({ cwd: target, from: a.id, to: b.id, type: 'conflicts_with' }),
+    /already declares a positive edge \(refines\)/,
+  );
+});
+
+test('relate refuses a positive edge to a target already in conflicts_with', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  const a = runRemember('fact', 'A', { cwd: target, body: 'a', source: 'agent-a' });
+  const b = runRemember('fact', 'B', { cwd: target, body: 'b', source: 'agent-a' });
+  runRelate({ cwd: target, from: a.id, to: b.id, type: 'conflicts_with' });
+
+  assert.throws(
+    () => runRelate({ cwd: target, from: a.id, to: b.id, type: 'supports' }),
+    /already declares conflicts_with that target/,
+  );
+});

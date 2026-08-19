@@ -140,7 +140,9 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
   const candidates: ReconcileCandidate[] = [];
   const repairs: RenameRepair[] = [];
   // Grouped re-points to apply per item (an item can carry several anchors).
-  const repointsByItem = new Map<string, { item: MemoryItem; moves: Array<{ from: string; to: string }> }>();
+  // Anchor identity is (repo, file), not file alone (S7): two anchors can share
+  // a filename in different repos, and only the moved one may be rewritten.
+  const repointsByItem = new Map<string, { item: MemoryItem; moves: Array<{ fromFile: string; fromRepo?: string; to: string }> }>();
 
   for (const item of anchored) {
     const drifted = checkAnchors(projectRoot, getCodeAnchors(item), { repoSearchPaths })
@@ -162,12 +164,13 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
         // the claim, not something to silently paper over — leave it drifted.
         // Only top-level anchors are rewritable; a legacy ext.code_anchors entry
         // is left alone rather than reported as a repair we won't actually make.
-        const isTopLevel = (item.anchors ?? []).some((x) => x.file === a.file);
+        // Match on the exact (repo, file) entry, not file alone (S7).
+        const isTopLevel = (item.anchors ?? []).some((x) => x.file === a.file && x.repo === a.repo);
         if (options.repairRenames && isTopLevel && blobSha(newAbs) === a.sha) {
           repairs.push({ memory_id: item.id, from: a.file, to: displayNew, applied: options.apply === true });
           if (options.apply) {
             const bucket = repointsByItem.get(item.id) ?? { item, moves: [] };
-            bucket.moves.push({ from: a.file, to: displayNew });
+            bucket.moves.push({ fromFile: a.file, fromRepo: a.repo, to: displayNew });
             repointsByItem.set(item.id, bucket);
           }
         }
@@ -190,7 +193,7 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
   if (options.repairRenames && options.apply) {
     for (const { item, moves } of repointsByItem.values()) {
       const anchors = (item.anchors ?? []).map((anchor) => {
-        const move = moves.find((m) => m.from === anchor.file);
+        const move = moves.find((m) => m.fromFile === anchor.file && m.fromRepo === anchor.repo);
         return move ? { ...anchor, file: move.to } : anchor;
       });
       store.updateItem({ ...item, anchors });
@@ -200,8 +203,12 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
   const reconciledAt = new Date().toISOString();
 
   // Checkpoint: next reconcile without --since picks up from this HEAD. Only
-  // meaningful when the project itself is a git repo.
-  if (head && projectGitRoot) {
+  // meaningful when the project itself is a git repo. A repair DRY-RUN must NOT
+  // advance it (S6): otherwise the instructed `--apply` rerun resolves
+  // since=HEAD, diffs HEAD..HEAD, and finds nothing to repair. Only a real
+  // pass (plain reconcile, or repair --apply) moves the checkpoint.
+  const advanceCheckpoint = !(options.repairRenames && !options.apply);
+  if (head && projectGitRoot && advanceCheckpoint) {
     writeFileSync(
       join(store.root, CHECKPOINT_FILE),
       JSON.stringify({ head, reconciled_at: reconciledAt }, null, 2) + '\n',

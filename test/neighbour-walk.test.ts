@@ -349,6 +349,26 @@ test('remember --conflicts-with writes the edge and marks it asserted', async ()
     'the caller-asserted edge carries the asserted provenance mark');
 });
 
+test('remember --conflicts-with excludes the asserted target from suggestions (M2)', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  // A mid-band neighbour that WOULD be suggested, but the caller is already
+  // asserting the conflict — so it must not come back as a suggestion too.
+  const parent = runRemember('fact', 'Cache invalidation runs nightly globally', {
+    cwd: target, body: 'parent', source: 'agent-a', tags: 'cache',
+  });
+  const child = runRemember('fact', 'Cache invalidation runs hourly nightly globally', {
+    cwd: target, body: 'child', source: 'agent-b', tags: 'cache', conflictsWith: [parent.id],
+  });
+
+  const suggestsParent = (child.suggestedConflicts ?? []).some((s) => s.id === parent.id);
+  assert.equal(suggestsParent, false, 'an asserted conflict target is not re-suggested');
+
+  const data = await readFact(target, child.id);
+  assert.deepEqual(data.conflicts_with, [parent.id], 'the asserted edge is still written');
+});
+
 test('remember --conflicts-with rejects a non-existent target', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
