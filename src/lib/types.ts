@@ -23,9 +23,11 @@ export type SourceKind = typeof SOURCE_KINDS[number];
  * How the claim was last witnessed. Replaces confidence in v0.3 — the reader infers
  * the strongest available witness when the field is absent on legacy records.
  *
- * Strength order (descending): anchor > operator > evidence > assertion.
+ * Strength order (descending): anchor > probe > operator > evidence > assertion.
+ * `probe` is a mechanical witness like `anchor`: a stored command whose output
+ * hash is re-checked on demand (never on read — probes execute shell commands).
  */
-export const VERIFIED_WITH = ['anchor', 'operator', 'evidence', 'assertion'] as const;
+export const VERIFIED_WITH = ['anchor', 'probe', 'operator', 'evidence', 'assertion'] as const;
 export type VerifiedWith = typeof VERIFIED_WITH[number];
 
 export interface MemoryFrontmatter {
@@ -50,6 +52,7 @@ export interface MemoryFrontmatter {
   verified_with?: VerifiedWith; // how it was last witnessed
   pinned?: boolean; // operator-only; always surfaced in boot context
   anchors?: CodeAnchor[]; // promoted from ext.code_anchors in v0.3 — schema spine
+  probe?: ProbeWitness; // a shell command + output hash; re-run only on explicit `probe`/`verify` to detect drift
   supersedes?: string[]; // ids this record replaces (renamed from corrects; now array)
   superseded_by?: string; // id of the record that replaced this one (renamed from corrected_by)
   supersede_reason?: string; // durable reason — renamed from correction_reason
@@ -85,6 +88,18 @@ export interface CodeAnchor {
   file: string; // path relative to the project root (POSIX separators)
   sha: string;  // git blob SHA of file content at anchor time
   repo?: string; // when set, `file` lives in another repo checked out next to this project (or under a configured search path)
+}
+
+/**
+ * A probe links a memory to the output of a shell command instead of to a
+ * file's blob SHA. `hash` is the sha256 of the command's stdout when the probe
+ * was last baselined; a re-run whose stdout hashes differently marks the record
+ * drifted. Probes execute shell commands, so they are re-run ONLY on explicit
+ * invocation (`memspec probe`, `memspec verify`) — never on a read path.
+ */
+export interface ProbeWitness {
+  cmd: string;  // shell command executed from the project root
+  hash: string; // sha256 (hex) of the command's stdout at baseline time
 }
 
 export interface MemoryItem extends MemoryFrontmatter {

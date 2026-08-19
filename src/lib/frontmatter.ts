@@ -40,6 +40,7 @@ export function parseMemoryFile(content: string, filePath: string): MemoryItem {
     verified_with: data.verified_with,
     pinned: data.pinned,
     anchors: data.anchors,
+    probe: data.probe,
     supersedes: data.supersedes,
     superseded_by: data.superseded_by,
     supersede_reason: data.supersede_reason,
@@ -77,6 +78,7 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   if (item.verified_with) frontmatter.verified_with = item.verified_with;
   if (item.pinned) frontmatter.pinned = item.pinned;
   if (item.anchors && item.anchors.length > 0) frontmatter.anchors = item.anchors;
+  if (item.probe) frontmatter.probe = item.probe;
   if (item.supersedes && item.supersedes.length > 0) frontmatter.supersedes = item.supersedes;
   if (item.superseded_by) frontmatter.superseded_by = item.superseded_by;
   if (item.supersede_reason) frontmatter.supersede_reason = item.supersede_reason;

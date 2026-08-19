@@ -238,7 +238,7 @@ export function runStatus(options: StatusOptions): string {
 
   if (Object.keys(report.byWitness).length > 0) {
     lines.push('By witness (active):');
-    for (const witness of ['anchor', 'operator', 'evidence', 'assertion']) {
+    for (const witness of ['anchor', 'probe', 'operator', 'evidence', 'assertion']) {
       const count = report.byWitness[witness] ?? 0;
       if (count > 0) lines.push(`  ${witness.padEnd(12)} ${String(count).padStart(4)}`);
     }

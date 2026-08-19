@@ -116,7 +116,7 @@ field/state names into this v0.3+ shape before validation.
 
 ### `verified_with`
 
-- **Type:** enum: `anchor` \| `operator` \| `evidence` \| `assertion`
+- **Type:** enum: `anchor` \| `probe` \| `operator` \| `evidence` \| `assertion`
 - **Required:** no
 - **Description:** Witness class for the last verification, in descending strength: `anchor` > `operator` > `evidence` > `assertion`. Replaces the retired `confidence` field.
 
@@ -186,6 +186,12 @@ field/state names into this v0.3+ shape before validation.
 - **Required:** no
 - **Description:** Read-side partition matching a `scopes:` key in config.yaml. Absent means visible from every scope (the default for pre-scoping records); `universal` means explicitly visible everywhere; any other value restricts the record to that one active scope.
 
+### `probe`
+
+- **Type:** object { cmd, hash }
+- **Required:** no
+- **Description:** A shell command plus the sha256 of its baseline stdout; a re-run whose output hashes differently marks the record drifted. Re-run only on explicit `probe`/`verify` — never on a read path, because it executes a shell command.
+
 ## Supporting types
 
 ### `MemoryKind`
@@ -206,7 +212,7 @@ field/state names into this v0.3+ shape before validation.
 
 ### `VerifiedWith`
 
-`anchor` \| `operator` \| `evidence` \| `assertion`
+`anchor` \| `probe` \| `operator` \| `evidence` \| `assertion`
 
 ### `CodeAnchor`
 
