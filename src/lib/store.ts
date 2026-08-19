@@ -173,7 +173,14 @@ export class MemspecStore {
     ];
   }
 
-  loadAll(): MemoryItem[] {
+  /**
+   * Raw load — every record in every state, without the lazy stale
+   * projection. Feeds the mutation lookup (`findById`): commands that read a
+   * record, edit it, and write it back must not bake a computed `stale: true`
+   * onto disk as a side effect (`withLazyStale` is a read-time flag, not a
+   * stored one). `loadAll()` layers the projection on top for read consumers.
+   */
+  private loadAllRaw(): MemoryItem[] {
     const files = [
       ...walkMarkdownFiles(join(this.root, 'memory')),
       ...walkMarkdownFiles(join(this.root, 'observations')),
@@ -238,10 +245,18 @@ export class MemspecStore {
     return Array.from(byId.values());
   }
 
+  /**
+   * All records in all states, with the lazy stale flag applied at the store
+   * read path so every consumer (status, sweep, search) sees the current
+   * state without a separate decay run. Records past `check_by` read as
+   * `stale: true`; files are never mutated here.
+   */
+  loadAll(): MemoryItem[] {
+    return this.loadAllRaw().map(withLazyStale);
+  }
+
   loadActive(): MemoryItem[] {
-    return this.loadAll()
-      .filter((item) => item.state === 'active')
-      .map((item) => withLazyStale(item));
+    return this.loadAll().filter((item) => item.state === 'active');
   }
 
   /**
@@ -274,7 +289,11 @@ export class MemspecStore {
   }
 
   findById(id: string): MemoryItem | null {
-    return this.loadAll().find((item) => item.id === id) ?? null;
+    // Raw load on purpose: findById is the mutation lookup for verify /
+    // anchor / relate / supersede, which write the record back. A lazily
+    // computed `stale: true` must not persist as a side effect of an
+    // unrelated edit.
+    return this.loadAllRaw().find((item) => item.id === id) ?? null;
   }
 
   moveToArchive(item: MemoryItem, state: MemoryItem['state'] = 'retired'): void {

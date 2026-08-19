@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { makeTempProject, runCli } from './helpers.js';
+import { buildStatusReport } from '../src/commands/status.js';
 
 test('status shows empty store summary', async () => {
   const target = await makeTempProject();
@@ -62,4 +63,33 @@ Observed before promotion into active memory.
   const result = await runCli(['status', '--cwd', target]);
   assert.match(result.stdout, /active\s+1/);
   assert.match(result.stdout, /total\s+1/);
+});
+
+// Regression for ms_01KZFCDK4RZR1S7TKC1D5JSABQ: status called loadAll() which
+// did not apply the lazy stale projection, so `stale` and `sweepCandidates`
+// were structurally pinned at zero. Option 1 pushes withLazyStale into the
+// store read path.
+test('status reports records past check_by as stale and as sweep candidates', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  await runCli(['remember', 'fact', 'Overdue fact', '--cwd', target, '--source', 'test']);
+
+  // Push check_by into the past directly on disk, with no `stale` key — the
+  // exact on-disk shape the lazy projection is meant to flag.
+  const factsDir = join(target, '.memspec', 'memory', 'facts');
+  const [factFile] = await readdir(factsDir);
+  const factPath = join(factsDir, factFile);
+  const raw = await readFile(factPath, 'utf8');
+  const overdue = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  await writeFile(factPath, raw.replace(/^check_by:.*$/m, `check_by: '${overdue}'`));
+  assert.doesNotMatch(await readFile(factPath, 'utf8'), /^stale:/m, 'fixture must have no stored stale key');
+
+  const { report } = buildStatusReport({ cwd: target });
+  assert.equal(report.stale, 1, 'the overdue record must be counted stale');
+  assert.equal(report.sweepCandidates.length, 1, 'unanchored assertion-only stale record is a sweep candidate');
+  assert.equal(report.sweepCandidates[0].title, 'Overdue fact');
+
+  const result = await runCli(['status', '--cwd', target]);
+  assert.match(result.stdout, /1 active item\(s\) flagged stale/);
+  assert.match(result.stdout, /sweep candidate\(s\)/);
 });
