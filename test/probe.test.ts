@@ -53,40 +53,72 @@ test('probe re-run reports OK when output is unchanged and DRIFTED when it chang
   );
 });
 
-test('verify accepts a probe as the mechanical witness and refreshes with verified_with: probe', async () => {
+test('probe --set writes verified_with: probe — the entry point that actually ran the command', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
   const id = await addFact(target, 'Probed fact');
   await writeFile(join(target, 'services.txt'), 'a\nb\n');
   await runCli(['probe', id, '--cwd', target, '--set', 'grep -c . services.txt']);
 
-  // No --evidence, no anchors — the probe alone is the witness.
-  const res = await runCli(['verify', id, '--cwd', target]);
-  assert.match(res.stdout, /Verified/);
-  assert.match(res.stdout, /verified_with: probe/);
-
   const data = matter(await readFile(factPath(target, id), 'utf8')).data;
   assert.equal(data.verified_with, 'probe');
 });
 
-test('verify returns needs_review when the probe has drifted, leaving the memory untouched', async () => {
+test('verify never executes the probe and refuses an anchorless verify without evidence', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
-  const id = await addFact(target, 'Drifting probed fact');
-  await writeFile(join(target, 'services.txt'), 'a\nb\n');
-  await runCli(['probe', id, '--cwd', target, '--set', 'grep -c . services.txt']);
-  const before = await readFile(factPath(target, id), 'utf8');
+  const id = await addFact(target, 'Probed but unexercised fact');
+  await runCli(['probe', id, '--cwd', target, '--set', 'sh -c "echo v >> verify-ran.log; echo stable"']);
+  const logPath = join(target, 'verify-ran.log');
+  const runsAfterSet = (await readFile(logPath, 'utf8')).trim().split('\n').length;
 
-  await writeFile(join(target, 'services.txt'), 'a\nb\nc\n');
+  // Anchorless + no evidence: the unexercised probe is not a witness — refuse,
+  // pointing at `memspec probe`.
   await assert.rejects(
     () => runCli(['verify', id, '--cwd', target]),
-    (err: Error & { stdout?: string; code?: number }) => {
-      assert.match(err.stdout ?? '', /NEEDS REVIEW/);
-      assert.match(err.stdout ?? '', /probe drifted/);
+    (err: Error & { stderr?: string; stdout?: string }) => {
+      assert.match((err.stderr ?? '') + (err.stdout ?? ''), /exercise it with `memspec probe/);
       return true;
     },
   );
-  assert.equal(await readFile(factPath(target, id), 'utf8'), before, 'drifted verify must not mutate the file');
+
+  // With evidence the verify passes — as evidence, not as a probe witness, and
+  // still without running the command.
+  const res = await runCli(['verify', id, '--cwd', target, '--evidence', 'checked by hand']);
+  assert.match(res.stdout, /verified_with: evidence/);
+  assert.match(res.stdout, /probe present, not exercised/);
+
+  const runsAfterVerify = (await readFile(logPath, 'utf8')).trim().split('\n').length;
+  assert.equal(runsAfterVerify, runsAfterSet, 'verify must never execute a probe command');
+});
+
+test('a stored probe from synced content does not run until trusted on this machine', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await addFact(target, 'Synced probed fact');
+  await runCli(['probe', id, '--cwd', target, '--set', 'sh -c "echo x >> trust-ran.log; echo stable"']);
+  const logPath = join(target, 'trust-ran.log');
+  const runsAfterSet = (await readFile(logPath, 'utf8')).trim().split('\n').length;
+
+  // Simulate arrival on a fresh machine: the trustfile does not sync.
+  const trustfile = join(target, '.memspec', '.probe-trust.json');
+  assert.ok(existsSync(trustfile), '--set records trust in the machine-local trustfile');
+  await writeFile(trustfile, '{"trusted":[]}\n');
+
+  const untrusted = await runCli(['probe', id, '--cwd', target]).catch((err) => err);
+  assert.match(untrusted.stdout ?? '', /PROBE UNTRUSTED/);
+  const runsAfterUntrusted = (await readFile(logPath, 'utf8')).trim().split('\n').length;
+  assert.equal(runsAfterUntrusted, runsAfterSet, 'an untrusted stored command must not execute');
+
+  // Explicit --trust is the consent path: approves, then runs.
+  const trusted = await runCli(['probe', id, '--cwd', target, '--trust']);
+  assert.match(trusted.stdout, /PROBE OK/);
+  const runsAfterTrust = (await readFile(logPath, 'utf8')).trim().split('\n').length;
+  assert.equal(runsAfterTrust, runsAfterSet + 1);
+
+  // The trustfile must never sync: the store's .gitignore carries it.
+  const gitignore = await readFile(join(target, '.memspec', '.gitignore'), 'utf8');
+  assert.ok(gitignore.split('\n').some((l) => l.trim() === '.probe-trust.json'));
 });
 
 test('read paths (search / status / context) never execute the probe command', async () => {

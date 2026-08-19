@@ -91,3 +91,33 @@ test('repair removes conflicts_with entirely when the only entry was inferred', 
   assert.equal(after.conflicts_with, undefined, 'empty conflicts_with is removed, not left as []');
   assert.deepEqual(after.supports, [overlapTarget]);
 });
+
+test('repair skips operator-stated records and writes an undo journal on --apply', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const storeRoot = join(target, '.memspec');
+  const factsDir = join(storeRoot, 'memory', 'facts');
+  await mkdir(factsDir, { recursive: true });
+
+  const operatorPath = join(factsDir, 'ms_op000000000000000000000000.md');
+  await writeFile(operatorPath, matter.stringify('# Operator record', {
+    id: 'ms_op000000000000000000000000', kind: 'claim', type: 'fact', state: 'active',
+    created: '2026-08-01T00:00:00.000Z', source: 'siim, 2026-08-01 (direct)', tags: ['test'],
+    check_by: 'never', refines: ['ms_target'], conflicts_with: ['ms_target'],
+  }));
+  const agentPath = join(factsDir, 'ms_ag000000000000000000000000.md');
+  await writeFile(agentPath, corruptedRecord('ms_ag000000000000000000000000', 'ms_target', 'ms_other'));
+
+  const out = await runRepair(storeRoot, true);
+  assert.match(out, /operator-stated record\(s\) SKIPPED/);
+  assert.match(out, /undo journal written/);
+
+  const operatorAfter = matter(await readFile(operatorPath, 'utf8')).data;
+  assert.deepEqual(operatorAfter.conflicts_with, ['ms_target'], 'operator records are never rewritten');
+
+  const journalPath = out.match(/undo journal written: (.+)/)?.[1]?.trim();
+  assert.ok(journalPath, 'journal path is printed');
+  const journal = JSON.parse(await readFile(journalPath!, 'utf8'));
+  assert.equal(journal.dropped.length, 1);
+  assert.equal(journal.dropped[0].id, 'ms_ag000000000000000000000000');
+});

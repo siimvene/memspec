@@ -118,7 +118,7 @@ field/state names into this v0.3+ shape before validation.
 
 - **Type:** enum: `anchor` \| `probe` \| `operator` \| `evidence` \| `assertion`
 - **Required:** no
-- **Description:** Witness class for the last verification, in descending strength: `anchor` > `operator` > `evidence` > `assertion`. Replaces the retired `confidence` field.
+- **Description:** Witness class for the last verification, in descending strength: `anchor` > `probe` > `operator` > `evidence` > `assertion`. Replaces the retired `confidence` field. `probe` is written only by `memspec probe` itself (`--set` or a matching re-check) — the entry point that actually executed the command; `verify` never runs probes.
 
 ### `anchors`
 
@@ -190,7 +190,7 @@ field/state names into this v0.3+ shape before validation.
 
 - **Type:** object { cmd, hash }
 - **Required:** no
-- **Description:** A shell command plus the sha256 of its baseline stdout; a re-run whose output hashes differently marks the record drifted. Re-run only on explicit `probe`/`verify` — never on a read path, because it executes a shell command.
+- **Description:** A shell command plus the sha256 of its baseline stdout; a re-run whose output hashes differently marks the record drifted. Executes only via explicit `memspec probe`, gated by the machine-local trustfile (`.probe-trust.json`) — never on a read path and never inside `verify`, because record content is untrusted and the command shells out.
 
 ## Supporting types
 

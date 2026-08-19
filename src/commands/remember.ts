@@ -227,7 +227,11 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   try {
     // Scoped so a same-titled record in another project isn't treated as a
     // duplicate of this one. Unscoped and universal records stay visible.
-    const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT, scope });
+    // Widen the window by the caller's declared targets: they are excluded
+    // from inference below, so without this a declared parent at rank 1 could
+    // push a genuine conflict out of the candidate window entirely.
+    const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0);
+    const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
 
     // High band — exact-title refusal. The v0.3 dedup-refusal promise lives
     // here. Surfaces every same-type record that normalises to the same title.

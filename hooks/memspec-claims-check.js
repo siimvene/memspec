@@ -27,7 +27,7 @@ function readFileSafe(file) {
 
 function bunInstalled() {
   try {
-    const res = spawnSync('bun', ['--version'], { stdio: 'ignore' });
+    const res = spawnSync('bun', ['--version'], { stdio: 'ignore', timeout: 1500 });
     // ENOENT → not on PATH. Any spawn that resolved the binary counts as present.
     return !(res.error && res.error.code === 'ENOENT');
   } catch {

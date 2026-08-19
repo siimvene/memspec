@@ -16,6 +16,9 @@ import matter from 'gray-matter';
  */
 function withLazyStale(item: MemoryItem): MemoryItem {
   if (item.stale) return item;
+  // Only active claims age: a superseded/archived record is already resolved,
+  // flagging it stale would just re-surface settled history.
+  if (item.state !== 'active') return item;
   if (item.check_by === 'never' || !item.check_by) return item;
   if (item.kind === 'observation') return item;
   const expiry = Date.parse(item.check_by);

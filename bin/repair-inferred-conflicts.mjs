@@ -17,11 +17,30 @@
 // STORE_ROOT defaults to $MEMSPEC_ROOT or ./.memspec. A path whose basename is
 // not `.memspec` has `.memspec` appended (matching MemspecStore resolution).
 
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import matter from 'gray-matter';
 
 const POSITIVE_EDGES = ['refines', 'supports', 'depends_on'];
+
+// Operator-stated records are protected: no provenance metadata distinguishes
+// an inferred conflict from a deliberately declared one, and on operator
+// memory that ambiguity is not ours to resolve — skip and report instead.
+// Mirrors effectiveSourceKind in src/lib: explicit source_kind wins, else the
+// source string decides.
+function isOperatorRecord(data) {
+  if (data.source_kind === 'operator') return true;
+  const source = typeof data.source === 'string' ? data.source.toLowerCase() : '';
+  return /\b(siim|user|operator)\b/.test(source);
+}
+
+// Atomic write: temp file in the same directory, then rename. An interrupted
+// run leaves either the old file or the new one, never a truncated record.
+function writeFileAtomic(file, content) {
+  const tmp = `${file}.repair-tmp-${process.pid}`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, file);
+}
 
 function parseArgs(argv) {
   let apply = false;
@@ -82,6 +101,7 @@ function main() {
   ];
 
   const repaired = [];
+  const skippedOperator = [];
   for (const file of files) {
     let parsed;
     try {
@@ -97,13 +117,18 @@ function main() {
     const dropped = conflicts.filter((id) => positive.has(id));
     if (dropped.length === 0) continue;
 
+    if (isOperatorRecord(data)) {
+      skippedOperator.push({ file, id: data.id ?? '(no id)', dropped });
+      continue;
+    }
+
     const kept = conflicts.filter((id) => !positive.has(id));
     repaired.push({ file, id: data.id ?? '(no id)', dropped, kept });
 
     if (apply) {
       if (kept.length > 0) data.conflicts_with = kept;
       else delete data.conflicts_with;
-      writeFileSync(file, matter.stringify(parsed.content, data));
+      writeFileAtomic(file, matter.stringify(parsed.content, data));
     }
   }
 
@@ -115,6 +140,16 @@ function main() {
     console.log(`  ${r.id}: drop conflicts_with ${r.dropped.join(', ')}${r.kept.length ? ` (keep ${r.kept.join(', ')})` : ''}`);
   }
   if (repaired.length > 20) console.log(`  ... and ${repaired.length - 20} more`);
+  if (skippedOperator.length > 0) {
+    console.log(`[repair] ${skippedOperator.length} operator-stated record(s) SKIPPED (review by hand — inferred vs declared is not distinguishable):`);
+    for (const r of skippedOperator) console.log(`  ${r.id}: conflicts_with ${r.dropped.join(', ')} also on a positive edge`);
+  }
+  if (apply && repaired.length > 0) {
+    // Undo journal: everything dropped, in restorable form, next to the store.
+    const journal = join(storeRoot, `repair-inferred-conflicts.${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+    writeFileSync(journal, JSON.stringify({ applied_at: new Date().toISOString(), dropped: repaired }, null, 2) + '\n');
+    console.log(`[repair] undo journal written: ${journal}`);
+  }
   if (!apply && repaired.length > 0) {
     console.log('[repair] re-run with --apply to drop the inferred conflicts.');
   }
