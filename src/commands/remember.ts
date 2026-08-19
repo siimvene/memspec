@@ -36,6 +36,13 @@ export interface RememberOptions {
   refines?: string[];
   supports?: string[];
   dependsOn?: string[];
+  /**
+   * v0.10 — ids this record explicitly CONFLICTS WITH. Caller-asserted, unlike
+   * the removed mid-band auto-attach: each target is validated to exist and
+   * marked `ext.edge_sources[target] = "asserted"` so future tooling (the
+   * drain script) can tell a deliberate conflict from a heuristic one.
+   */
+  conflictsWith?: string[];
   /** v0.5 Phase 2 — ISO 8601 timestamp at which the world-state truth becomes valid. Orthogonal to check_by. */
   validFrom?: string;
   /** v0.5 Phase 2 — ISO 8601 timestamp at which the world-state truth ceases to hold. Orthogonal to check_by. */
@@ -55,15 +62,18 @@ export interface DuplicateMatch {
 }
 
 /**
- * v0.4 Phase 5 — when a mid-band neighbour is found at write time we commit
- * the record and attach a suggested edge. Surfaced so callers can keep,
- * remove, or ignore the inference.
+ * v0.10 — a mid-band neighbour the lexical inference rule matched. Surfaced as
+ * a SUGGESTION only: `remember` never writes the edge. The caller decides
+ * whether the records genuinely conflict and, if so, wires it via `relate`
+ * (or asserts it at write time via `--conflicts-with`). Replaces the removed
+ * auto-attach, which stamped `conflicts_with` on records that merely shared a
+ * topic (measured 8/8 wrong on real attachments).
  */
-export interface AutoAttachedEdge {
-  type: 'conflicts_with';
-  target_id: string;
-  target_title: string;
-  reason: 'mid-band similarity inference';
+export interface SuggestedConflict {
+  id: string;
+  title: string;
+  /** One-line lexical rationale, e.g. "same fact; shared tag(s): cache; 3 title-token overlap". */
+  rationale: string;
 }
 
 export interface RememberResult {
@@ -74,7 +84,8 @@ export interface RememberResult {
   anchors: CodeAnchor[];
   anchorWarnings: string[];
   duplicates?: DuplicateMatch[];
-  autoAttached?: AutoAttachedEdge;
+  /** Lexical conflict candidates for the caller to act on via `relate`; never auto-written. */
+  suggestedConflicts?: SuggestedConflict[];
   /** Scope stamped on the record; absent when nothing matched and nothing was passed. */
   scope?: string;
 }
@@ -223,7 +234,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   // funnel and apply the (deterministic, explainable) lexical predicates
   // from inference.ts to decide refusal vs. auto-attach.
   let duplicates: DuplicateMatch[] | undefined;
-  let autoAttached: AutoAttachedEdge | undefined;
+  let suggestedConflicts: SuggestedConflict[] | undefined;
   try {
     // Scoped so a same-titled record in another project isn't treated as a
     // duplicate of this one. Unscoped and universal records stay visible.
@@ -259,30 +270,34 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       ...(options.dependsOn ?? []),
     ]);
 
-    // Mid band — apply the v0.3 conflict-inference rule to find a single
-    // closest neighbour, then auto-attach a suggested `conflicts_with`
-    // edge. Operator-tier candidates are exempt from agent-tier auto-attach
-    // (would amount to silent annotation of operator memory).
+    // Mid band — apply the lexical conflict-inference rule, but only SUGGEST
+    // the matches. The rule is purely lexical (same type, one shared tag, two
+    // shared title tokens) and stamps conflicts on records that merely discuss
+    // the same topic, so an auto-written edge is wrong far more often than
+    // right. The caller acts on the suggestions via `relate` / `--conflicts-with`.
+    // Agent writers are not offered operator-tier candidates: nudging an agent
+    // to wire a conflict onto operator memory is the same overreach the old
+    // auto-attach committed, minus the silence.
+    const writerIsAgent = incomingSourceKind === 'agent';
     const ruleMatches = candidates.filter((item) =>
       !callerDeclared.has(item.id) &&
+      !(writerIsAgent && effectiveSourceKind(item) === 'operator') &&
       item.type !== undefined && matchesConflictInferenceRule(type, title, tags, item.type, item.title, item.tags),
     );
 
     if (ruleMatches.length > 0) {
       const ranked = rankByLexicalCloseness(title, tags, ruleMatches);
-      const closest = ranked[0];
-      const candidateIsOperator = effectiveSourceKind(closest.item) === 'operator';
-      const writerIsAgent = incomingSourceKind === 'agent';
-      if (!(candidateIsOperator && writerIsAgent)) {
-        autoAttached = {
-          type: 'conflicts_with',
-          target_id: closest.item.id,
-          target_title: closest.item.title,
-          reason: 'mid-band similarity inference',
+      const tagSet = new Set(tags);
+      suggestedConflicts = ranked.map(({ item, tokenOverlap }) => {
+        const sharedTags = item.tags.filter((t) => tagSet.has(t));
+        return {
+          id: item.id,
+          title: item.title,
+          rationale: `same ${type}; shared tag(s): ${sharedTags.join(', ')}; ${tokenOverlap} title-token overlap`,
         };
-      }
-      // Either way, surface the candidates so the caller can see what
-      // matched — preserves the v0.3 "potential duplicates" hint.
+      });
+      // Surface the same candidates as the "potential duplicates" hint too —
+      // high title overlap is often a near-duplicate, a supersede candidate.
       duplicates = ranked.map(({ item }) => ({
         id: item.id,
         title: item.title,
@@ -389,11 +404,32 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   if (validFrom) itemData.valid_from = validFrom;
   if (validTo) itemData.valid_to = validTo;
 
-  // Phase 5 — mid-band auto-attach is recorded as a `conflicts_with` edge
-  // on the new record. Single edge max; operator-tier protection already
-  // applied above when computing autoAttached.
-  if (autoAttached) {
-    itemData.conflicts_with = [autoAttached.target_id];
+  // v0.10 — caller-asserted conflict edges. Unlike the removed auto-attach,
+  // these come from an explicit `--conflicts-with`, so they are validated to
+  // exist and marked as `asserted` in `ext.edge_sources` (see types.ts). A
+  // target already classified with a positive edge is a contradiction the
+  // caller must resolve, not something we silently reconcile.
+  const assertedConflicts = dedupe(options.conflictsWith);
+  if (assertedConflicts) {
+    const positiveTargets = new Set<string>([
+      ...(options.refines ?? []),
+      ...(options.supports ?? []),
+      ...(options.dependsOn ?? []),
+    ]);
+    for (const targetId of assertedConflicts) {
+      if (positiveTargets.has(targetId)) {
+        throw new Error(
+          `--conflicts-with ${targetId} contradicts a positive edge (refines/supports/depends_on) to the same target; declare one relationship, not both.`,
+        );
+      }
+      if (!store.findById(targetId)) {
+        throw new Error(`--conflicts-with target not found: ${targetId}`);
+      }
+    }
+    itemData.conflicts_with = assertedConflicts;
+    const edgeSources: Record<string, string> = {};
+    for (const targetId of assertedConflicts) edgeSources[targetId] = 'asserted';
+    itemData.ext = { ...(itemData.ext ?? {}), edge_sources: edgeSources };
   }
 
   const filePath = store.writeItem(itemData);
@@ -411,11 +447,16 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   for (const w of anchorResolution.warnings) {
     lines.push(`⚠ ${w}`);
   }
-  if (autoAttached) {
+  if (assertedConflicts) {
+    lines.push(`Asserted conflicts_with: ${assertedConflicts.join(', ')}`);
+  }
+  if (suggestedConflicts && suggestedConflicts.length > 0) {
     lines.push(
-      `⚠ Auto-attached conflicts_with → ${autoAttached.target_id} ("${autoAttached.target_title}") ` +
-        `from mid-band similarity inference. Remove via supersede or edit if incorrect.`,
+      `Suggested conflicts (not written — wire with \`memspec relate --type conflicts_with\` if they genuinely contradict this):`,
     );
+    for (const s of suggestedConflicts) {
+      lines.push(`  ${s.id} "${s.title}" — ${s.rationale}`);
+    }
   }
 
   return {
@@ -426,7 +467,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     anchors: anchorResolution.anchors,
     anchorWarnings: anchorResolution.warnings,
     duplicates: duplicates && duplicates.length > 0 ? duplicates : undefined,
-    autoAttached,
+    suggestedConflicts: suggestedConflicts && suggestedConflicts.length > 0 ? suggestedConflicts : undefined,
     scope,
   };
 }

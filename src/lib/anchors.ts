@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { CodeAnchor, MemoryItem } from './types.js';
@@ -84,6 +84,48 @@ function resolveRepoRoot(projectRoot: string, repo: string, searchPaths: string[
     }
   }
   return null;
+}
+
+/**
+ * Walk up from `startDir` looking for a `.git` (dir or file — worktrees use a
+ * file). Returns the first ancestor that has one, or null. Tolerates a missing
+ * `startDir` (a renamed-away file's directory): `existsSync` on a non-existent
+ * path is simply false, so the walk continues up to real ancestors.
+ */
+export function findRepoRoot(startDir: string): string | null {
+  let dir = resolve(startDir);
+  for (;;) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * Resolve an anchor to the git repo that actually contains it, plus the file's
+ * path relative to THAT repo root. For a home-rooted store `projectRoot` is the
+ * home directory (not a repo), so rename detection must run inside each anchor's
+ * own repo — `git/kvart/src/x.ts` lives in the `~/git/kvart` repo, not in `~`.
+ * A cross-repo anchor (`anchor.repo` set) resolves via the sibling/search-path
+ * lookup; a plain anchor walks up from its file to the nearest `.git`.
+ * Returns null when no enclosing repo is found (nothing to reconcile against).
+ */
+export function resolveAnchorRepo(
+  projectRoot: string,
+  anchor: CodeAnchor,
+  options: AnchorCheckOptions = {},
+): { repoRoot: string; relPath: string } | null {
+  let base = projectRoot;
+  if (anchor.repo) {
+    const repoRoot = resolveRepoRoot(projectRoot, anchor.repo, options.repoSearchPaths ?? []);
+    if (!repoRoot) return null;
+    base = repoRoot;
+  }
+  const absFile = resolve(base, anchor.file);
+  const repoRoot = findRepoRoot(dirname(absFile));
+  if (!repoRoot) return null;
+  return { repoRoot, relPath: relative(repoRoot, absFile).split(sep).join('/') };
 }
 
 /** Compare each anchor's recorded SHA against the file's current content. */

@@ -11,11 +11,23 @@
 // the SQLite index is disposable, so a rewrite is safe; the FTS cache rebuilds
 // on next read.
 //
+// Two modes:
+//   (default)          drop conflicts_with ids that overlap a positive edge
+//                      (refines/supports/depends_on) on the SAME record.
+//   --drain-inferred   drop ALL conflicts_with edges on non-operator records
+//                      EXCEPT those marked asserted in ext.edge_sources. Before
+//                      v0.10 there was no way to ASSERT a conflict, so every
+//                      conflicts_with an agent wrote was heuristic by
+//                      construction — this drains that legacy backlog while
+//                      sparing edges deliberately wired via relate /
+//                      `remember --conflicts-with` (which carry the mark).
+//
 // Usage:
-//   node bin/repair-inferred-conflicts.mjs [STORE_ROOT] [--apply]
+//   node bin/repair-inferred-conflicts.mjs [STORE_ROOT] [--drain-inferred] [--apply]
 //
 // STORE_ROOT defaults to $MEMSPEC_ROOT or ./.memspec. A path whose basename is
 // not `.memspec` has `.memspec` appended (matching MemspecStore resolution).
+// Dry-run by default in both modes; --apply rewrites files (atomic, journaled).
 
 import { readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
@@ -44,13 +56,24 @@ function writeFileAtomic(file, content) {
 
 function parseArgs(argv) {
   let apply = false;
+  let drainInferred = false;
   let root;
   for (const arg of argv) {
     if (arg === '--apply') apply = true;
+    else if (arg === '--drain-inferred') drainInferred = true;
     else if (arg === '--help' || arg === '-h') { root = '--help'; }
     else if (!arg.startsWith('-')) root = arg;
   }
-  return { apply, root };
+  return { apply, drainInferred, root };
+}
+
+/** True when ext.edge_sources marks this conflict target as a deliberate assertion. */
+function isAssertedConflict(data, targetId) {
+  const ext = data.ext;
+  if (!ext || typeof ext !== 'object') return false;
+  const sources = ext.edge_sources;
+  if (!sources || typeof sources !== 'object') return false;
+  return sources[targetId] === 'asserted';
 }
 
 function resolveStoreRoot(input) {
@@ -81,10 +104,30 @@ function asIdArray(value) {
   return [];
 }
 
+// Decide which conflicts_with ids to drop from a record, per mode. Returns
+// { dropped, kept } (both arrays of id strings).
+function planDrop(data, drainInferred) {
+  const conflicts = asIdArray(data.conflicts_with);
+  if (conflicts.length === 0) return { dropped: [], kept: conflicts };
+
+  if (drainInferred) {
+    // Drain every conflict edge that isn't an explicit assertion.
+    const dropped = conflicts.filter((id) => !isAssertedConflict(data, id));
+    const kept = conflicts.filter((id) => isAssertedConflict(data, id));
+    return { dropped, kept };
+  }
+
+  // Overlap mode: drop conflicts that also appear on a positive edge.
+  const positive = new Set(POSITIVE_EDGES.flatMap((edge) => asIdArray(data[edge])));
+  const dropped = conflicts.filter((id) => positive.has(id));
+  const kept = conflicts.filter((id) => !positive.has(id));
+  return { dropped, kept };
+}
+
 function main() {
-  const { apply, root } = parseArgs(process.argv.slice(2));
+  const { apply, drainInferred, root } = parseArgs(process.argv.slice(2));
   if (root === '--help') {
-    console.log('Usage: node bin/repair-inferred-conflicts.mjs [STORE_ROOT] [--apply]');
+    console.log('Usage: node bin/repair-inferred-conflicts.mjs [STORE_ROOT] [--drain-inferred] [--apply]');
     return;
   }
 
@@ -100,6 +143,7 @@ function main() {
     ...walkMarkdown(join(storeRoot, 'archive')),
   ];
 
+  const label = drainInferred ? 'drain-inferred' : 'overlap-repair';
   const repaired = [];
   const skippedOperator = [];
   for (const file of files) {
@@ -110,11 +154,7 @@ function main() {
       continue; // non-memspec or unparseable markdown — skip
     }
     const data = parsed.data;
-    const conflicts = asIdArray(data.conflicts_with);
-    if (conflicts.length === 0) continue;
-
-    const positive = new Set(POSITIVE_EDGES.flatMap((edge) => asIdArray(data[edge])));
-    const dropped = conflicts.filter((id) => positive.has(id));
+    const { dropped, kept } = planDrop(data, drainInferred);
     if (dropped.length === 0) continue;
 
     if (isOperatorRecord(data)) {
@@ -122,7 +162,6 @@ function main() {
       continue;
     }
 
-    const kept = conflicts.filter((id) => !positive.has(id));
     repaired.push({ file, id: data.id ?? '(no id)', dropped, kept });
 
     if (apply) {
@@ -133,25 +172,30 @@ function main() {
   }
 
   const mode = apply ? 'APPLIED' : 'DRY-RUN';
-  console.log(`[repair] ${mode} — store ${storeRoot}`);
-  console.log(`[repair] scanned ${files.length} record file(s)`);
-  console.log(`[repair] ${repaired.length} record(s) carry a target in both conflicts_with and a positive edge`);
+  console.log(`[repair:${label}] ${mode} — store ${storeRoot}`);
+  console.log(`[repair:${label}] scanned ${files.length} record file(s)`);
+  const summary = drainInferred
+    ? `${repaired.length} non-operator record(s) carry heuristic (non-asserted) conflicts_with edges`
+    : `${repaired.length} record(s) carry a target in both conflicts_with and a positive edge`;
+  console.log(`[repair:${label}] ${summary}`);
+  const droppedEdgeCount = repaired.reduce((n, r) => n + r.dropped.length, 0);
+  console.log(`[repair:${label}] ${droppedEdgeCount} conflicts_with edge(s) would be dropped`);
   for (const r of repaired.slice(0, 20)) {
     console.log(`  ${r.id}: drop conflicts_with ${r.dropped.join(', ')}${r.kept.length ? ` (keep ${r.kept.join(', ')})` : ''}`);
   }
   if (repaired.length > 20) console.log(`  ... and ${repaired.length - 20} more`);
   if (skippedOperator.length > 0) {
-    console.log(`[repair] ${skippedOperator.length} operator-stated record(s) SKIPPED (review by hand — inferred vs declared is not distinguishable):`);
-    for (const r of skippedOperator) console.log(`  ${r.id}: conflicts_with ${r.dropped.join(', ')} also on a positive edge`);
+    console.log(`[repair:${label}] ${skippedOperator.length} operator-stated record(s) SKIPPED (review by hand — inferred vs declared is not distinguishable):`);
+    for (const r of skippedOperator) console.log(`  ${r.id}: conflicts_with ${r.dropped.join(', ')}`);
   }
   if (apply && repaired.length > 0) {
     // Undo journal: everything dropped, in restorable form, next to the store.
     const journal = join(storeRoot, `repair-inferred-conflicts.${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-    writeFileSync(journal, JSON.stringify({ applied_at: new Date().toISOString(), dropped: repaired }, null, 2) + '\n');
-    console.log(`[repair] undo journal written: ${journal}`);
+    writeFileSync(journal, JSON.stringify({ mode: label, applied_at: new Date().toISOString(), dropped: repaired }, null, 2) + '\n');
+    console.log(`[repair:${label}] undo journal written: ${journal}`);
   }
   if (!apply && repaired.length > 0) {
-    console.log('[repair] re-run with --apply to drop the inferred conflicts.');
+    console.log(`[repair:${label}] re-run with --apply to drop these conflicts.`);
   }
 }
 

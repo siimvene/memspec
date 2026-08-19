@@ -151,9 +151,9 @@ test('remember refusal is case-insensitive and whitespace-tolerant', async () =>
   );
 });
 
-// --- 5.2 mid band attaches ---------------------------------------------------
+// --- 5.2 mid band SUGGESTS, never writes -------------------------------------
 
-test('remember commits a mid-band record and auto-attaches conflicts_with to the closest neighbour', async () => {
+test('remember suggests a mid-band conflict but writes no conflicts_with edge', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
@@ -171,28 +171,26 @@ test('remember commits a mid-band record and auto-attaches conflicts_with to the
     tags: 'cache',
   });
 
-  assert.ok(child.autoAttached, 'mid-band write should produce an autoAttached descriptor');
-  assert.equal(child.autoAttached!.type, 'conflicts_with');
-  assert.equal(child.autoAttached!.target_id, parent.id);
-  assert.equal(child.autoAttached!.reason, 'mid-band similarity inference');
+  assert.ok(child.suggestedConflicts, 'mid-band write should produce suggestions');
+  assert.ok(child.suggestedConflicts!.some((s) => s.id === parent.id),
+    'the closest neighbour is surfaced as a suggestion');
+  const suggestion = child.suggestedConflicts!.find((s) => s.id === parent.id)!;
+  assert.equal(suggestion.title, 'Cache invalidation runs nightly globally');
+  assert.match(suggestion.rationale, /shared tag\(s\): cache/);
 
+  // The whole point: nothing is written on EITHER record.
   const data = await readFact(target, child.id);
-  assert.deepEqual(data.conflicts_with, [parent.id]);
-
+  assert.equal(data.conflicts_with, undefined, 'suggestion-only: no conflicts_with on the new record');
   const parentData = await readFact(target, parent.id);
-  assert.equal(parentData.conflicts_with, undefined,
-    'mid-band auto-attach writes the edge into the new record only');
+  assert.equal(parentData.conflicts_with, undefined, 'suggestion-only: no conflicts_with on the neighbour');
 });
 
-// --- 5.3 mid band picks the highest-scoring neighbour ------------------------
+// --- 5.3 suggestions are ranked, highest-overlap first -----------------------
 
-test('remember picks the single highest-scoring mid-band candidate when several match', async () => {
+test('remember ranks mid-band suggestions by lexical closeness', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
-  // Two distinct neighbours, both rule-eligible. The first overlaps on fewer
-  // tokens; the second overlaps on more. Phase 5 must attach to the latter
-  // and only the latter — single edge per write.
   const distant = runRemember('fact', 'Telemetry pipeline buffers events offline', {
     cwd: target, body: 'distant', source: 'agent-a', tags: 'telemetry',
   });
@@ -204,18 +202,19 @@ test('remember picks the single highest-scoring mid-band candidate when several 
     cwd: target, body: 'child', source: 'agent-b', tags: 'telemetry',
   });
 
-  assert.ok(child.autoAttached);
-  assert.equal(child.autoAttached!.target_id, closer.id,
-    'expected the higher-token-overlap candidate to win');
-  assert.notEqual(child.autoAttached!.target_id, distant.id);
+  assert.ok(child.suggestedConflicts && child.suggestedConflicts.length >= 1);
+  assert.equal(child.suggestedConflicts![0].id, closer.id,
+    'the higher-token-overlap candidate ranks first');
+  assert.ok(child.suggestedConflicts!.some((s) => s.id === distant.id),
+    'the weaker candidate is still surfaced, just lower');
 
   const data = await readFact(target, child.id);
-  assert.deepEqual(data.conflicts_with, [closer.id], 'single edge max per write');
+  assert.equal(data.conflicts_with, undefined, 'suggestions never write an edge');
 });
 
 // --- 5.4 low band is clean ---------------------------------------------------
 
-test('remember writes cleanly with no auto-attach when no shared tags / no token overlap exist', async () => {
+test('remember writes cleanly with no suggestions when no shared tags / no token overlap exist', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
@@ -227,7 +226,7 @@ test('remember writes cleanly with no auto-attach when no shared tags / no token
     cwd: target, body: 'b', source: 'agent-b', tags: 'frontend',
   });
 
-  assert.equal(result.autoAttached, undefined, 'low-band write must not auto-attach');
+  assert.equal(result.suggestedConflicts, undefined, 'low-band write must not suggest');
 
   const data = await readFact(target, result.id);
   assert.equal(data.conflicts_with, undefined, 'low-band write keeps conflicts_with absent');
@@ -235,7 +234,7 @@ test('remember writes cleanly with no auto-attach when no shared tags / no token
 
 // --- 5.5 operator-tier protection from agent writes --------------------------
 
-test('agent writes do not auto-attach to operator-tier candidates', async () => {
+test('agent writes are not offered operator-tier candidates as suggestions', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
@@ -250,10 +249,9 @@ test('agent writes do not auto-attach to operator-tier candidates', async () => 
     cwd: target, body: 'agent note', source: 'claude-code', tags: 'db',
   });
 
-  assert.equal(result.autoAttached, undefined,
-    'agent writes must not silently annotate operator memory with auto-attached edges');
+  assert.equal(result.suggestedConflicts, undefined,
+    'agent writes must not be nudged to wire conflicts onto operator memory');
 
-  // The record still commits cleanly.
   const factsDir = join(target, '.memspec', 'memory', 'facts');
   const agentEntries = await readdir(factsDir);
   assert.equal(agentEntries.length, 1, 'agent record committed');
@@ -261,7 +259,7 @@ test('agent writes do not auto-attach to operator-tier candidates', async () => 
   assert.equal(data.conflicts_with, undefined);
 });
 
-test('operator writes may still auto-attach to operator candidates', async () => {
+test('operator writes may still be offered operator candidates as suggestions', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
@@ -273,18 +271,16 @@ test('operator writes may still auto-attach to operator candidates', async () =>
     cwd: target, body: 'second', source: 'human:siim', tags: 'db',
   });
 
-  assert.ok(second.autoAttached, 'operator-to-operator mid-band should still auto-attach');
-  assert.equal(second.autoAttached!.target_id, seed.id);
+  assert.ok(second.suggestedConflicts, 'operator-to-operator mid-band should still suggest');
+  assert.ok(second.suggestedConflicts!.some((s) => s.id === seed.id));
 });
 
-// --- 5.7 caller-declared positive edges suppress the false conflict ----------
-// Regression for ms_01KZJXHBZT6YXY9P500JFCE4SX: the similarity auto-attacher
-// stamped conflicts_with onto a target the caller had already classified with
-// an explicit positive edge, producing logically impossible edge pairs on
-// ~25% of conflict-bearing records.
+// --- 5.7 caller-declared positive edges suppress the suggestion --------------
+// A target the caller has already classified with a positive edge must not be
+// suggested as a conflict — that is the contradiction the old auto-attach made.
 
 for (const edge of ['refines', 'supports', 'dependsOn'] as const) {
-  test(`remember does not auto-attach conflicts_with to a target declared via ${edge}`, async () => {
+  test(`remember does not suggest a conflict to a target declared via ${edge}`, async () => {
     const target = await makeTempProject();
     await runCli(['init', '--cwd', target]);
 
@@ -292,22 +288,20 @@ for (const edge of ['refines', 'supports', 'dependsOn'] as const) {
       cwd: target, body: 'parent', source: 'agent-a', tags: 'cache',
     });
 
-    // A mid-band write that WOULD auto-attach conflicts_with to the parent,
-    // except the caller explicitly linked the parent via a positive edge.
     const child = runRemember('fact', 'Cache invalidation runs hourly nightly globally', {
       cwd: target, body: 'child', source: 'agent-b', tags: 'cache', [edge]: [parent.id],
     });
 
-    assert.equal(child.autoAttached, undefined,
-      'a caller-declared positive edge must suppress the inferred conflict to that same target');
+    const suggestsParent = (child.suggestedConflicts ?? []).some((s) => s.id === parent.id);
+    assert.equal(suggestsParent, false,
+      'a caller-declared positive edge suppresses the conflict suggestion to that same target');
 
     const data = await readFact(target, child.id);
-    assert.equal(data.conflicts_with, undefined,
-      'the new record must not carry conflicts_with pointing at its own declared parent');
+    assert.equal(data.conflicts_with, undefined);
   });
 }
 
-test('remember still auto-attaches to an undeclared neighbour when another is caller-declared', async () => {
+test('remember still suggests an undeclared neighbour when another is caller-declared', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
@@ -318,25 +312,75 @@ test('remember still auto-attaches to an undeclared neighbour when another is ca
     cwd: target, body: 'undeclared', source: 'agent-a', tags: 'cache',
   });
 
-  // Mid-band against both, but only `declared` is linked via refines. The
-  // guard drops the declared target from the candidate pool without disabling
-  // the inference for the genuinely-unrelated neighbour.
   const child = runRemember('fact', 'Cache invalidation runs nightly hourly', {
     cwd: target, body: 'child', source: 'agent-b', tags: 'cache', refines: [declared.id],
   });
 
-  assert.ok(child.autoAttached, 'inference should still fire against the undeclared neighbour');
-  assert.equal(child.autoAttached!.target_id, undeclared.id);
-  assert.notEqual(child.autoAttached!.target_id, declared.id);
+  const suggested = child.suggestedConflicts ?? [];
+  assert.ok(suggested.some((s) => s.id === undeclared.id),
+    'inference should still surface the undeclared neighbour');
+  assert.ok(!suggested.some((s) => s.id === declared.id),
+    'the declared target stays out of the suggestions');
 
   const data = await readFact(target, child.id);
-  assert.deepEqual(data.conflicts_with, [undeclared.id]);
+  assert.equal(data.conflicts_with, undefined);
   assert.deepEqual(data.refines, [declared.id]);
+});
+
+// --- 5.8 caller-asserted conflicts_with (--conflicts-with) -------------------
+
+test('remember --conflicts-with writes the edge and marks it asserted', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  const other = runRemember('fact', 'Sessions expire after 24 hours', {
+    cwd: target, body: 'a', source: 'agent-a', tags: 'auth',
+  });
+
+  const child = runRemember('fact', 'Sessions expire after 1 hour', {
+    cwd: target, body: 'b', source: 'agent-b', tags: 'auth', conflictsWith: [other.id],
+  });
+
+  const data = await readFact(target, child.id);
+  assert.deepEqual(data.conflicts_with, [other.id], 'asserted edge is written');
+  const ext = data.ext as Record<string, unknown> | undefined;
+  assert.ok(ext && typeof ext.edge_sources === 'object', 'ext.edge_sources present');
+  assert.equal((ext!.edge_sources as Record<string, string>)[other.id], 'asserted',
+    'the caller-asserted edge carries the asserted provenance mark');
+});
+
+test('remember --conflicts-with rejects a non-existent target', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  assert.throws(
+    () => runRemember('fact', 'Some claim', {
+      cwd: target, body: 'b', source: 'agent-b', conflictsWith: ['ms_00000000000000000000000000'],
+    }),
+    /--conflicts-with target not found/,
+  );
+});
+
+test('remember --conflicts-with refuses a target also declared via a positive edge', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  const parent = runRemember('fact', 'Base claim about caching', {
+    cwd: target, body: 'a', source: 'agent-a', tags: 'cache',
+  });
+
+  assert.throws(
+    () => runRemember('fact', 'Derived claim about caching', {
+      cwd: target, body: 'b', source: 'agent-b', tags: 'cache',
+      refines: [parent.id], conflictsWith: [parent.id],
+    }),
+    /contradicts a positive edge/,
+  );
 });
 
 // --- 5.6 MCP tool response shape --------------------------------------------
 
-test('memspec_remember MCP response includes auto_attached when mid-band fires', async () => {
+test('memspec_remember MCP response surfaces suggested_conflicts, never writes an edge', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
@@ -348,7 +392,7 @@ test('memspec_remember MCP response includes auto_attached when mid-band fires',
   try {
     await session.init();
 
-    // Mid-band call — should write and surface auto_attached.
+    // Mid-band call — should write the record but only SUGGEST the conflict.
     const midCall = await session.request('tools/call', {
       name: 'memspec_remember',
       arguments: {
@@ -361,14 +405,16 @@ test('memspec_remember MCP response includes auto_attached when mid-band fires',
     });
     assert.equal(midCall.error, undefined);
     const midResult = midCall.result as { structuredContent: Record<string, unknown> };
-    const attached = midResult.structuredContent.auto_attached as Array<Record<string, unknown>> | undefined;
-    assert.ok(Array.isArray(attached), 'auto_attached should be present as array');
-    assert.equal(attached!.length, 1);
-    assert.equal(attached![0].type, 'conflicts_with');
-    assert.equal(attached![0].target_id, seed.id);
-    assert.equal(attached![0].reason, 'mid-band similarity inference');
+    const suggested = midResult.structuredContent.suggested_conflicts as Array<Record<string, unknown>> | undefined;
+    assert.ok(Array.isArray(suggested), 'suggested_conflicts should be present as array');
+    assert.ok(suggested!.some((s) => s.id === seed.id));
+    assert.equal(midResult.structuredContent.auto_attached, undefined, 'auto_attached is gone in v0.10');
 
-    // Low-band call — auto_attached must be absent (not present as empty array).
+    const newId = midResult.structuredContent.id as string;
+    const data = await readFact(target, newId);
+    assert.equal(data.conflicts_with, undefined, 'MCP mid-band write must not persist an edge');
+
+    // Low-band call — suggested_conflicts must be absent.
     const lowCall = await session.request('tools/call', {
       name: 'memspec_remember',
       arguments: {
@@ -381,8 +427,8 @@ test('memspec_remember MCP response includes auto_attached when mid-band fires',
     });
     assert.equal(lowCall.error, undefined);
     const lowResult = lowCall.result as { structuredContent: Record<string, unknown> };
-    assert.equal(lowResult.structuredContent.auto_attached, undefined,
-      'low-band write must omit auto_attached entirely');
+    assert.equal(lowResult.structuredContent.suggested_conflicts, undefined,
+      'low-band write must omit suggested_conflicts entirely');
   } finally {
     await session.close();
   }

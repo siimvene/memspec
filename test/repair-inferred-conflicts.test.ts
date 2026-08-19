@@ -16,6 +16,12 @@ async function runRepair(storeRoot: string, apply = false): Promise<string> {
   return stdout;
 }
 
+async function runDrain(storeRoot: string, apply = false): Promise<string> {
+  const args = [SCRIPT, storeRoot, '--drain-inferred', ...(apply ? ['--apply'] : [])];
+  const { stdout } = await execFileAsync(process.execPath, args, { cwd: REPO_ROOT });
+  return stdout;
+}
+
 // A record carrying the same target in BOTH conflicts_with and a positive edge
 // is the corruption signature from ms_01KZJXHBZT6YXY9P500JFCE4SX.
 function corruptedRecord(id: string, overlapTarget: string, legitConflict: string): string {
@@ -120,4 +126,66 @@ test('repair skips operator-stated records and writes an undo journal on --apply
   const journal = JSON.parse(await readFile(journalPath!, 'utf8'));
   assert.equal(journal.dropped.length, 1);
   assert.equal(journal.dropped[0].id, 'ms_ag000000000000000000000000');
+});
+
+// --- --drain-inferred mode ---------------------------------------------------
+
+test('drain-inferred drops heuristic conflicts on agent records but keeps asserted ones', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const storeRoot = join(target, '.memspec');
+  const factsDir = join(storeRoot, 'memory', 'facts');
+  await mkdir(factsDir, { recursive: true });
+
+  const heuristic = 'ms_01KZ00000000000000000HEURI';
+  const asserted = 'ms_01KZ0000000000000000ASSERT';
+  const recordId = 'ms_01KZ000000000000000000DRAIN';
+  const recordPath = join(factsDir, `${recordId}.md`);
+  await writeFile(recordPath, matter.stringify('# Agent record', {
+    id: recordId, kind: 'claim', type: 'fact', state: 'active',
+    created: '2026-08-01T00:00:00.000Z', source: 'agent', tags: ['test'],
+    check_by: 'never',
+    conflicts_with: [heuristic, asserted],
+    // Only `asserted` carries the deliberate mark; `heuristic` is legacy backlog.
+    ext: { edge_sources: { [asserted]: 'asserted' } },
+  }));
+
+  const dry = await runDrain(storeRoot, false);
+  assert.match(dry, /drain-inferred/);
+  assert.match(dry, /DRY-RUN/);
+  assert.match(dry, /1 conflicts_with edge\(s\) would be dropped/);
+  // Dry run leaves the file untouched.
+  const afterDry = matter(await readFile(recordPath, 'utf8')).data;
+  assert.deepEqual(afterDry.conflicts_with, [heuristic, asserted]);
+
+  const applied = await runDrain(storeRoot, true);
+  assert.match(applied, /APPLIED/);
+  const afterApply = matter(await readFile(recordPath, 'utf8')).data;
+  assert.deepEqual(afterApply.conflicts_with, [asserted], 'asserted edge survives, heuristic dropped');
+
+  // Idempotent — a second drain finds nothing left to drop.
+  const second = await runDrain(storeRoot, false);
+  assert.match(second, /0 conflicts_with edge\(s\) would be dropped/);
+});
+
+test('drain-inferred skips operator records and reports them', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const storeRoot = join(target, '.memspec');
+  const factsDir = join(storeRoot, 'memory', 'facts');
+  await mkdir(factsDir, { recursive: true });
+
+  const opPath = join(factsDir, 'ms_op000000000000000000000DRN.md');
+  await writeFile(opPath, matter.stringify('# Operator record', {
+    id: 'ms_op000000000000000000000DRN', kind: 'claim', type: 'fact', state: 'active',
+    created: '2026-08-01T00:00:00.000Z', source: 'siim (direct)', tags: ['test'],
+    check_by: 'never', conflicts_with: ['ms_whatever00000000000000000'],
+  }));
+
+  const out = await runDrain(storeRoot, true);
+  assert.match(out, /operator-stated record\(s\) SKIPPED/);
+
+  const after = matter(await readFile(opPath, 'utf8')).data;
+  assert.deepEqual(after.conflicts_with, ['ms_whatever00000000000000000'],
+    'operator conflicts are never drained');
 });

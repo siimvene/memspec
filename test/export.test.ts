@@ -232,12 +232,12 @@ test('operator-tier records are included in the export', async () => {
   assert.equal(agNode!.source_kind, 'agent');
 });
 
-// --- Phase 5 auto-attached conflicts_with edges surface --------------------
+// --- caller-asserted conflicts_with edges surface in export -----------------
 
-test('auto-attached conflicts_with edges from Phase 5 inference show up in export', async () => {
+test('caller-asserted conflicts_with edges show up in export', async () => {
   const target = await makeProject();
-  // Two same-type, same-tag records with strongly overlapping titles trigger
-  // the mid-band auto-attach. Use a body so the records aren't trivially empty.
+  // v0.10: mid-band inference is suggestion-only, so a conflict edge only
+  // exists once a caller asserts it — here via `remember --conflicts-with`.
   const first = runRemember('fact', 'Auth tokens rotate every 24 hours', {
     cwd: target,
     body: 'Currently configured TTL is one day',
@@ -249,16 +249,8 @@ test('auto-attached conflicts_with edges from Phase 5 inference show up in expor
     body: 'Currently configured TTL is twelve hours',
     source: 'agent-x',
     tags: 'auth,security',
+    conflictsWith: [first.id],
   });
-
-  // Only continue if Phase 5 actually attached an edge — otherwise this test
-  // is a no-op rather than a false failure (e.g. if the mid-band heuristic
-  // changes thresholds). We assert the export reflects whatever was attached.
-  if (!second.autoAttached) {
-    return;
-  }
-  assert.equal(second.autoAttached.type, 'conflicts_with');
-  assert.equal(second.autoAttached.target_id, first.id);
 
   const out = runExport({ cwd: target, format: 'jsonl' });
   const lines = out.trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);

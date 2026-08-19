@@ -8,7 +8,7 @@ import { runObserve } from './commands/observe.js';
 import { runProbe } from './commands/probe.js';
 import { EXPORT_FORMATS, parseTypesArg, runExport, type ExportFormat } from './commands/export.js';
 import { runReconcile } from './commands/reconcile.js';
-import { runRelate, RELATION_TYPES, type RelationType } from './commands/relate.js';
+import { runRelate, runUnrelate, RELATION_TYPES, type RelationType } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
 import { runInit } from './commands/init.js';
 import { runMigrate } from './commands/migrate.js';
@@ -30,7 +30,7 @@ const program = new Command();
 program
   .name('memspec')
   .description('Structured memory for AI agents')
-  .version('0.9.0')
+  .version('0.10.0')
   .showHelpAfterError();
 
 program
@@ -78,11 +78,12 @@ program
   .option('--refines <id...>', 'memory id this record refines/elaborates on (parent stays valid; repeatable)')
   .option('--supports <id...>', 'memory id this record provides evidence for (repeatable)')
   .option('--depends-on <id...>', 'memory id this record presupposes (knowledge or chronological dependency; repeatable)')
+  .option('--conflicts-with <id...>', 'memory id this record explicitly contradicts (caller-asserted; marked asserted in ext.edge_sources; repeatable)')
   .option('--valid-from <iso>', 'ISO 8601 timestamp — world-state truth window starts at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .option('--valid-to <iso>', 'ISO 8601 timestamp — world-state truth window ends at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .action((type: string, title: string, options: {
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
-    refines?: string[]; supports?: string[]; dependsOn?: string[]; validFrom?: string; validTo?: string; scope?: string;
+    refines?: string[]; supports?: string[]; dependsOn?: string[]; conflictsWith?: string[]; validFrom?: string; validTo?: string; scope?: string;
   }) => {
     const result = runRemember(type, title, {
       cwd: options.cwd,
@@ -100,6 +101,7 @@ program
       refines: options.refines,
       supports: options.supports,
       dependsOn: options.dependsOn,
+      conflictsWith: options.conflictsWith,
       validFrom: options.validFrom,
       validTo: options.validTo,
       scope: options.scope,
@@ -159,6 +161,32 @@ program
       from: options.from,
       to: options.to,
       type: options.type as RelationType,
+    });
+    console.log(result.message);
+  });
+
+program
+  .command('unrelate')
+  .description('Remove a typed edge from one memory (refines | supports | depends_on | conflicts_with); the inverse of relate')
+  .requiredOption('--from <id>', 'memory id the edge originates from (the edge is removed from this record)')
+  .requiredOption('--to <id>', 'memory id the edge points at')
+  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | conflicts_with')
+  .requiredOption('--reason <text>', 'why the edge is being removed (logged durably into the record)')
+  .option('--cwd <path>', 'project root')
+  .option('--source <source>', 'who is removing the edge')
+  .option('--override-operator', 'required to remove an edge from an operator-sourced record; logged into the reason')
+  .action((options: { cwd?: string; from: string; to: string; type: string; reason: string; source?: string; overrideOperator?: boolean }) => {
+    if (!(RELATION_TYPES as readonly string[]).includes(options.type)) {
+      throw new Error(`--type must be one of: ${RELATION_TYPES.join(' | ')} (got "${options.type}")`);
+    }
+    const result = runUnrelate({
+      cwd: options.cwd,
+      from: options.from,
+      to: options.to,
+      type: options.type as RelationType,
+      reason: options.reason,
+      source: options.source,
+      overrideOperator: options.overrideOperator,
     });
     console.log(result.message);
   });
@@ -343,7 +371,9 @@ program
   .option('--cwd <path>', 'project root')
   .option('--since <ref>', 'git ref to diff from (default: last reconcile checkpoint, fallback HEAD~10)')
   .option('--json', 'output as JSON')
-  .action((options: { cwd?: string; since?: string; json?: boolean }) => {
+  .option('--repair-renames', 're-point anchors whose file moved with identical content (dry-run unless --apply)')
+  .option('--apply', 'with --repair-renames, write the re-points instead of listing them')
+  .action((options: { cwd?: string; since?: string; json?: boolean; repairRenames?: boolean; apply?: boolean }) => {
     const result = runReconcile(options);
     if (options.json) {
       const { message, ...data } = result;
