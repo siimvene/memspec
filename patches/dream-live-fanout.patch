@@ -1,0 +1,48 @@
+--- a/bin/dream
++++ b/bin/dream
+@@ -29,6 +29,23 @@
+ trap 'rm -f "$PROMPT_FILE"' EXIT
+ mkdir -p "$OUT_DIR"
+ 
++# Fan-out health metric: weekly non-review-fix : feat ratio over the CODE repo
++# (ms_01M0408B1X9KGBRY3FY55SCVPJ). The store itself is not a conventional-commit
++# repo, so measure kvart by default; override with MEMSPEC_FANOUT_REPO.
++FANOUT_REPO="${MEMSPEC_FANOUT_REPO:-/home/siim/kvart}"
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++compute_fanout() {
++  local script="$SCRIPT_DIR/fanout-metric.mjs"
++  if command -v node >/dev/null 2>&1 && [ -f "$script" ] \
++     && git -C "$FANOUT_REPO" rev-parse --git-dir >/dev/null 2>&1; then
++    node "$script" --repo "$FANOUT_REPO" --since "$DAYS" 2>/dev/null \
++      || echo "Fan-out health: unavailable (metric script failed)"
++  else
++    echo "Fan-out health: skipped (need node + fanout-metric.mjs + git repo at $FANOUT_REPO)"
++  fi
++}
++FANOUT_BLOCK="$(compute_fanout)"
++
+ # Gather inputs (capped to keep prompt size manageable)
+ RECENT_FILES=$(find "$ROOT/memory" "$ROOT/memory/operator" "$ROOT/observations" -name "*.md" -mtime -"$DAYS" 2>/dev/null | head -40)
+ RECENT_LOG=$(cd "$ROOT" && git log --since="$DAYS days ago" --pretty=format:"%h %ad %s" --date=short 2>/dev/null)
+@@ -40,6 +57,10 @@
+     echo "# Memspec Dream Pass — $TODAY"
+     echo ""
+     echo "_No activity in last $DAYS days. Skipping LLM call._"
++    echo ""
++    echo "## Fan-out health metric"
++    echo ""
++    printf '```\n%s\n```\n' "$FANOUT_BLOCK"
+   } > "$OUT_FILE"
+   cd "$ROOT"
+   git add -A
+@@ -122,6 +143,10 @@
+   echo ""
+   echo "_Reviewing last $DAYS days of activity. Generated $TODAY_FULL. Proposals only — no auto-apply._"
+   echo ""
++  echo "## Fan-out health metric"
++  echo ""
++  printf '```\n%s\n```\n' "$FANOUT_BLOCK"
++  echo ""
+   echo "---"
+   echo ""
+   if ! "$CLAUDE_BIN" -p < "$PROMPT_FILE" 2>&1; then

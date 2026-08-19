@@ -46,6 +46,25 @@ LLM_BIN="${MEMSPEC_LLM_BIN:-claude}"
 LLM_ARGS="${MEMSPEC_LLM_ARGS:--p}"
 AUTOCOMMIT="${MEMSPEC_DREAM_AUTOCOMMIT:-0}"
 AUTHOR="${MEMSPEC_DREAM_AUTHOR:-memspec dream <noreply@local>}"
+# Fan-out health metric target: the CODE repo whose commit stream is measured
+# (non-review-fix : feat). Defaults to the store, which is rarely a
+# conventional-commit repo — point it at your project with MEMSPEC_FANOUT_REPO.
+FANOUT_REPO="${MEMSPEC_FANOUT_REPO:-$ROOT}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Compute the weekly non-review-fix : feat ratio (memspec fact
+# ms_01M0408B1X9KGBRY3FY55SCVPJ). Never fatal — always emits a block.
+compute_fanout() {
+  local script="$SCRIPT_DIR/fanout-metric.mjs"
+  if command -v node >/dev/null 2>&1 && [ -f "$script" ] \
+     && git -C "$FANOUT_REPO" rev-parse --git-dir >/dev/null 2>&1; then
+    node "$script" --repo "$FANOUT_REPO" --since "$DAYS" 2>/dev/null \
+      || echo "Fan-out health: unavailable (metric script failed)"
+  else
+    echo "Fan-out health: skipped (need node + fanout-metric.mjs + a git repo at $FANOUT_REPO; set MEMSPEC_FANOUT_REPO)"
+  fi
+}
+FANOUT_BLOCK="$(compute_fanout)"
 
 if [ ! -d "$ROOT" ]; then
   echo "[dream] memspec store not found at $ROOT" >&2
@@ -79,6 +98,10 @@ if [ -z "$RECENT_FILES" ] && [ -z "$RECENT_LOG" ] && [ -z "$STALE_FILES" ] && [ 
     echo "# Memspec Dream Pass — $TODAY"
     echo ""
     echo "_No activity in last $DAYS days. Skipping LLM call._"
+    echo ""
+    echo "## Fan-out health metric"
+    echo ""
+    printf '```\n%s\n```\n' "$FANOUT_BLOCK"
   } > "$OUT_FILE"
   if [ "$AUTOCOMMIT" = "1" ] && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "$ROOT" add -A
@@ -203,6 +226,10 @@ INSTRUCTIONS
   echo "# Memspec Dream Pass — $TODAY"
   echo ""
   echo "_Reviewing last $DAYS days of activity. Generated $TODAY_FULL. Proposals only — no auto-apply._"
+  echo ""
+  echo "## Fan-out health metric"
+  echo ""
+  printf '```\n%s\n```\n' "$FANOUT_BLOCK"
   echo ""
   echo "---"
   echo ""
