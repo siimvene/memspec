@@ -48,6 +48,11 @@ const HOOKS_TO_INSTALL = [
   },
 ] as const;
 
+// Copied alongside the registered hooks but NOT registered as hooks of their
+// own — they are required() by a registered hook (e.g. session-start pulls in
+// the claims-check helper). Missing support files degrade to a graceful no-op.
+const HOOK_SUPPORT_FILES = ['memspec-claims-check.js'] as const;
+
 function findHooksDir(): string | null {
   // dist/commands/init.js → repo root → hooks/
   const here = dirname(fileURLToPath(import.meta.url));
@@ -95,6 +100,19 @@ function installClaudeCodeHooks(): { messages: string[] } {
       // best-effort
     }
     messages.push(`Installed hook ${hook.file} to ${dst}`);
+  }
+
+  for (const file of HOOK_SUPPORT_FILES) {
+    const src = join(sourceHooksDir, file);
+    if (!existsSync(src)) continue;
+    const dst = join(targetHooksDir, file);
+    copyFileSync(src, dst);
+    try {
+      chmodSync(dst, 0o755);
+    } catch {
+      // best-effort
+    }
+    messages.push(`Installed hook helper ${file} to ${dst}`);
   }
 
   const settingsPath = join(claudeDir, 'settings.json');

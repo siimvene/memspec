@@ -82,6 +82,19 @@ function pendingDreamNotice(memspecRoot) {
   }
 }
 
+// Surface actionable WARN lines from the machine claims-check at boot. All-PASS
+// is silent (no noise). Never throws — a missing sibling script is a no-op.
+function claimsCheckNotice() {
+  try {
+    const { runClaimsCheck } = require('./memspec-claims-check.js');
+    const warns = runClaimsCheck().filter((l) => l.startsWith('WARN'));
+    if (!warns.length) return '';
+    return `## Enforcement claims-check\n\n${warns.map((w) => `- ${w}`).join('\n')}`;
+  } catch {
+    return '';
+  }
+}
+
 function emit(additionalContext) {
   const result = {
     hookSpecificOutput: {
@@ -149,7 +162,7 @@ function runHook(data) {
     // Dream passes live only in the personal store, even when a project
     // store won resolution — surface them regardless of cwd.
     const dreamNotice = pendingDreamNotice(path.join(os.homedir(), '.memspec'));
-    const combined = [context, dreamNotice].filter(Boolean).join('\n\n');
+    const combined = [context, dreamNotice, claimsCheckNotice()].filter(Boolean).join('\n\n');
     if (!combined) {
       emit('');
       return;
