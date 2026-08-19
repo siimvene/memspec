@@ -41,7 +41,7 @@ const POSITIVE_EDGES = ['refines', 'supports', 'depends_on'];
 // Source of truth: src/lib/source.ts (inferSourceKind / effectiveSourceKind).
 // Keep in lockstep — a divergence here re-opens the operator-protection hole.
 const KNOWN_IMPORT_SOURCES = new Set(['openclaw-import', 'brownfield-import', 'claude-fable']);
-const OPERATOR_SOURCE = /^(siim|user)$/i;
+const OPERATOR_SOURCE = /^(siim|user)\b/i; // keep in lockstep with src/lib/source.ts
 const IMPORT_PATTERN = /^(migration-|claude-fable|.*-import$|openclaw-import)/i;
 
 function inferSourceKind(source) {

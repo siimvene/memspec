@@ -265,6 +265,8 @@ test('operator detection matches source.ts for every tier variant (S3)', async (
   // skipped; agent/import records get drained (edge present at creation).
   const cases: Array<{ src: string; kind?: string; op: boolean; id: string }> = [
     { src: 'siim', op: true, id: 'ms_case0000000000000000000SII' },
+    { src: 'siim, 2026-08-01 (direct)', op: true, id: 'ms_case0000000000000000SIIM2' },
+    { src: 'siimvene-bot', op: false, id: 'ms_case0000000000000000SIIMV' },
     { src: 'user', op: true, id: 'ms_case000000000000000000USER' },
     { src: 'human:alice', op: true, id: 'ms_case00000000000000000ALICE' },
     { src: 'whatever', kind: 'operator', op: true, id: 'ms_case00000000000000000KIND0' },
