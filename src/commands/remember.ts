@@ -227,7 +227,11 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   try {
     // Scoped so a same-titled record in another project isn't treated as a
     // duplicate of this one. Unscoped and universal records stay visible.
-    const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT, scope });
+    // Widen the window by the caller's declared targets: they are excluded
+    // from inference below, so without this a declared parent at rank 1 could
+    // push a genuine conflict out of the candidate window entirely.
+    const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0);
+    const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
 
     // High band — exact-title refusal. The v0.3 dedup-refusal promise lives
     // here. Surfaces every same-type record that normalises to the same title.
@@ -240,11 +244,27 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       );
     }
 
+    // A caller who passed an explicit positive edge (refines / supports /
+    // depends_on) to a neighbour has already classified that relationship.
+    // The similarity heuristic must not overrule it by stamping a
+    // `conflicts_with` onto the same target — and high title similarity to a
+    // parent is the expected signature of a legitimate refines, so the
+    // heuristic fires hardest exactly where it is most likely to be wrong.
+    // Drop caller-declared targets before choosing the closest neighbour, so
+    // the inference is skipped for them but can still fire on a genuinely
+    // unrelated one. See fact ms_01KZJXHBZT6YXY9P500JFCE4SX.
+    const callerDeclared = new Set<string>([
+      ...(options.refines ?? []),
+      ...(options.supports ?? []),
+      ...(options.dependsOn ?? []),
+    ]);
+
     // Mid band — apply the v0.3 conflict-inference rule to find a single
     // closest neighbour, then auto-attach a suggested `conflicts_with`
     // edge. Operator-tier candidates are exempt from agent-tier auto-attach
     // (would amount to silent annotation of operator memory).
     const ruleMatches = candidates.filter((item) =>
+      !callerDeclared.has(item.id) &&
       item.type !== undefined && matchesConflictInferenceRule(type, title, tags, item.type, item.title, item.tags),
     );
 

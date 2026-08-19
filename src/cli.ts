@@ -5,6 +5,7 @@ import { Command } from 'commander';
 import { runAnchor } from './commands/anchor.js';
 import { runContext } from './commands/context.js';
 import { runObserve } from './commands/observe.js';
+import { runProbe } from './commands/probe.js';
 import { EXPORT_FORMATS, parseTypesArg, runExport, type ExportFormat } from './commands/export.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runRelate, RELATION_TYPES, type RelationType } from './commands/relate.js';
@@ -186,6 +187,27 @@ program
     const result = runVerify(id, options);
     console.log(result.message);
     if (result.status === 'needs_review') {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('probe')
+  .description('Baseline or re-check a command-output probe on a memory (--set baselines; no --set re-runs and compares). Executes a shell command — runs only when invoked, never on a read path, and a stored command must be trusted on this machine (--set trusts implicitly; --trust approves a synced one).')
+  .argument('<id>', 'memory ID to probe')
+  .option('--cwd <path>', 'project root')
+  .option('--set <command>', 'baseline the probe to this shell command and store its output hash')
+  .option('--trust', "approve the record's stored command for execution on this machine")
+  .option('--timeout <seconds>', 'seconds before the probe command is killed (default 30)')
+  .action((id: string, options: { cwd?: string; set?: string; trust?: boolean; timeout?: string }) => {
+    const result = runProbe(id, {
+      cwd: options.cwd,
+      set: options.set,
+      trust: options.trust,
+      timeout: options.timeout !== undefined ? parseInt(options.timeout, 10) : undefined,
+    });
+    console.log(result.message);
+    if (result.status === 'drifted' || result.status === 'error') {
       process.exitCode = 1;
     }
   });

@@ -58,11 +58,16 @@ export const memoryFrontmatterSchema = z.object({
     'Must be a valid ISO 8601 date',
   ).optional().describe('ISO 8601 timestamp of the last successful verification; defaults to `created` when never verified.'),
   verified_with: z.enum(VERIFIED_WITH).optional()
-    .describe('Witness class for the last verification, in descending strength: `anchor` > `operator` > `evidence` > `assertion`. Replaces the retired `confidence` field.'),
+    .describe('Witness class for the last verification, in descending strength: `anchor` > `probe` > `operator` > `evidence` > `assertion`. Replaces the retired `confidence` field. `probe` is written only by `memspec probe` itself (`--set` or a matching re-check) — the entry point that actually executed the command; `verify` never runs probes.'),
   pinned: z.boolean().optional()
     .describe('Operator-only flag; pinned claims are always surfaced in boot context (cap 5, ordered by `last_verified` descending).'),
   anchors: z.array(codeAnchorSchema).optional()
     .describe('Code anchors linking this memory to specific file contents; drift detected by comparing recorded SHA to current `git hash-object`. Promoted from `ext.code_anchors` to schema spine in v0.3.'),
+  probe: z.object({
+    cmd: z.string().describe('Shell command executed from the project root when the probe is re-run.'),
+    hash: z.string().describe('sha256 (hex) of the command stdout at baseline time.'),
+  }).optional()
+    .describe('A shell command plus the sha256 of its baseline stdout; a re-run whose output hashes differently marks the record drifted. Executes only via explicit `memspec probe`, gated by the machine-local trustfile (`.probe-trust.json`) — never on a read path and never inside `verify`, because record content is untrusted and the command shells out.'),
   supersedes: z.array(z.string()).optional()
     .describe('Ids this record replaces (renamed from `corrects`; now an array to support N→1 merges).'),
   superseded_by: z.string().optional()

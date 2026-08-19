@@ -1,5 +1,6 @@
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import { checkAnchors, getCodeAnchors, projectRootForStore, type AnchorStatus } from '../lib/anchors.js';
+import { getProbe } from '../lib/probe.js';
 import { MemspecStore } from '../lib/store.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import { DEFAULT_DECAY_DAYS, type VerifiedWith } from '../lib/types.js';
@@ -30,13 +31,18 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
 
   const projectRoot = projectRootForStore(store.root);
   const anchors = getCodeAnchors(item);
+  const probe = getProbe(item);
 
   // An anchorless verify has no mechanical witness — without evidence text it
-  // is the system trusting its own output. Refuse it.
+  // is the system trusting its own output. Refuse it. A stored probe does NOT
+  // substitute: verify never executes probes (see below), so an unexercised
+  // probe witnesses nothing.
   if (anchors.length === 0 && !options.evidence?.trim()) {
     throw new Error(
       `${id} has no code anchors — anchorless verification requires --evidence "what you checked". ` +
-      'State the evidence, or anchor the memory to the files it depends on.',
+      (probe
+        ? `This record carries a probe: exercise it with \`memspec probe ${id}\` (probes never run inside verify), or state the evidence.`
+        : 'State the evidence, anchor the memory to the files it depends on, or attach a probe.'),
     );
   }
 
@@ -45,10 +51,16 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   const unavailable = statuses.filter((a) => a.status === 'repo_unavailable');
   const drifted = statuses.filter((a) => a.status === 'changed' || a.status === 'missing');
 
+  // verify NEVER executes probes. A stored probe.cmd is untrusted content
+  // (records sync via git and arrive through MCP writes); shelling it out on
+  // the strength of the record alone would hand code execution to whoever can
+  // write a record. Probes run only through the explicit `memspec probe` CLI
+  // entry point, gated by the machine-local trustfile (src/lib/probe.ts).
+  // Here a probe only counts as a witness the caller must exercise separately.
+
   if (drifted.length > 0 || unavailable.length > 0) {
-    const lines = [
-      `${id} NEEDS REVIEW — ${drifted.length + unavailable.length} of ${statuses.length} anchored file(s) could not be verified:`,
-    ];
+    const anchorFailures = drifted.length + unavailable.length;
+    const lines = [`${id} NEEDS REVIEW — ${anchorFailures} of ${statuses.length} anchored file(s) could not be verified:`];
     for (const a of unavailable) {
       lines.push(`  anchor in repo ${a.repo}, fetch to verify: ${a.file}`);
     }
@@ -95,7 +107,9 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   if (options.evidence) lastVerification.evidence = options.evidence;
   ext.last_verification = lastVerification;
 
-  // Witness class: anchors win, else operator-stated evidence, else generic evidence.
+  // Witness class: anchors win, then operator-stated evidence, else generic
+  // evidence. `probe` as a witness class is written only by `memspec probe`
+  // itself — the entry point that actually executed the command.
   let verifiedWith: VerifiedWith;
   if (anchors.length > 0) verifiedWith = 'anchor';
   else if (options.source && effectiveSourceKind({ source: options.source }) === 'operator') verifiedWith = 'operator';
@@ -111,10 +125,12 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     ext,
   });
 
-  const status = anchors.length > 0 ? 'verified' : 'verified_inferred';
+  const mechanical = anchors.length > 0;
+  const status = mechanical ? 'verified' : 'verified_inferred';
   const anchorNote = anchors.length > 0
     ? `${anchors.length} anchor(s) unchanged`
     : 'no code anchors — verification asserted by caller';
+  const probeNote = probe ? `; probe present, not exercised (memspec probe ${id})` : '';
 
   return {
     id,
@@ -122,6 +138,6 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     last_verified: now,
     verified_with: verifiedWith,
     anchors: statuses,
-    message: `Verified ${id} (${anchorNote}, verified_with: ${verifiedWith}, next check: ${checkBy === 'never' ? 'never' : checkBy.substring(0, 10)})`,
+    message: `Verified ${id} (${anchorNote}, verified_with: ${verifiedWith}, next check: ${checkBy === 'never' ? 'never' : checkBy.substring(0, 10)}${probeNote})`,
   };
 }

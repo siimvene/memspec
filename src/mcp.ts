@@ -134,6 +134,7 @@ server.tool(
         check_by: item.check_by,
         last_verified: item.last_verified ?? item.created,
         anchors: item.anchors,
+        probe: item.probe,
         supersedes: item.supersedes,
         superseded_by: item.superseded_by,
         supersede_reason: item.supersede_reason,
