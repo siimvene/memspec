@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.10.0 — 2026-08-19
+
+**Conflict-edge integrity.** The lexical conflict-inference rule (same type, one shared tag, two shared title tokens) was measured 8/8 wrong on real attachments: it stamped `conflicts_with` onto records that merely discussed the same topic. Combined with an append-only edge store (no removal path), the store grew from 30 to 177 conflict-bearing records in 12 days, all permanent. This release makes conflict edges caller-controlled and retractable.
+
+### Features
+
+- **Inference is suggestion-only.** `remember` never writes an inferred `conflicts_with` edge. When a lexically similar same-type record exists, the result carries a `suggested_conflicts` list (id, title, one-line rationale) for the caller to act on. The high-band exact-title dedup refusal is unchanged. MCP responses expose `suggested_conflicts`; the old `auto_attached` field is gone.
+- **Assert conflicts explicitly.** New `--conflicts-with <ids>` on `remember` (and `conflicts_with` on `memspec_remember`) writes caller-asserted conflict edges at write time. Each target is validated to exist, and a target already declared via a positive edge (refines/supports/depends_on) is rejected as a contradiction.
+- **Edge provenance.** Conflict edges written deliberately (via `relate` or `remember --conflicts-with`) are marked `ext.edge_sources[target] = "asserted"`, distinguishing them from the heuristic backlog. Only conflict edges are tracked; the positive edge kinds were never inferred.
+- **`unrelate` tool (CLI + MCP).** Removes a named edge of any type from a record: the first edge-retraction path in memspec. Refuses on operator-sourced records unless `--override_operator` (mirrors `supersede`), and logs every removal into `ext.edge_removals` (who, when, why; reason required). Removing an absent edge is a reported no-op.
+- **`--drain-inferred` repair mode.** `bin/repair-inferred-conflicts.mjs --drain-inferred` drops all `conflicts_with` edges on non-operator records except those carrying an asserted mark. Same dry-run default, undo journal, atomic writes, and operator-tier skip-and-report as the existing overlap mode. Dry run against the live store: 183 heuristic edges across 183 records, 36 operator records skipped.
+- **Per-repo anchor rename detection and repair.** Rename detection now resolves each anchor to its own git repo (walking up to `.git`, honoring `anchors.repo_search_paths`) instead of assuming the store's parent is a repo, so it fires for home-rooted stores whose anchors point into sibling repos. New `reconcile --repair-renames` (dry-run; add `--apply` to write) re-points anchors whose file moved with byte-identical content. Content-changed anchors stay drifted on purpose: that is the signal to re-verify the claim.
+
+### Fixes
+
+- **Similarity auto-attach no longer overrides caller-declared edges** (foundation for the suggestion-only change): a `conflicts_with` was previously stamped onto targets the caller had already classified with a positive edge.
+- **`status` reports the true stale count** by pushing `withLazyStale` into `loadAll` so every read consumer sees current staleness.
+
+### Engineering
+
+- **Atomic build.** `npm run build` compiles into `dist.new` and swaps it into place with renames (dist → dist.old, dist.new → dist, remove dist.old) instead of deleting `dist/` in place and rebuilding. A live MCP-server deployment under `dist/` is never left absent or half-written during a compile.
+- **Scope routing on read and write** (since 0.9.0): records carry a `scope` matching a `scopes:` config key, enforced on every retrieval and write path; supersede/observe preserve scope; mixed-scope merges refuse to guess.
+- **Command-output probe** (since 0.9.0): a stored shell command plus its stdout hash as a mechanical witness kind, re-checked only via explicit `memspec probe`, gated by a machine-local trustfile; `verify` never executes probes.
+- **Composite layer rank-fusion** (since 0.9.0): layered stores fuse ranks with max rather than gating.
+- **Version bumps** land `package-lock.json` at 0.10.0 (it had drifted to 0.7.2).
+
 ## 0.9.0 — 2026-07-27
 
 **Transcript ingestion complete (stages 2-5): distill, reduce, dream diff.**

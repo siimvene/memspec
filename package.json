@@ -1,6 +1,6 @@
 {
   "name": "memspec",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Structured memory for AI agents - spec plus CLI",
   "type": "module",
   "bin": {
@@ -23,8 +23,7 @@
   ],
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.json",
-    "postbuild": "node -e \"for (const f of ['dist/cli.js','dist/mcp.js']) require('fs').chmodSync(f, 0o755)\"",
+    "build": "node scripts/build.mjs",
     "test": "node --import tsx --test test/**/*.test.ts",
     "repair:conflicts": "node bin/repair-inferred-conflicts.mjs",
     "schema": "node --import tsx scripts/generate-schema.ts",
