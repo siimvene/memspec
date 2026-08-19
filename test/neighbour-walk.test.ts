@@ -277,6 +277,63 @@ test('operator writes may still auto-attach to operator candidates', async () =>
   assert.equal(second.autoAttached!.target_id, seed.id);
 });
 
+// --- 5.7 caller-declared positive edges suppress the false conflict ----------
+// Regression for ms_01KZJXHBZT6YXY9P500JFCE4SX: the similarity auto-attacher
+// stamped conflicts_with onto a target the caller had already classified with
+// an explicit positive edge, producing logically impossible edge pairs on
+// ~25% of conflict-bearing records.
+
+for (const edge of ['refines', 'supports', 'dependsOn'] as const) {
+  test(`remember does not auto-attach conflicts_with to a target declared via ${edge}`, async () => {
+    const target = await makeTempProject();
+    await runCli(['init', '--cwd', target]);
+
+    const parent = runRemember('fact', 'Cache invalidation runs nightly globally', {
+      cwd: target, body: 'parent', source: 'agent-a', tags: 'cache',
+    });
+
+    // A mid-band write that WOULD auto-attach conflicts_with to the parent,
+    // except the caller explicitly linked the parent via a positive edge.
+    const child = runRemember('fact', 'Cache invalidation runs hourly nightly globally', {
+      cwd: target, body: 'child', source: 'agent-b', tags: 'cache', [edge]: [parent.id],
+    });
+
+    assert.equal(child.autoAttached, undefined,
+      'a caller-declared positive edge must suppress the inferred conflict to that same target');
+
+    const data = await readFact(target, child.id);
+    assert.equal(data.conflicts_with, undefined,
+      'the new record must not carry conflicts_with pointing at its own declared parent');
+  });
+}
+
+test('remember still auto-attaches to an undeclared neighbour when another is caller-declared', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+
+  const declared = runRemember('fact', 'Cache invalidation runs nightly globally', {
+    cwd: target, body: 'declared', source: 'agent-a', tags: 'cache',
+  });
+  const undeclared = runRemember('fact', 'Cache invalidation runs hourly regional', {
+    cwd: target, body: 'undeclared', source: 'agent-a', tags: 'cache',
+  });
+
+  // Mid-band against both, but only `declared` is linked via refines. The
+  // guard drops the declared target from the candidate pool without disabling
+  // the inference for the genuinely-unrelated neighbour.
+  const child = runRemember('fact', 'Cache invalidation runs nightly hourly', {
+    cwd: target, body: 'child', source: 'agent-b', tags: 'cache', refines: [declared.id],
+  });
+
+  assert.ok(child.autoAttached, 'inference should still fire against the undeclared neighbour');
+  assert.equal(child.autoAttached!.target_id, undeclared.id);
+  assert.notEqual(child.autoAttached!.target_id, declared.id);
+
+  const data = await readFact(target, child.id);
+  assert.deepEqual(data.conflicts_with, [undeclared.id]);
+  assert.deepEqual(data.refines, [declared.id]);
+});
+
 // --- 5.6 MCP tool response shape --------------------------------------------
 
 test('memspec_remember MCP response includes auto_attached when mid-band fires', async () => {
