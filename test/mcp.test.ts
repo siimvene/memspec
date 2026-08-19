@@ -130,9 +130,8 @@ test('mcp server lists all memspec tools over stdio', async () => {
     }).tools ?? []);
     const toolNames = tools.map((tool) => tool.name).sort();
 
-    // v0.4 surface (11 tools): v0.3 base (9) + memspec_relate (Phase 2) +
-    // memspec_export (Phase 6). Phase 7 removed the memspec_add / memspec_correct
-    // deprecation shims.
+    // v0.10 surface (12 tools): v0.4 base (11) + memspec_unrelate (edge
+    // retraction). Phase 7 removed the memspec_add / memspec_correct shims.
     assert.deepEqual(toolNames, [
       'memspec_anchor',
       'memspec_export',
@@ -144,6 +143,7 @@ test('mcp server lists all memspec tools over stdio', async () => {
       'memspec_search',
       'memspec_status',
       'memspec_supersede',
+      'memspec_unrelate',
       'memspec_verify',
     ]);
 

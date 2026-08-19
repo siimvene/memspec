@@ -73,6 +73,11 @@ export interface MemoryFrontmatter {
    * - ext.code_anchors: CodeAnchor[] — DEPRECATED in v0.3; reader migrates to top-level `anchors`
    * - ext.last_verification: { at: string, source?: string, evidence?: string } — most recent verify call
    * - ext.legacy_confidence: number — pre-0.3 confidence float, kept for archaeology only
+   * - ext.edge_sources: Record<targetId, "asserted"> — v0.10 provenance for conflicts_with edges.
+   *   Marks an edge a caller deliberately wired (via relate or `remember --conflicts-with`) rather
+   *   than one the removed lexical auto-attach inferred; the drain script keeps asserted, drops the rest.
+   * - ext.edge_removals: Array<{ type, to, removed_at, removed_by, reason }> — v0.10 audit log of edges
+   *   dropped via `unrelate`, so a retraction is itself traceable.
    */
   ext?: Record<string, unknown>;
 }

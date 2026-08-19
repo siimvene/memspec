@@ -1,13 +1,19 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { checkAnchors, getCodeAnchors, projectRootForStore } from '../lib/anchors.js';
+import { join, relative, resolve, sep } from 'node:path';
+import { blobSha, checkAnchors, getCodeAnchors, projectRootForStore, resolveAnchorRepo } from '../lib/anchors.js';
+import { loadConfig } from '../lib/config.js';
 import { MemspecStore } from '../lib/store.js';
+import type { CodeAnchor, MemoryItem } from '../lib/types.js';
 
 export interface ReconcileOptions {
   cwd?: string;
   since?: string;
   json?: boolean;
+  /** v0.10: re-point anchors whose file moved with identical content (dry-run unless `apply`). */
+  repairRenames?: boolean;
+  /** v0.10: with `repairRenames`, actually write the re-points instead of listing them. */
+  apply?: boolean;
 }
 
 export interface ReconciledFile {
@@ -24,27 +30,35 @@ export interface ReconcileCandidate {
   changed_files: ReconciledFile[];
 }
 
+export interface RenameRepair {
+  memory_id: string;
+  from: string;
+  to: string;
+  applied: boolean;
+}
+
 export interface ReconcileResult {
   reconciled_at: string;
   since_ref: string | null;
   head: string | null;
   anchored_memories: number;
   candidates: ReconcileCandidate[];
+  repairs: RenameRepair[];
   message: string;
 }
 
 const CHECKPOINT_FILE = '.reconcile.json';
 
-function git(projectRoot: string, args: string[]): string | null {
+function git(repoRoot: string, args: string[]): string | null {
   try {
-    return execFileSync('git', args, { cwd: projectRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     return null;
   }
 }
 
-function refIsValid(projectRoot: string, ref: string): boolean {
-  return git(projectRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]) !== null;
+function refIsValid(repoRoot: string, ref: string): boolean {
+  return git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]) !== null;
 }
 
 function readCheckpoint(storeRoot: string): { head?: string } | null {
@@ -66,20 +80,24 @@ function resolveSinceRef(projectRoot: string, storeRoot: string, requested?: str
   }
   const checkpoint = readCheckpoint(storeRoot);
   if (checkpoint?.head && refIsValid(projectRoot, checkpoint.head)) return checkpoint.head;
-  if (refIsValid(projectRoot, 'HEAD~10')) return 'HEAD~10';
-  // Young repo: fall back to the root commit so the whole history is in range.
-  const root = git(projectRoot, ['rev-list', '--max-parents=0', 'HEAD']);
+  return fallbackSince(projectRoot);
+}
+
+/** Young-repo-safe default range for a repo we have no checkpoint/`--since` for. */
+function fallbackSince(repoRoot: string): string | null {
+  if (refIsValid(repoRoot, 'HEAD~10')) return 'HEAD~10';
+  const root = git(repoRoot, ['rev-list', '--max-parents=0', 'HEAD']);
   return root ? root.split('\n')[0] : null;
 }
 
-/** Map of old-path → new-path for files renamed since sinceRef (committed) or uncommitted. */
-function renameMap(projectRoot: string, sinceRef: string | null): Map<string, string> {
+/** Map of old-path → new-path for files renamed since sinceRef (committed) or uncommitted, keyed repo-relative. */
+function repoRenameMap(repoRoot: string, sinceRef: string | null): Map<string, string> {
   const renames = new Map<string, string>();
   const diffs: string[][] = [['diff', '--name-status', '-M', 'HEAD']];
   if (sinceRef) diffs.push(['diff', '--name-status', '-M', sinceRef, 'HEAD']);
 
   for (const args of diffs) {
-    const output = git(projectRoot, args);
+    const output = git(repoRoot, args);
     if (!output) continue;
     for (const line of output.split('\n')) {
       const parts = line.split('\t');
@@ -96,36 +114,101 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
   if (!store.exists) throw new Error(`No memspec store found at ${store.root}`);
 
   const projectRoot = projectRootForStore(store.root);
-  const inGitRepo = git(projectRoot, ['rev-parse', '--is-inside-work-tree']) === 'true';
-  const sinceRef = inGitRepo ? resolveSinceRef(projectRoot, store.root, options.since) : null;
-  const head = inGitRepo ? git(projectRoot, ['rev-parse', 'HEAD']) : null;
-  const renames = inGitRepo ? renameMap(projectRoot, sinceRef) : new Map<string, string>();
+  const config = loadConfig(store.root);
+  const repoSearchPaths = config.anchors?.repo_search_paths ?? [];
+
+  // The checkpoint + `--since` semantics belong to the project's own repo (if
+  // it has one). Anchors that live in OTHER repos — the normal case for a
+  // home-rooted store, where projectRoot is the home dir and each anchor points
+  // into `~/git/<repo>/...` — get rename detection inside their own repo, with
+  // a per-repo default range.
+  const projectGitRoot = git(projectRoot, ['rev-parse', '--is-inside-work-tree']) === 'true' ? projectRoot : null;
+  const sinceRef = projectGitRoot ? resolveSinceRef(projectGitRoot, store.root, options.since) : null;
+  const head = projectGitRoot ? git(projectGitRoot, ['rev-parse', 'HEAD']) : null;
+
+  const renameCache = new Map<string, Map<string, string>>();
+  const renamesFor = (repoRoot: string): Map<string, string> => {
+    let m = renameCache.get(repoRoot);
+    if (m) return m;
+    const since = projectGitRoot && repoRoot === projectGitRoot ? sinceRef : fallbackSince(repoRoot);
+    m = repoRenameMap(repoRoot, since);
+    renameCache.set(repoRoot, m);
+    return m;
+  };
 
   const anchored = store.loadActive().filter((item) => getCodeAnchors(item).length > 0);
   const candidates: ReconcileCandidate[] = [];
+  const repairs: RenameRepair[] = [];
+  // Grouped re-points to apply per item (an item can carry several anchors).
+  // Anchor identity is (repo, file), not file alone (S7): two anchors can share
+  // a filename in different repos, and only the moved one may be rewritten.
+  const repointsByItem = new Map<string, { item: MemoryItem; moves: Array<{ fromFile: string; fromRepo?: string; to: string }> }>();
 
   for (const item of anchored) {
-    const drifted = checkAnchors(projectRoot, getCodeAnchors(item)).filter((a) => a.status !== 'unchanged');
+    const drifted = checkAnchors(projectRoot, getCodeAnchors(item), { repoSearchPaths })
+      .filter((a) => a.status !== 'unchanged');
     if (drifted.length === 0) continue;
+
+    const changedFiles: ReconciledFile[] = [];
+    for (const a of drifted) {
+      const anchor: CodeAnchor = { file: a.file, sha: a.sha, ...(a.repo ? { repo: a.repo } : {}) };
+      const resolved = a.status === 'missing' ? resolveAnchorRepo(projectRoot, anchor, { repoSearchPaths }) : null;
+      const newRel = resolved ? renamesFor(resolved.repoRoot).get(resolved.relPath) : undefined;
+
+      if (resolved && newRel) {
+        const newAbs = resolve(resolved.repoRoot, newRel);
+        const displayNew = anchor.repo ? newRel : relative(projectRoot, newAbs).split(sep).join('/');
+        changedFiles.push({ file: a.file, status: 'renamed', renamedTo: displayNew });
+        // Re-point only when the moved file's content is byte-identical to the
+        // anchor's recorded blob. A content change is the signal to re-verify
+        // the claim, not something to silently paper over — leave it drifted.
+        // Only top-level anchors are rewritable; a legacy ext.code_anchors entry
+        // is left alone rather than reported as a repair we won't actually make.
+        // Match on the exact (repo, file) entry, not file alone (S7).
+        const isTopLevel = (item.anchors ?? []).some((x) => x.file === a.file && x.repo === a.repo);
+        if (options.repairRenames && isTopLevel && blobSha(newAbs) === a.sha) {
+          repairs.push({ memory_id: item.id, from: a.file, to: displayNew, applied: options.apply === true });
+          if (options.apply) {
+            const bucket = repointsByItem.get(item.id) ?? { item, moves: [] };
+            bucket.moves.push({ fromFile: a.file, fromRepo: a.repo, to: displayNew });
+            repointsByItem.set(item.id, bucket);
+          }
+        }
+      } else {
+        changedFiles.push({ file: a.file, status: a.status as 'changed' | 'missing' });
+      }
+    }
 
     candidates.push({
       memory_id: item.id,
       type: item.type ?? 'observation',
       title: item.title,
       last_verified: item.last_verified ?? null,
-      changed_files: drifted.map((a) => {
-        const renamedTo = a.status === 'missing' ? renames.get(a.file) : undefined;
-        return renamedTo
-          ? { file: a.file, status: 'renamed' as const, renamedTo }
-          : { file: a.file, status: a.status as 'changed' | 'missing' };
-      }),
+      changed_files: changedFiles,
     });
+  }
+
+  // Apply re-points: rewrite each item's top-level anchors to the new paths,
+  // preserving the recorded sha (content is identical by construction).
+  if (options.repairRenames && options.apply) {
+    for (const { item, moves } of repointsByItem.values()) {
+      const anchors = (item.anchors ?? []).map((anchor) => {
+        const move = moves.find((m) => m.fromFile === anchor.file && m.fromRepo === anchor.repo);
+        return move ? { ...anchor, file: move.to } : anchor;
+      });
+      store.updateItem({ ...item, anchors });
+    }
   }
 
   const reconciledAt = new Date().toISOString();
 
-  // Checkpoint: next reconcile without --since picks up from this HEAD.
-  if (head) {
+  // Checkpoint: next reconcile without --since picks up from this HEAD. Only
+  // meaningful when the project itself is a git repo. A repair DRY-RUN must NOT
+  // advance it (S6): otherwise the instructed `--apply` rerun resolves
+  // since=HEAD, diffs HEAD..HEAD, and finds nothing to repair. Only a real
+  // pass (plain reconcile, or repair --apply) moves the checkpoint.
+  const advanceCheckpoint = !(options.repairRenames && !options.apply);
+  if (head && projectGitRoot && advanceCheckpoint) {
     writeFileSync(
       join(store.root, CHECKPOINT_FILE),
       JSON.stringify({ head, reconciled_at: reconciledAt }, null, 2) + '\n',
@@ -152,6 +235,15 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
     lines.push('  memspec supersede <id> --reason ... --body ...  # memory is now wrong');
     lines.push('  memspec anchor <id> <files...>               # still true; re-baseline anchors');
   }
+  if (options.repairRenames) {
+    if (repairs.length === 0) {
+      lines.push('', 'Rename repair: no identical-content moves to re-point.');
+    } else {
+      lines.push('', `Rename repair (${options.apply ? 'APPLIED' : 'DRY-RUN'}) — ${repairs.length} anchor(s) re-pointed:`);
+      for (const r of repairs) lines.push(`  ${r.memory_id}: ${r.from} → ${r.to}`);
+      if (!options.apply) lines.push('  Re-run with --repair-renames --apply to write these re-points.');
+    }
+  }
   if (sinceRef) lines.push('', `Range: ${sinceRef.substring(0, 12)}..HEAD (checkpoint updated)`);
 
   return {
@@ -160,6 +252,7 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
     head,
     anchored_memories: anchored.length,
     candidates,
+    repairs,
     message: lines.join('\n'),
   };
 }

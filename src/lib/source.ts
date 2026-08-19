@@ -3,7 +3,12 @@ import type { SourceKind } from './types.js';
 /** Sources written by store importers rather than humans or agents. */
 const KNOWN_IMPORT_SOURCES = new Set(['openclaw-import', 'brownfield-import', 'claude-fable']);
 
-const OPERATOR_SOURCE = /^(siim|user)$/i;
+// Word-boundary, not exact match: real records carry sources like
+// "siim, 2026-08-19 (direct)" or "siim+therin costume test" — all
+// operator-witnessed. Exact matching left them agent-tier and therefore
+// unprotected (found 2026-08-20). "siimvene" etc. stay unmatched: no
+// boundary after "siim".
+const OPERATOR_SOURCE = /^(siim|user)\b/i;
 
 // Migration imports follow naming conventions: prefix migration-, *-import, etc.
 const IMPORT_PATTERN = /^(migration-|claude-fable|.*-import$|openclaw-import)/i;

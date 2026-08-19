@@ -8,7 +8,7 @@ import { runAnchor } from './commands/anchor.js';
 import { EXPORT_FORMATS, runExport, type ExportFormat } from './commands/export.js';
 import { runObserve } from './commands/observe.js';
 import { runReconcile } from './commands/reconcile.js';
-import { runRelate, relationTypeSchema } from './commands/relate.js';
+import { runRelate, runUnrelate, relationTypeSchema } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
 import { searchPayload, type SearchExpandDepth, type SearchResult } from './commands/search.js';
 import { EDGE_TYPES } from './lib/graph-walk.js';
@@ -29,7 +29,7 @@ const defaultCwd = typeof values.cwd === 'string' ? values.cwd : process.env.MEM
 
 const server = new McpServer({
   name: 'memspec',
-  version: '0.9.0',
+  version: '0.10.0',
 });
 
 function renderSearchText(payload: { query: string; results: SearchResult[] }): string {
@@ -173,12 +173,13 @@ interface RememberArgs {
   refines?: string[];
   supports?: string[];
   depends_on?: string[];
+  conflicts_with?: string[];
   valid_from?: string;
   valid_to?: string;
   scope?: string;
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on, valid_from, valid_to, scope }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on, conflicts_with, valid_from, valid_to, scope }: RememberArgs) {
   try {
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
     const result = runRemember(type, title, {
@@ -196,6 +197,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       refines,
       supports,
       dependsOn: depends_on,
+      conflictsWith: conflicts_with,
       validFrom: valid_from,
       validTo: valid_to,
       scope,
@@ -220,11 +222,11 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       duplicates: result.duplicates ?? null,
       scope: result.scope ?? null,
     };
-    if (result.autoAttached) {
-      // Phase 5 — mid-band edge attached at write time. Array shape so a
-      // future widening of the per-write attach budget doesn't require a
-      // breaking response change.
-      structured.auto_attached = [result.autoAttached];
+    if (result.suggestedConflicts) {
+      // v0.10 — lexical conflict candidates, SUGGESTION ONLY. The tool does not
+      // write these; the caller wires a real one with memspec_relate (type
+      // conflicts_with) after confirming the records actually contradict.
+      structured.suggested_conflicts = result.suggestedConflicts;
     }
 
     return {
@@ -238,7 +240,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
 
 server.tool(
   'memspec_remember',
-  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Search first to avoid duplicates.',
+  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Search first to avoid duplicates. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
   {
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
@@ -251,6 +253,7 @@ server.tool(
     refines: z.array(z.string()).optional().describe('Memory ids this record refines (forms a typed edge to each target; parent stays valid)'),
     supports: z.array(z.string()).optional().describe('Memory ids this record supports (forms a typed edge — evidence backing the target)'),
     depends_on: z.array(z.string()).optional().describe('Memory ids this record depends on (forms a typed edge — presupposes the target)'),
+    conflicts_with: z.array(z.string()).optional().describe('Memory ids this record explicitly contradicts. Caller-asserted only — each target must exist and is marked "asserted" in ext.edge_sources. Use when you have confirmed the contradiction; for mere topic overlap, act on the response\'s suggested_conflicts instead.'),
     valid_from: z.string().optional().describe('ISO 8601 timestamp when the world-state truth becomes valid (v0.5 temporal validity; orthogonal to check_by)'),
     valid_to: z.string().optional().describe('ISO 8601 timestamp when the world-state truth ceases to hold (v0.5 temporal validity; orthogonal to check_by)'),
     scope: z.string().optional().describe('Project scope this record belongs to, e.g. "kleidia". Only readers with that active scope will see it; "universal" marks it visible from every scope. State it explicitly whenever you know which project the knowledge belongs to: this server may have been started with a working directory unrelated to that project, and scope derived from the working directory would then be wrong. Omit it to fall back to working-directory derivation (and to writing no scope at all when nothing matches).'),
@@ -393,13 +396,15 @@ server.tool(
 
 server.tool(
   'memspec_reconcile',
-  'Find anchored memories whose code has drifted. Compares each active memory\'s code anchors against current file content and reports candidates for review (verify, supersede, or re-anchor). Run after landing commits that change system behavior.',
+  'Find anchored memories whose code has drifted. Compares each active memory\'s code anchors against current file content and reports candidates for review (verify, supersede, or re-anchor). Rename detection runs inside each anchor\'s own git repo, so it works for home-rooted stores whose anchors point into sibling repos. Pass repair_renames to re-point anchors whose file moved with byte-identical content (dry-run unless apply is also set); content-changed anchors stay drifted on purpose. Run after landing commits that change system behavior.',
   {
     since_ref: z.string().optional().describe('Git ref to diff from (default: last reconcile checkpoint, fallback HEAD~10)'),
+    repair_renames: z.boolean().optional().describe('Re-point anchors whose file moved with identical content. Dry-run (lists proposed re-points) unless apply is also true.'),
+    apply: z.boolean().optional().describe('With repair_renames, write the re-points instead of listing them.'),
   },
-  async ({ since_ref }) => {
+  async ({ since_ref, repair_renames, apply }) => {
     try {
-      const result = runReconcile({ cwd: defaultCwd, since: since_ref });
+      const result = runReconcile({ cwd: defaultCwd, since: since_ref, repairRenames: repair_renames, apply });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
@@ -409,6 +414,7 @@ server.tool(
           anchored_memories: result.anchored_memories,
           count: result.candidates.length,
           candidates: result.candidates,
+          repairs: result.repairs,
         },
       };
     } catch (err) {
@@ -453,6 +459,35 @@ server.tool(
           to_id: result.to_id,
           type: result.type,
           added: result.added,
+          total_edges_of_type: result.total_edges_of_type,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_unrelate',
+  'Remove a typed edge from one memory — the inverse of memspec_relate, and the only way to retract an edge (edges were append-only before v0.10, so a wrong conflicts_with was permanent). Edge types: refines | supports | depends_on | conflicts_with. Operator-sourced records are read-only over MCP: removing an edge from operator memory is refused here and must be done with `memspec unrelate --override-operator` at a terminal, where a human authorizes it. Every removal is logged durably into the record (who, when, why). Removing an edge that is not present is a reported no-op, not an error.',
+  {
+    from: z.string().describe('Memory id the edge originates from (the edge is removed from this record)'),
+    to: z.string().describe('Memory id the edge points at'),
+    type: relationTypeSchema.describe('Edge type to remove: refines | supports | depends_on | conflicts_with'),
+    reason: z.string().describe('Why the edge is being removed. Persisted into ext.edge_removals on the record.'),
+    source: z.string().optional().describe('Who is removing the edge'),
+  },
+  async ({ from, to, type, reason, source }) => {
+    try {
+      const result = runUnrelate({ cwd: defaultCwd, from, to, type, reason, source, channel: 'mcp' });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          from_id: result.from_id,
+          to_id: result.to_id,
+          type: result.type,
+          removed: result.removed,
           total_edges_of_type: result.total_edges_of_type,
         },
       };
