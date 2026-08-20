@@ -4,9 +4,9 @@
   "description": "Structured memory for AI agents - spec plus CLI",
   "type": "module",
   "bin": {
-    "memspec": "./dist/cli.js",
-    "memspec-mcp": "./dist/mcp.js",
-    "memspec-dream": "./scripts/dream.sh"
+    "memspec": "dist/cli.js",
+    "memspec-mcp": "dist/mcp.js",
+    "memspec-dream": "scripts/dream.sh"
   },
   "files": [
     "dist",
