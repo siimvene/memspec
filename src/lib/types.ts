@@ -141,7 +141,8 @@ export interface ProbeWitness {
 /**
  * v0.11 — a committed evidence attachment (Layer B). Two shapes:
  * - file-backed: `sha256` (hex), `name` (basename), `path` (relative to the
- *   store root, under `evidence/`), `source` (original absolute path). Copied
+ *   store root, under `evidence/`), `source` (where it was copied from:
+ *   `~`-relative, `repo:path`, or omitted — never an absolute path). Copied
  *   into `<store>/evidence/<sha256[:12]>/<name>`, content-addressed.
  * - url-backed: `url` (http/https), never fetched — recorded as a pointer.
  * Both carry `captured_at` (ISO 8601). A file-backed entry witnesses a claim

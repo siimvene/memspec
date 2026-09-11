@@ -1,3 +1,4 @@
+import { basename, dirname, resolve } from 'node:path';
 import type { MemspecStore } from '../lib/store.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { loadConfig } from '../lib/config.js';
@@ -61,7 +62,26 @@ export function runQuestion(titleOrId: string, options: QuestionOptions): Questi
   // pointer-file repo (even when the call then failed), and a `.memspec/`
   // closer to cwd beats the pointer, so every later read and write silently
   // landed in the phantom instead of the declared layers.
-  const resolved = CompositeStore.resolveWritable(options.cwd);
+  //
+  // `question` has no `--store` flag, so with no name and several writable
+  // layers `resolveWritable` used to throw "ambiguous write target" outright
+  // — including for the documented default template, whose config.yaml
+  // declares both `project` and `global` as writable. Mirror remember.ts's
+  // tie-break: when the walked-up store's OWN config.yaml is what declared
+  // more than one writable layer, default to the layer that IS the declaring
+  // store (where a pre-0.11 write would have landed). A pointer-file repo
+  // keeps the strict rule and still throws.
+  const layered = CompositeStore.forCwd(options.cwd);
+  let storeName: string | undefined;
+  if (layered.declaredIn && basename(layered.declaredIn) === 'config.yaml') {
+    const writableLayers = layered.layers.filter((l) => l.writable);
+    if (writableLayers.length > 1) {
+      const declaringRoot = resolve(dirname(layered.declaredIn));
+      const own = writableLayers.find((l) => resolve(l.store.root) === declaringRoot);
+      if (own) storeName = own.name;
+    }
+  }
+  const resolved = CompositeStore.resolveWritable(options.cwd, storeName);
   let store: MemspecStore = resolved.layer.store;
   if (isMutate) {
     // An existing question is edited where it lives; a read-only layer refuses
@@ -109,14 +129,21 @@ export function runQuestion(titleOrId: string, options: QuestionOptions): Questi
   }
 
   if (options.add?.length) {
+    const before = loadQuestion(store, titleOrId);
     const updated = addAnswers(store, titleOrId, options.add);
+    // A new active answer added to a resolved question flips it back to open
+    // (see addAnswers' docstring) — say so, rather than reporting a silent
+    // "added" that leaves the state change to be noticed elsewhere.
+    const reopened = before.state === 'resolved' && updated.state !== 'resolved';
     return {
       id: updated.id,
       action: 'added',
       state: updated.state === 'resolved' ? 'resolved' : 'open',
       closed: updated.closed === true,
       answers: updated.answers ?? [],
-      message: `Added ${options.add.length} answer(s) to ${updated.id} (now ${updated.answers?.length ?? 0} candidate(s))`,
+      message: reopened
+        ? `Added ${options.add.length} answer(s) to ${updated.id} — reopened (now ${updated.answers?.length ?? 0} candidate(s))`
+        : `Added ${options.add.length} answer(s) to ${updated.id} (now ${updated.answers?.length ?? 0} candidate(s))`,
     };
   }
 

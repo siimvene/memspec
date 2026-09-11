@@ -8,7 +8,7 @@ import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib
 import { type SearchRelevanceMeta, type StoreSearchOptions } from '../lib/store.js';
 import { type DriftStatus } from '../lib/drift.js';
 import { MEMORY_TYPES, VERIFIED_WITH, type MemoryItem, type MemoryType, type RecordState, type VerifiedWith } from '../lib/types.js';
-import { recordSearchHits, type UsageSurface } from '../lib/usage.js';
+import { recordSurfacedHitsByLayer, type UsageSurface } from '../lib/usage.js';
 import { computeUsageStats } from '../lib/usage-stats.js';
 
 export type SearchExpandDepth = 1 | 2 | 3;
@@ -436,7 +436,7 @@ function questionSearchPayload(
   const results = matched.slice(0, limit).map((item) => buildQuestionResultRow(item, full, budget));
 
   if (results.length > 0) {
-    recordSearchHits(store.root, results.map((r) => r.id), { query, surface: options.surface ?? 'cli' });
+    recordSurfacedHitsByLayer(store, results, { query, surface: options.surface ?? 'cli' });
   }
 
   const scopeLabel = activeScope ?? 'any';
@@ -631,7 +631,7 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   }
 
   if (results.length > 0) {
-    recordSearchHits(store.root, results.map((r) => r.id), { query, surface: options.surface ?? 'cli' });
+    recordSurfacedHitsByLayer(store, results, { query, surface: options.surface ?? 'cli' });
   }
 
   // DEFECT C — coverage disclosure, judged on the SEED matches (direct query

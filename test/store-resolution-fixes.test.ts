@@ -120,6 +120,37 @@ test('#2: question refuses to edit a question that lives in a read-only layer', 
   assert.throws(() => runQuestion(q.id, { cwd: personal, close: true }), /read-only store layer 'team'/);
 });
 
+test('#2: question has no --store flag, so with the declaring store\'s own project+global stores: block (both writable) it defaults to the declaring layer, like remember', async () => {
+  withFakeHome((home) => {
+    const repo = join(home, 'repo');
+    mkdirSync(repo, { recursive: true });
+    const store = new MemspecStore(repo, { walk: false });
+    store.init();
+    // The documented default block, uncommented: a relative project layer
+    // plus the global one, both writable — the exact shape a fresh template
+    // user gets by following config.yaml's own commented-out example.
+    writeFileSync(
+      store.configPath,
+      layerDecl([
+        { name: 'project', path: '.memspec', priority: 10, writable: true },
+        { name: 'global', path: '~/.memspec', priority: 0, writable: true },
+      ]),
+    );
+    const a = runRemember('fact', 'Answer alpha', { cwd: repo, source: 'test', body: 'a' });
+
+    // Before the fix this threw "ambiguous write target" — question has no
+    // --store flag to disambiguate with, so it could never create a question
+    // at all under this (documented, default-shaped) config.
+    const q = runQuestion('Which layer, by default?', { cwd: repo, source: 'test', answers: [a.id] });
+    assert.equal(q.action, 'created');
+    assert.ok(
+      existsSync(join(repo, '.memspec', 'memory', 'questions', `${q.id}.md`)),
+      'defaulted to the declaring (project) layer, not thrown as ambiguous',
+    );
+    assert.equal(existsSync(join(home, '.memspec', 'memory', 'questions')), false, 'must not have landed in the global layer');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // #3 / #13 — `init` refuses to nest unless --force, and --force exists
 // ---------------------------------------------------------------------------

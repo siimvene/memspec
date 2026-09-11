@@ -318,3 +318,33 @@ test('status Cold and Promotion candidates derive from a hand-written usage.json
   assert.match(text.stdout, /## Promotion candidates/);
   assert.match(text.stdout, /candidates only, nothing auto-promoted/);
 });
+
+test('#27: search logs a team-layer hit into the team store usage.jsonl, not the primary', async () => {
+  const base = await makeTempProject();
+  const home = join(base, 'home');
+  const team = join(base, 'team');
+  await runCli(['init', '--cwd', home]);
+  await runCli(['init', '--cwd', team]);
+  const personalId = await firstId((await runCli(['remember', 'fact', 'Personal search fact about widgets', '--cwd', home, '--source', 'test'])).stdout);
+  const teamId = await firstId((await runCli(['remember', 'fact', 'Team search fact about widgets', '--cwd', team, '--source', 'test'])).stdout);
+  await writeFile(join(home, '.memspec', 'config.yaml'), [
+    'stores:',
+    '  - name: personal', '    path: ~/.memspec', '    priority: 10', '    writable: true',
+    '  - name: team', `    path: ${join(team, '.memspec')}`, '    priority: 0', '    writable: false',
+    '',
+  ].join('\n'));
+
+  await runCli(['search', 'widgets', '--cwd', home], undefined, { HOME: home, MEMSPEC_SESSION_ID: 'search-layer-1' });
+
+  const personalRows = (await readFile(join(home, '.memspec', 'usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  const teamRows = (await readFile(join(team, '.memspec', 'usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+
+  assert.ok(personalRows.some((r) => r.id === personalId), 'personal hit logged in the personal store');
+  assert.ok(!personalRows.some((r) => r.id === teamId), 'team hit must NOT be logged in the personal store');
+  assert.ok(teamRows.some((r) => r.id === teamId), 'team hit logged in the team store, not the primary');
+  for (const row of [...personalRows, ...teamRows]) {
+    assert.equal(row.query, 'widgets');
+    assert.equal(row.surface, 'cli');
+    assert.equal(row.session, 'search-layer-1');
+  }
+});

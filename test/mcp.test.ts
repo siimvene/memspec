@@ -217,7 +217,7 @@ test('mcp search tool returns coverage, coverage_witness and drifted', async () 
     });
     assert.equal(hit.error, undefined);
     const sc = (hit.result as { structuredContent?: {
-      coverage?: string; coverage_witness?: string | null;
+      coverage?: string; coverage_witness?: string | null; coverage_witness_note?: string;
       results?: Array<{ drifted?: boolean; anchor_unchecked?: boolean }>;
     } }).structuredContent;
     assert.ok(sc);
@@ -225,15 +225,17 @@ test('mcp search tool returns coverage, coverage_witness and drifted', async () 
     // The only anchor in the set has drifted, so it witnesses as `evidence`,
     // not `anchor` (0.11 remediation #36).
     assert.equal(sc?.coverage_witness, 'evidence');
+    assert.equal(sc?.coverage_witness_note, 'drifted');
     assert.equal(sc?.results?.[0]?.drifted, true);
 
     const miss = await session.request('tools/call', {
       name: 'memspec_search',
       arguments: { query: 'kubernetes helm nonexistent', limit: 5 },
     });
-    const missSc = (miss.result as { structuredContent?: { coverage?: string; coverage_witness?: string | null } }).structuredContent;
+    const missSc = (miss.result as { structuredContent?: { coverage?: string; coverage_witness?: string | null; coverage_witness_note?: string } }).structuredContent;
     assert.equal(missSc?.coverage, 'none');
     assert.equal(missSc?.coverage_witness, null);
+    assert.equal(missSc?.coverage_witness_note, undefined);
   } finally {
     await session.close();
   }

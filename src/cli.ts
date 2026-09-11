@@ -151,10 +151,10 @@ program
 
 program
   .command('relate')
-  .description('Wire a typed edge from one memory to another (refines | supports | depends_on | conflicts_with)')
+  .description('Wire a typed edge from one memory to another (refines | supports | depends_on | derived_from | conflicts_with)')
   .requiredOption('--from <id>', 'memory id the edge originates from (the edge is written into this record)')
   .requiredOption('--to <id>', 'memory id the edge points at')
-  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | conflicts_with')
+  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | derived_from | conflicts_with')
   .option('--cwd <path>', 'project root')
   .action((options: { cwd?: string; from: string; to: string; type: string }) => {
     if (!(RELATION_TYPES as readonly string[]).includes(options.type)) {
@@ -171,10 +171,10 @@ program
 
 program
   .command('unrelate')
-  .description('Remove a typed edge from one memory (refines | supports | depends_on | conflicts_with); the inverse of relate')
+  .description('Remove a typed edge from one memory (refines | supports | depends_on | derived_from | conflicts_with); the inverse of relate')
   .requiredOption('--from <id>', 'memory id the edge originates from (the edge is removed from this record)')
   .requiredOption('--to <id>', 'memory id the edge points at')
-  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | conflicts_with')
+  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | derived_from | conflicts_with')
   .requiredOption('--reason <text>', 'why the edge is being removed (logged durably into the record)')
   .option('--cwd <path>', 'project root')
   .option('--source <source>', 'who is removing the edge')

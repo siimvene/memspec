@@ -189,6 +189,33 @@ test('an open-world question with one active answer is reported open, not resolv
   assert.doesNotMatch(status.stdout, /resolved by elimination/);
 });
 
+test('question --add that flips a resolved question back to open says "reopened" (CLI)', async () => {
+  const target = await initProject();
+  const a = await addFact(target, 'Reopen answer one');
+  const b = await addFact(target, 'Reopen answer two');
+  await runCli(['question', 'Which one reopens?', '--cwd', target, '--source', 'test', '--answers', a, b, '--closed']);
+  const qid = (await readdir(join(target, '.memspec', 'memory', 'questions')))[0].replace(/\.md$/, '');
+  await runCli(['supersede', b, '--cwd', target, '--reason', 'chose a']);
+  await runCli(['question', qid, '--cwd', target, '--resolve']);
+  let fm = await frontmatter(target, 'memory/questions', qid);
+  assert.equal(fm.state, 'resolved');
+
+  const c = await addFact(target, 'Reopen answer three');
+  const added = await runCli(['question', qid, '--cwd', target, '--add', c]);
+  assert.match(added.stdout, /reopened/);
+  fm = await frontmatter(target, 'memory/questions', qid);
+  assert.equal(fm.state, 'open');
+  assert.equal(fm.resolved_by, undefined);
+
+  // Adding an answer that does NOT touch a resolved question's state (the
+  // ordinary case) must not say "reopened".
+  const d = await addFact(target, 'Ordinary add answer');
+  await runCli(['question', 'Ordinary add question?', '--cwd', target, '--source', 'test', '--answers', c]);
+  const qid2 = (await readdir(join(target, '.memspec', 'memory', 'questions'))).map((f) => f.replace(/\.md$/, '')).find((id) => id !== qid)!;
+  const ordinaryAdd = await runCli(['question', qid2, '--cwd', target, '--add', d]);
+  assert.doesNotMatch(ordinaryAdd.stdout, /reopened/);
+});
+
 test('remember --answers-question registers the new record on the question (CLI)', async () => {
   const target = await initProject();
   const a = await addFact(target, 'First candidate');

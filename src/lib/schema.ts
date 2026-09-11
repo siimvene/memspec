@@ -25,7 +25,7 @@ const evidenceEntrySchema = z.object({
   sha256: z.string().optional().describe('sha256 (hex) of the copied file content; content-addresses the entry.'),
   name: z.string().optional().describe('Basename of the copied file as stored under `evidence/`.'),
   path: z.string().optional().describe('Path relative to the store root (under `evidence/`) where the file lives.'),
-  source: z.string().optional().describe('Original absolute path the file was copied from.'),
+  source: z.string().optional().describe('Where the file was copied from: `~`-relative under the home directory, `repo:path` relative to a detected repo root, or omitted when neither applies. Never an absolute path.'),
   url: z.string().optional().describe('http(s) URL, recorded as a pointer without fetching (mutually exclusive with the file fields).'),
   captured_at: z.string().describe('ISO 8601 timestamp when the evidence was attached.'),
 });
