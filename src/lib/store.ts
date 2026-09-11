@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { defaultConfigYaml, type ConfigGenerationOptions } from './config.js';
+import { defaultConfigYaml } from './config.js';
 import { FtsIndex } from './fts.js';
 import { parseMemoryFile, serializeMemoryFile } from './frontmatter.js';
 import { validateFrontmatter } from './schema.js';
@@ -103,7 +103,7 @@ export class MemspecStore {
     return join(this.root, 'config.yaml');
   }
 
-  init(configOptions?: ConfigGenerationOptions): void {
+  init(): void {
     const dirs = [
       this.root,
       join(this.root, 'observations'),
@@ -126,7 +126,7 @@ export class MemspecStore {
     }
 
     if (!existsSync(this.configPath)) {
-      writeFileSync(this.configPath, defaultConfigYaml(configOptions));
+      writeFileSync(this.configPath, defaultConfigYaml());
     }
   }
 
@@ -317,7 +317,6 @@ export class MemspecStore {
     writeFileSync(item.filePath, serializeMemoryFile(item));
   }
 
-  // Note: hybrid/embedding search is a planned future feature. Currently FTS5-only.
   search(query: string, options: StoreSearchOptions = {}): MemoryItem[] {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];

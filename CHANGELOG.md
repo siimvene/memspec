@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0 — unreleased
+
+### Removed
+
+- **Hybrid/embeddings search engine removed entirely.** Product decision, 2026-09-11: "drop the hybrid search entirely, it's been dead weight since the beginning." `src/lib/embeddings.ts` and its test are deleted; the `search:`/`SearchConfig`/`EmbeddingsConfig` config surface, the `--search-engine`/`--embeddings-*` CLI flags, and the corresponding `memspec init` prompts are gone. Retrieval is and stays FTS5/BM25 only — nothing in the runtime ever actually dispatched on `config.search.engine`, so this removes dead configuration surface, not a live code path. A pre-0.11 `search:` block in an existing `config.yaml` (deployed stores on other machines may still carry one) is ignored rather than rejected: `loadConfig` prints a one-line stderr warning (`memspec: config \`search:\` block is ignored (hybrid retrieval was removed in 0.11)`) once per process and otherwise behaves exactly as if the block were absent.
+
 ## 0.10.0 — 2026-08-19
 
 **Conflict-edge integrity.** The lexical conflict-inference rule (same type, one shared tag, two shared title tokens) was measured 8/8 wrong on real attachments: it stamped `conflicts_with` onto records that merely discussed the same topic. Combined with an append-only edge store (no removal path), the store grew from 30 to 177 conflict-bearing records in 12 days, all permanent. This release makes conflict edges caller-controlled and retractable.

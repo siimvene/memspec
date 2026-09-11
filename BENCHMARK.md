@@ -24,6 +24,7 @@ The original multi-condition harness (v0.4 vs v0.5 branches, edge-expansion vari
 - **LongMemEval-S Knowledge-Update stays saturated.** Ground-truth session ids are lexically distinctive and the answer session is the most BM25-relevant by dataset construction; the slice cannot differentiate retrieval strategies at this protocol. Reported for continuity, not bragging rights.
 - **LoCoMo's 30% miss pool is unchanged and BM25-shaped**: temporal-reference questions ("when did X happen?") whose answers are relative dates or session-boundary implications the tag-match protocol doesn't expose. The fix surface is temporal indexing/recency boost, not graph traversal (analysis in the v0.6.3 `BENCHMARK.md` still applies).
 - **Latency numbers are not comparable to the v0.5-era table** (different machine); they're included as current absolute figures only.
+- **The synthetic LoCoMo miss pool above is temporal, but that's not the whole story on a real store**: a 2026-08-01 eval against a real store (n=40) found the actual miss pool is semantic vocabulary mismatch, not temporal gaps — BM25 Recall@5 0.475 vs. a dense/embeddings variant's 0.825 on the same queries. The hybrid engine was nevertheless removed 2026-09-11 by product decision; retrieval stays FTS5-only.
 
 ## Rerun
 

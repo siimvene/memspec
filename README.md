@@ -7,10 +7,10 @@ Markdown files under `.memspec/` are the canonical source of truth: human-readab
 ## Architecture
 
 <p align="center">
-  <img src="assets/memspec_architecture_flow.svg" alt="How memspec works: agents read and write markdown memories under .memspec/, which flow through lifecycle, code anchors, linked notes, and hybrid search to the MCP server and session hooks" width="620">
+  <img src="assets/memspec_architecture_flow.svg" alt="How memspec works: agents read and write markdown memories under .memspec/, which flow through lifecycle, code anchors, linked notes, and FTS5/BM25 search to the MCP server and session hooks" width="620">
 </p>
 
-Agents `remember` claims and `observe` notes; everything lands as markdown under `.memspec/`. From there a structured layer — lifecycle (`active → superseded → retired`), code anchors, typed links, and temporal validity — feeds FTS5/hybrid search, the MCP server, and session-start hooks, so the next session wakes up with the right context instead of amnesia.
+Agents `remember` claims and `observe` notes; everything lands as markdown under `.memspec/`. From there a structured layer — lifecycle (`active → superseded → retired`), code anchors, typed links, and temporal validity — feeds FTS5/BM25 search, the MCP server, and session-start hooks, so the next session wakes up with the right context instead of amnesia.
 
 ## Features
 
@@ -25,7 +25,7 @@ Agents `remember` claims and `observe` notes; everything lands as markdown under
 - **Scope claims** (v0.9+). Stores declare which working directories they own; ingestion routes knowledge to the claiming store and holds unclaimed content local, so nothing crosses a sync boundary by default — team knowledge stays out of personal stores and vice versa.
 - **Transcript ingestion** (v0.9+). `normalize` → `distill` → `reduce` turns raw harness session logs (Claude Code, Codex) into weekly experience digests; the dream pass diffs them against memory writes to catch work that happened but was never recorded. Raw transcripts never leave the machine.
 - **Dedup-aware writes.** `remember` refuses near-duplicate claims and points at the existing record, so memory accretes corrections via `supersede` instead of silent duplicates.
-- **Hybrid search.** SQLite FTS5 + BM25 by default; optional dense embeddings rerank via OpenAI-compatible endpoints or Ollama.
+- **FTS5/BM25 search.** SQLite FTS5 relevance, recency-weighted, ranked per profile.
 - **MCP server.** Eleven tools, first-class integration with Claude Code, Cursor, Codex.
 - **Witnessed claims.** Every memory carries `verified_with` (`anchor | operator | evidence | assertion`) — provenance, not a confidence score.
 - **Dream pass** (v0.7+). Periodic reflection script (`memspec-dream`) reads the last N days of memspec writes and git log, asks an LLM to surface stale memories, supersede candidates, verify candidates, missing relations, and behavioural rules worth promoting. Output is review material, never auto-applied.
@@ -71,7 +71,7 @@ The `anchor → reconcile → verify | supersede` loop is the differentiator: cl
 | `MEMORY.md` / scratchpad | yes | no | none | grep | yes |
 | Vector DB (Chroma, Qdrant) | no | no | manual | semantic | yes |
 | Hosted memory API (Mem0, Letta) | no | no | hosted | hosted | no |
-| **Memspec** | per-claim | yes | typed states | FTS5 + optional hybrid | yes |
+| **Memspec** | per-claim | yes | typed states | FTS5 + BM25 | yes |
 
 If project memory fits in a paragraph in a single file, `AGENTS.md` is fine. Memspec is for when memory grows into a list of claims that need to track code reality, expire, supersede, and link to each other.
 
@@ -112,10 +112,7 @@ Drifted memories never auto-archive. They surface for human judgement via `memsp
 
 ## Search
 
-Two engines, picked at `memspec init`:
-
-- **FTS5** (default): SQLite full-text + BM25. Zero setup beyond `better-sqlite3`.
-- **Hybrid**: FTS5 candidates plus embeddings rerank. OpenAI-compatible endpoints or Ollama.
+SQLite FTS5 full-text + BM25, recency-weighted per profile. Zero setup beyond `better-sqlite3`.
 
 Index rebuilds on demand from the markdown files. Lose the index, lose speed — not data.
 
@@ -205,7 +202,7 @@ Ingestion (`memspec reduce`) routes each session's digest to the claiming store.
     operator/{facts,decisions,procedures}/ # operator-tier (separate path)
   observations/                            # raw, unclassified
   archive/                                 # superseded + retired
-  config.yaml                              # search engine, embeddings, decay
+  config.yaml                              # decay, profiles, scopes, stores
 ```
 
 Frontmatter fields per record: `id`, `kind`, `type`, `state`, `source`, `source_kind`, `verified_with` (`anchor | operator | evidence | assertion`), `tags`, `check_by`, `anchors`, `supersedes`, `superseded_by`, `conflicts_with`, `refines`, `supports`, `depends_on`, optional `valid_from` / `valid_to`. Human-readable, git-diffable, greppable.

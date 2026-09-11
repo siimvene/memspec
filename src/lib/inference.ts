@@ -42,8 +42,8 @@ export function titleTokenOverlap(aTitle: string, bTitle: string): number {
  * this from `search.ts:annotateConflicts` to the write path so the same
  * predicate is the basis for mid-band auto-attach in `remember`.
  *
- * Lexical only — no embeddings, no learned thresholds. Cheap to compute
- * and explainable.
+ * Lexical only — no vector similarity, no learned thresholds. Cheap to
+ * compute and explainable.
  */
 export function matchesConflictInferenceRule(
   aType: MemoryType,

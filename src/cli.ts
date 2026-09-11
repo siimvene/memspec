@@ -37,22 +37,12 @@ program
   .command('init')
   .description('Initialize a memspec store')
   .option('--cwd <path>', 'project root')
-  .option('--search-engine <engine>', 'fts5 (default) | hybrid (experimental, requires embeddings)')
-  .option('--embeddings-provider <provider>', 'openai | ollama')
-  .option('--embeddings-endpoint <url>', 'embedding endpoint URL')
-  .option('--embeddings-model <model>', 'embedding model name')
-  .option('--embeddings-api-key <key>', 'embedding API key')
   .option('--no-interactive', 'disable setup prompts')
   .option('--skip-import', 'skip brownfield memory import')
   .option('--skip-patch', 'skip AGENTS.md/CLAUDE.md patching')
   .option('--no-install-hooks', 'skip installing Claude Code hooks into ~/.claude/')
   .action(async (options: {
     cwd?: string;
-    searchEngine?: 'fts5' | 'hybrid';
-    embeddingsProvider?: string;
-    embeddingsEndpoint?: string;
-    embeddingsModel?: string;
-    embeddingsApiKey?: string;
     interactive?: boolean;
     skipImport?: boolean;
     skipPatch?: boolean;

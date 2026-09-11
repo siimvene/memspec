@@ -266,7 +266,7 @@ A retrieval response is an ordered list of memory items, ranked by relevance, tr
 
 ### 5.3 Ranking
 
-Query results are ranked by **relevance** (keyword/BM25 similarity, normalized per result set; optionally reranked by embeddings in hybrid mode) combined with **witness recency** (how recently the claim was last verified). Confidence is gone in v0.3 — trust is communicated through the witness class, not folded into the rank. Result hits are appended to a local usage log (`usage.jsonl`), which feeds the boot-context usage boost (§5.5).
+Query results are ranked by **relevance** (keyword/BM25 similarity, normalized per result set) combined with **witness recency** (how recently the claim was last verified). Confidence is gone in v0.3 — trust is communicated through the witness class, not folded into the rank. Result hits are appended to a local usage log (`usage.jsonl`), which feeds the boot-context usage boost (§5.5).
 
 ### 5.4 Retrieval Profiles
 

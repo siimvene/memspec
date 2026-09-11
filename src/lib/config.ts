@@ -4,18 +4,6 @@ import matter from 'gray-matter';
 import type { MemoryType } from './types.js';
 import { DEFAULT_DECAY_DAYS } from './types.js';
 
-export interface EmbeddingsConfig {
-  provider?: string;
-  endpoint?: string;
-  model?: string;
-  api_key?: string;
-}
-
-export interface SearchConfig {
-  engine: 'fts5' | 'hybrid';
-  embeddings?: EmbeddingsConfig;
-}
-
 export interface StabilizationConfig {
   enabled: boolean;
   min_confirmations: number;
@@ -58,7 +46,6 @@ export class MemspecConfigError extends Error {
 export interface MemspecConfig {
   decay: Record<string, string>;
   profiles: Record<string, MemspecProfile>;
-  search: SearchConfig;
   stabilization: StabilizationConfig;
   stores?: StoreLayerConfig[];
   anchors?: AnchorsConfig;
@@ -93,9 +80,6 @@ const DEFAULT_CONFIG: MemspecConfig = {
       min_confidence: 0.7,
       ranking: { relevance: 0.4, confidence: 0.3, recency: 0.3 },
     },
-  },
-  search: {
-    engine: 'fts5',
   },
   stabilization: {
     enabled: false,
@@ -175,6 +159,14 @@ export function parseClaimsConfig(raw: unknown, configPath: string): string[] | 
   return assertPatternList(raw, 'claims', configPath);
 }
 
+/**
+ * A legacy `search:` block (hybrid retrieval config from pre-0.11 stores) is
+ * ignored rather than rejected — deployed stores on other machines may still
+ * carry one. Warn once per process so the message doesn't spam every call
+ * into a config-heavy command.
+ */
+let warnedAboutLegacySearchBlock = false;
+
 export function loadConfig(root: string): MemspecConfig {
   const configPath = join(root, 'config.yaml');
   if (!existsSync(configPath)) return DEFAULT_CONFIG;
@@ -186,11 +178,10 @@ export function loadConfig(root: string): MemspecConfig {
     const data = parsed.data as Record<string, unknown> | null;
     if (!data) return DEFAULT_CONFIG;
 
-    const searchData = data.search as Record<string, unknown> | undefined;
-    const search: SearchConfig = {
-      engine: (searchData?.engine as 'fts5' | 'hybrid') ?? 'fts5',
-      embeddings: searchData?.embeddings as EmbeddingsConfig | undefined,
-    };
+    if (data.search !== undefined && !warnedAboutLegacySearchBlock) {
+      warnedAboutLegacySearchBlock = true;
+      process.stderr.write('memspec: config `search:` block is ignored (hybrid retrieval was removed in 0.11)\n');
+    }
 
     const stabData = data.stabilization as Record<string, unknown> | undefined;
     const stabilization: StabilizationConfig = {
@@ -221,7 +212,6 @@ export function loadConfig(root: string): MemspecConfig {
     return {
       decay: { ...DEFAULT_CONFIG.decay, ...(data.decay as Record<string, string> ?? {}) },
       profiles: { ...DEFAULT_CONFIG.profiles, ...(data.profiles as MemspecConfig['profiles'] ?? {}) },
-      search,
       stabilization,
       stores,
       anchors,
@@ -265,15 +255,7 @@ export function getProfile(config: MemspecConfig, name: string = 'default'): Mem
   };
 }
 
-export interface ConfigGenerationOptions {
-  searchEngine?: 'fts5' | 'hybrid';
-  embeddingsProvider?: string;
-  embeddingsEndpoint?: string;
-  embeddingsModel?: string;
-  embeddingsApiKey?: string;
-}
-
-export function defaultConfigYaml(options: ConfigGenerationOptions = {}): string {
+export function defaultConfigYaml(): string {
   let yaml = `# Memspec configuration
 # Files are canonical. Derived indexes are disposable.
 
@@ -333,31 +315,6 @@ profiles:
 #     priority: 10
 #     writable: true
 `;
-
-  if (options.searchEngine === 'hybrid' && options.embeddingsProvider) {
-    yaml += `
-# engine: fts5 (default) | hybrid (requires embeddings config -- future feature)
-search:
-  engine: hybrid
-  embeddings:
-    provider: ${options.embeddingsProvider}
-`;
-    if (options.embeddingsEndpoint) {
-      yaml += `    endpoint: ${options.embeddingsEndpoint}\n`;
-    }
-    if (options.embeddingsModel) {
-      yaml += `    model: ${options.embeddingsModel}\n`;
-    }
-    if (options.embeddingsApiKey) {
-      yaml += `    api_key: ${options.embeddingsApiKey}\n`;
-    }
-  } else {
-    yaml += `
-# engine: fts5 (default) | hybrid (requires embeddings config -- future feature)
-search:
-  engine: fts5
-`;
-  }
 
   return yaml;
 }
