@@ -106,7 +106,7 @@ export function anchorWithinBase(base: string, file: string): boolean {
 }
 
 /** Locate a cross-repo anchor's checkout: sibling of the project root first, then configured search paths. */
-function resolveRepoRoot(projectRoot: string, repo: string, searchPaths: string[]): string | null {
+export function resolveRepoRoot(projectRoot: string, repo: string, searchPaths: string[]): string | null {
   const candidates = [
     resolve(projectRoot, '..', repo),
     ...searchPaths.map((path) => resolve(expandHome(path), repo)),
@@ -189,4 +189,139 @@ export function checkAnchors(projectRoot: string, anchors: CodeAnchor[], options
       currentSha === null ? 'missing' : currentSha === anchor.sha ? 'unchanged' : 'changed';
     return { ...anchor, currentSha, status };
   });
+}
+
+// --- Write-side anchor resolution (DEFECT A) ------------------------------
+//
+// The READ side (checkAnchors / resolveAnchorRepo) already understands
+// cross-repo anchors via a `repo` field. The WRITE side used to resolve every
+// path against a single project root, so an agent working in ~/git/memspec but
+// writing to a home-rooted personal store (projectRoot = $HOME) had its
+// repo-relative paths ("src/lib/store.ts") silently rejected — the record
+// degraded to witness:assertion. This resolver mirrors the read side so the
+// two agree on the recorded {repo, file} form.
+
+export interface AnchorResolveOptions {
+  /** Caller-supplied checkout directory a repo-relative path belongs to (CLI --anchor-root, MCP anchor_root). */
+  anchorRoot?: string;
+  /** Directories searched (after the project root's parent) for cross-repo checkouts — from anchors.repo_search_paths. */
+  repoSearchPaths?: string[];
+}
+
+export type AnchorResolution = { anchor: CodeAnchor } | { error: string };
+
+function toPosix(p: string): string {
+  return p.split(sep).join('/');
+}
+
+/**
+ * Split a repo-qualified relative path into `{repo, sub}`. Accepts an explicit
+ * `repo:sub/path` colon form and the plain `repo/sub/path` form (first path
+ * segment is the repo name). Returns null when there is no sub-path, or when
+ * the first segment is a traversal token (`.`/`..`) that would name no repo.
+ */
+function splitRepoQualified(input: string): { repo: string; sub: string } | null {
+  const colon = input.indexOf(':');
+  if (colon > 0) {
+    const repo = input.slice(0, colon);
+    const sub = input.slice(colon + 1);
+    if (repo && sub && repo !== '.' && repo !== '..') return { repo, sub };
+    return null;
+  }
+  const norm = toPosix(input);
+  const slash = norm.indexOf('/');
+  if (slash > 0) {
+    const repo = norm.slice(0, slash);
+    const sub = norm.slice(slash + 1);
+    if (repo && sub && repo !== '.' && repo !== '..') return { repo, sub };
+  }
+  return null;
+}
+
+/**
+ * Resolve one write-time anchor path to a `{file, sha, repo?}` record, matching
+ * what the read side can later resolve. Order:
+ *  1. Absolute path → repo-less + project-relative when inside the store's own
+ *     project root, otherwise recorded against the file's own git repo (walk up
+ *     to `.git`), `repo` = that repo's basename.
+ *  2. Relative path found under the project root → today's repo-less form.
+ *  3. Relative path under a caller-supplied `anchorRoot` → recorded against the
+ *     enclosing git repo (or the anchor root itself when it is not a checkout).
+ *  4. Relative repo-qualified path (`repo:path` / `repo/path`) → repo resolved
+ *     as a sibling of the project root, then under each `repoSearchPaths` entry.
+ * Containment is enforced on every branch: a `..`, absolute, or symlink escape
+ * out of the resolved base is treated as not found, never followed.
+ */
+export function resolveAnchorForWrite(
+  projectRoot: string,
+  input: string,
+  options: AnchorResolveOptions = {},
+): AnchorResolution {
+  const searchPaths = options.repoSearchPaths ?? [];
+
+  if (isAbsolute(input)) {
+    const abs = resolve(input);
+    const sha = blobSha(abs);
+    if (sha === null) return { error: `Skipped ${input}: no readable file at that absolute path` };
+
+    const relToProject = relative(projectRoot, abs);
+    if (relToProject !== '' && !relToProject.startsWith('..') && anchorWithinBase(projectRoot, relToProject)) {
+      return { anchor: { file: toPosix(relToProject), sha } };
+    }
+    const repoRoot = findRepoRoot(dirname(abs));
+    if (!repoRoot) {
+      return {
+        error: `Skipped ${input}: outside the store's project root (${projectRoot}) and not inside any git repository; anchor it from within its repo or pass anchor_root`,
+      };
+    }
+    const relToRepo = relative(repoRoot, abs);
+    if (relToRepo.startsWith('..') || !anchorWithinBase(repoRoot, relToRepo)) {
+      return { error: `Skipped ${input}: resolves outside its git repository (${repoRoot})` };
+    }
+    return { anchor: { file: toPosix(relToRepo), sha, repo: basename(repoRoot) } };
+  }
+
+  const rootsTried: string[] = [projectRoot];
+
+  // 1. Under the project root (today's behaviour).
+  const relInProject = relative(projectRoot, resolve(projectRoot, input));
+  if (!relInProject.startsWith('..') && anchorWithinBase(projectRoot, input)) {
+    const sha = blobSha(resolve(projectRoot, input));
+    if (sha !== null) return { anchor: { file: toPosix(relInProject), sha } };
+  }
+
+  // 2. Caller-supplied anchor root.
+  if (options.anchorRoot) {
+    const base = resolve(options.anchorRoot);
+    rootsTried.push(base);
+    if (anchorWithinBase(base, input)) {
+      const abs = resolve(base, input);
+      const sha = blobSha(abs);
+      if (sha !== null) {
+        // Record against the file's own git repo so the recorded `repo` name is
+        // what the read side resolves; fall back to the anchor root when it is
+        // not itself a git checkout (mirrors the sibling-dir read path).
+        const repoRoot = findRepoRoot(dirname(abs)) ?? base;
+        const relToRepo = relative(repoRoot, abs);
+        if (!relToRepo.startsWith('..') && anchorWithinBase(repoRoot, relToRepo)) {
+          return { anchor: { file: toPosix(relToRepo), sha, repo: basename(repoRoot) } };
+        }
+      }
+    }
+  }
+
+  // 3. Repo-qualified: sibling of the project root, then each search path.
+  const rq = splitRepoQualified(input);
+  if (rq) {
+    rootsTried.push(resolve(projectRoot, '..', rq.repo), ...searchPaths.map((p) => resolve(expandHome(p), rq.repo)));
+    const repoRoot = resolveRepoRoot(projectRoot, rq.repo, searchPaths);
+    if (repoRoot && anchorWithinBase(repoRoot, rq.sub)) {
+      const sha = blobSha(resolve(repoRoot, rq.sub));
+      if (sha !== null) return { anchor: { file: toPosix(rq.sub), sha, repo: basename(repoRoot) } };
+    }
+  }
+
+  return {
+    error: `Skipped ${input}: not found under ${rootsTried.join(', ')}; pass an absolute path or anchor_root`,
+  };
 }

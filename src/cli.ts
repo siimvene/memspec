@@ -61,7 +61,8 @@ program
   .requiredOption('--source <source>', 'creator identifier (required; "unknown" is rejected)')
   .option('--tags <tags>', 'comma-separated tags')
   .option('--check-by <value>', 'ISO timestamp or "never"')
-  .option('--anchor <file...>', 'project-root-relative file paths to anchor this claim to')
+  .option('--anchor <file...>', 'file paths to anchor this claim to — absolute (preferred), project-relative, or repo-qualified (repo/path)')
+  .option('--anchor-root <dir>', 'checkout dir a repo-relative --anchor path belongs to when it lives outside the project root (recorded as a cross-repo anchor)')
   .option('--store <layer>', 'target store layer (e.g., "global" for ~/.memspec)')
   .option('--scope <name>', 'record scope; overrides the scope derived from cwd via config `scopes:` ("universal" = visible everywhere)')
   .option('--pin', 'always surface this claim in boot context (operator-only; CLI flag, not on the MCP surface)')
@@ -72,7 +73,7 @@ program
   .option('--valid-from <iso>', 'ISO 8601 timestamp — world-state truth window starts at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .option('--valid-to <iso>', 'ISO 8601 timestamp — world-state truth window ends at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .action((type: string, title: string, options: {
-    cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; store?: string; pin?: boolean;
+    cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; anchorRoot?: string; store?: string; pin?: boolean;
     refines?: string[]; supports?: string[]; dependsOn?: string[]; conflictsWith?: string[]; validFrom?: string; validTo?: string; scope?: string;
   }) => {
     const result = runRemember(type, title, {
@@ -86,6 +87,7 @@ program
       tags: options.tags,
       checkBy: options.checkBy,
       anchors: options.anchor,
+      anchorRoot: options.anchorRoot,
       store: options.store,
       pin: options.pin,
       refines: options.refines,
@@ -234,11 +236,12 @@ program
   .command('anchor')
   .description('Link a memory to the files it depends on (records git blob SHAs)')
   .argument('<id>', 'memory ID to anchor')
-  .argument('<files...>', 'file paths relative to the project root')
+  .argument('<files...>', 'file paths to anchor — absolute (preferred), project-relative, or repo-qualified (repo/path)')
   .option('--cwd <path>', 'project root')
+  .option('--anchor-root <dir>', 'checkout dir a repo-relative path belongs to when it lives outside the project root (recorded as a cross-repo anchor)')
   .option('--replace', 'replace existing anchors instead of merging')
   .option('--source <source>', 'who is anchoring')
-  .action((id: string, files: string[], options: { cwd?: string; replace?: boolean; source?: string }) => {
+  .action((id: string, files: string[], options: { cwd?: string; anchorRoot?: string; replace?: boolean; source?: string }) => {
     console.log(runAnchor(id, files, options).message);
   });
 

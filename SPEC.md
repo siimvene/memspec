@@ -263,6 +263,12 @@ A retrieval response is an ordered list of memory items, ranked by relevance, tr
 - Known `conflicts_with` edges (including edges to non-returned claims, with their titles inline)
 - The creation date
 - When `expand_edges` surfaced the hit, an `expanded_via: {from_id, edge_type, hops}` field naming the search match the linked note was reached from (v0.5+)
+- For an active anchored hit, a read-path `drifted` flag (v0.11+) — true when an anchored file's content changed or went missing since the record was last anchored — plus `anchor_unchecked` when a cross-repo anchor's repo is not checked out here (drift could not be determined) and a per-file `drift: [{file, status}]` list. The check never mutates the record; `reconcile` remains the authority for repair.
+
+The response as a whole MUST also include (v0.11+):
+- `coverage: none | weak | ok` — a deterministic absence-disclosure verdict. `none` = no active record matches the query in the active scope; `weak` = fewer than half of the distinct query terms (length >= 3, stemmed) occur in the top hit's title+tags+body, OR the best hit matched only via title/tags with no query term in its body, OR its BM25 relevance is above the weak floor; `ok` = a genuine match exists. When the term-coverage rule fires, `coverage_note` names the unmatched query terms. Agents SHOULD treat `none`/`weak` as "the store does not reliably know this" rather than reading meaning into rank order.
+- `coverage_note` — a one-sentence human-readable gloss of the verdict.
+- `coverage_witness` — the strongest witness class among the returned hits (`anchor > operator > evidence > assertion`), or null when there are no hits, so an unverified result set is distinguishable from an anchored one without inspecting each row.
 
 ### 5.3 Ranking
 
@@ -706,6 +712,8 @@ A memory about code state ("auth uses argon2id", "the app has 7 screens") goes s
 Anchors are a convention, not a schema requirement. Tools that understand them (verify, reconcile, anchor-aware decay) use them; tools that don't ignore them. Memories without anchors keep calendar-only behavior.
 
 **Cross-repo anchors.** An anchor MAY carry a `repo` field naming another repository the anchored file lives in. Verification resolves the repo as a sibling directory of the project root first, then under directories listed in `anchors.repo_search_paths` in `config.yaml`. When the repo is not checked out, verification returns `needs_review` with "anchor in repo X, fetch to verify" — the claim is flagged, never failed hard, and never mutated. Anchors without `repo` behave exactly as before.
+
+**Write-side resolution (v0.11).** The write side (`remember`, `anchor`) resolves an anchor path to the same `{repo, file}` form the read side understands, so anchors survive a store whose project root is not the repo being worked on (the home-rooted personal store, where the root is `$HOME`). An absolute path is recorded repo-less and project-relative when it lies inside the store's project root, otherwise against its own enclosing git repository (`repo` = that repo's basename). A relative path is tried under the project root, then under a caller-supplied `anchor_root` (CLI `--anchor-root`, MCP `anchor_root`), then as a repo-qualified `repo:path` / `repo/path` resolved as a sibling or under `anchors.repo_search_paths`. A path that resolves nowhere yields an actionable warning and the record is written without that anchor — never silently. Containment holds on every branch: a `..`, absolute, or symlink escape out of the resolved repo is treated as not found.
 
 **Anchorless verification.** As of v0.2, verifying a memory that has no anchors REQUIRES evidence text stating what was checked (recorded in `ext.last_verification.evidence`). A bare anchorless verify is the system trusting its own output and is rejected.
 

@@ -10,7 +10,7 @@ import { runObserve } from './commands/observe.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runRelate, runUnrelate, relationTypeSchema } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
-import { searchPayload, type SearchExpandDepth, type SearchResult } from './commands/search.js';
+import { formatCoverageLine, searchPayload, type SearchExpandDepth, type SearchPayload, type SearchResult } from './commands/search.js';
 import { EDGE_TYPES } from './lib/graph-walk.js';
 import { buildStatusReport, runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
@@ -32,15 +32,18 @@ const server = new McpServer({
   version: '0.10.0',
 });
 
-function renderSearchText(payload: { query: string; results: SearchResult[] }): string {
-  if (payload.results.length === 0) return `No results for "${payload.query}"`;
+function renderSearchText(payload: SearchPayload): string {
+  if (payload.results.length === 0) {
+    return `No results for "${payload.query}"\n\n${formatCoverageLine(payload)}`;
+  }
   const lines: string[] = [`${payload.results.length} result(s) for "${payload.query}"`, ''];
   for (const item of payload.results) {
     const conflictTag = item.conflicts_with.length > 0 ? ` [CONFLICTS WITH ${item.conflicts_with.join(', ')}]` : '';
     const expandedTag = item.expanded_via
       ? ` [via ${item.expanded_via.edge_type} from ${item.expanded_via.from_id} @ hop ${item.expanded_via.hops}]`
       : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${conflictTag}${expandedTag}`);
+    const driftTag = item.drifted ? ' [DRIFTED — anchored code changed; verify or supersede]' : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) lines.push(`  tags: ${item.tags.join(', ')}`);
     if (item.body !== undefined) {
@@ -50,6 +53,7 @@ function renderSearchText(payload: { query: string; results: SearchResult[] }): 
     }
     lines.push('');
   }
+  lines.push(formatCoverageLine(payload));
   return lines.join('\n');
 }
 
@@ -57,7 +61,7 @@ function renderSearchText(payload: { query: string; results: SearchResult[] }): 
 
 server.tool(
   'memspec_search',
-  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface linked-note matches — records reached by following the named links on each search match (refines / supports / depends_on / conflicts_with / supersedes / superseded_by); linked-note hits carry an `expanded_via` field naming the match and link that surfaced them. Pass as_of to filter by world-state validity at a specific point in time.',
+  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Trust the top-level `coverage` field over rank when deciding whether the store actually knows something: `coverage: "none"` means no active record matches — treat it as "nothing here", do not infer an answer from an empty or low-rank result; `coverage: "weak"` means the matches are low-relevance (fewer than half the query terms occur in the top hit — the coverage_note names the unmatched ones — or a title/tag-only match, or barely above the BM25 floor) — do not read meaning into rank order. `coverage_witness` names the strongest witness backing the hits (anchor > operator > evidence > assertion): coverage "ok" with witness "assertion" is "the store claims this but nothing has verified it". A result carrying `drifted: true` is anchored to code that has since changed — verify or supersede it before relying on it; `anchor_unchecked: true` means its repo is not checked out here so drift could not be checked. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface linked-note matches — records reached by following the named links on each search match (refines / supports / depends_on / conflicts_with / supersedes / superseded_by); linked-note hits carry an `expanded_via` field naming the match and link that surfaced them. Pass as_of to filter by world-state validity at a specific point in time.',
   {
     query: z.string().describe('Search terms'),
     type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
@@ -95,6 +99,9 @@ server.tool(
           count: payload.count,
           full: payload.full,
           results: payload.results,
+          coverage: payload.coverage,
+          coverage_note: payload.coverage_note,
+          coverage_witness: payload.coverage_witness,
         },
       };
     } catch (err) {
@@ -120,6 +127,9 @@ server.tool(
         return { content: [{ type: 'text' as const, text: `No memory found with id: ${id}` }], isError: true };
       }
       const lineage = buildLineage(item, allItems);
+      // DEFECT B — read-path drift for the single record, resolved against its
+      // own layer. Absent fields (undefined) for an unanchored record.
+      const drift = store.annotateDrift([item]).get(item.id);
       const payload = {
         id: item.id,
         kind: item.kind,
@@ -134,6 +144,9 @@ server.tool(
         check_by: item.check_by,
         last_verified: item.last_verified ?? item.created,
         anchors: item.anchors,
+        drifted: drift?.drifted,
+        anchor_unchecked: drift?.anchor_unchecked,
+        drift: drift && drift.drift.length > 0 ? drift.drift : undefined,
         probe: item.probe,
         supersedes: item.supersedes,
         superseded_by: item.superseded_by,
@@ -168,6 +181,7 @@ interface RememberArgs {
   source?: string;
   tags?: string[];
   anchors?: string[];
+  anchor_root?: string;
   check_by?: string;
   store?: string;
   refines?: string[];
@@ -179,7 +193,7 @@ interface RememberArgs {
   scope?: string;
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, check_by, store: storeName, refines, supports, depends_on, conflicts_with, valid_from, valid_to, scope }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, anchor_root, check_by, store: storeName, refines, supports, depends_on, conflicts_with, valid_from, valid_to, scope }: RememberArgs) {
   try {
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
     const result = runRemember(type, title, {
@@ -193,6 +207,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
       tags: tags?.join(','),
       checkBy: check_by,
       anchors,
+      anchorRoot: anchor_root,
       store: storeName,
       refines,
       supports,
@@ -240,14 +255,15 @@ async function handleRemember({ type, title, body, source, tags, anchors, check_
 
 server.tool(
   'memspec_remember',
-  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Search first to avoid duplicates. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
+  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Prefer ABSOLUTE file paths in anchors (e.g. /Users/you/git/repo/src/x.ts): this server may run against a personal/global store whose project root is your home directory, so a bare repo-relative path like "src/x.ts" resolves nowhere and the claim silently degrades to an unanchored assertion. If you must pass repo-relative paths, also pass anchor_root pointing at that repo\'s checkout. An anchor that resolves nowhere comes back in anchor_warnings telling you what to pass. Search first to avoid duplicates. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
   {
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
     body: z.string().optional().describe('Full content/details'),
     source: z.string().optional().describe('Who/what created this memory (defaults to the connected client name; "unknown" is rejected)'),
     tags: z.array(z.string()).optional().describe('Tags'),
-    anchors: z.array(z.string()).optional().describe('Project-root-relative file paths to anchor the claim to. If the claim describes code, anchor it now.'),
+    anchors: z.array(z.string()).optional().describe('File paths to anchor the claim to. Prefer ABSOLUTE paths — a bare repo-relative path resolves nowhere when the store\'s project root is not the repo (e.g. a home-rooted personal store). Repo-relative and repo-qualified ("repo/path") forms are also accepted; pass anchor_root for the former. If the claim describes code, anchor it now.'),
+    anchor_root: z.string().optional().describe('Checkout directory that repo-relative entries in `anchors` belong to, when the file lives outside the store\'s project root. Recorded as a cross-repo anchor.'),
     check_by: z.string().optional().describe('ISO timestamp or "never" — overrides the type default TTL'),
     store: z.string().optional().describe('Target store layer name (e.g., "global" for cross-project memory)'),
     refines: z.array(z.string()).optional().describe('Memory ids this record refines (forms a typed edge to each target; parent stays valid)'),
@@ -373,13 +389,14 @@ server.tool(
   'Link a memory to the source files it depends on. Records the git blob SHA of each file so verify/reconcile can detect when the code a memory describes has changed. Anchoring also asserts the memory is true against the current file state.',
   {
     id: z.string().describe('Memory ID to anchor'),
-    files: z.array(z.string()).min(1).describe('File paths relative to the project root'),
+    files: z.array(z.string()).min(1).describe('File paths to anchor. Prefer ABSOLUTE paths — a bare repo-relative path resolves nowhere when the store\'s project root is not the repo. Repo-qualified ("repo/path") and, with anchor_root, repo-relative forms are also accepted.'),
+    anchor_root: z.string().optional().describe('Checkout directory that repo-relative entries in `files` belong to, when they live outside the store\'s project root. Recorded as a cross-repo anchor.'),
     replace: z.boolean().optional().describe('Replace existing anchors instead of merging'),
     source: z.string().optional().describe('Who is anchoring'),
   },
-  async ({ id, files, replace, source }) => {
+  async ({ id, files, anchor_root, replace, source }) => {
     try {
-      const result = runAnchor(id, files, { cwd: defaultCwd, replace, source });
+      const result = runAnchor(id, files, { cwd: defaultCwd, anchorRoot: anchor_root, replace, source });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {

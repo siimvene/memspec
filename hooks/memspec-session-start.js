@@ -46,8 +46,12 @@ function findMemspecRoot(cwd) {
 // Dream passes land in <store>/dream/YYYY-MM-DD.md with no review state.
 // A file counts as reviewed when it contains a "_Reviewed:" line (added by
 // the agent after the operator walks through it; git-synced stores keep the
-// marker consistent across machines). Dream is a personal-store feature, so
-// the check targets the home store regardless of which store won resolution.
+// marker consistent across machines). Dream was originally a personal-store
+// feature (the check always covers the home store regardless of which store
+// won resolution), but a project/team store can now run its own dream pass
+// too (v0.12 precursor) — see the dual-store call in runHook below, which
+// additionally checks the resolved store's own dream/ dir when it differs
+// from the home store.
 //
 // A file whose body carries a "_Status: FAILED" line (added by bin/dream when
 // the underlying `claude` call failed, e.g. an expired OAuth session on the
@@ -56,7 +60,11 @@ function findMemspecRoot(cwd) {
 // FAILED files are reported separately and excluded from the pending list
 // and its counts. Files with neither marker (older passes, or a fresh
 // no-activity note) fall through to the pending-review path as before.
-function pendingDreamNotice(memspecRoot) {
+//
+// `storeLabel` (e.g. "store: ~/.memspec" or "store: /path/to/project/.memspec")
+// is folded into the section headers so a session with two active dream
+// notices (home + project) can tell which is which.
+function pendingDreamNotice(memspecRoot, storeLabel) {
   try {
     const dreamDir = path.join(memspecRoot, 'dream');
     if (!fs.existsSync(dreamDir)) return '';
@@ -79,7 +87,7 @@ function pendingDreamNotice(memspecRoot) {
         .replace(/^_Status: FAILED\s*—?\s*/, '')
         .replace(/_\s*$/, '')
         .trim();
-      let failNotice = `## Dream pass FAILED\n\n${latestFailed.name.replace('.md', '')}: ${reasonLine || 'unknown error'}\nthe weekly pass did not run; fix the runner (claude login on the host that ran it) — see dream/${latestFailed.name}`;
+      let failNotice = `## Dream pass FAILED (${storeLabel})\n\n${latestFailed.name.replace('.md', '')}: ${reasonLine || 'unknown error'}\nthe weekly pass did not run; fix the runner (claude login on the host that ran it) — see dream/${latestFailed.name}`;
       if (failed.length > 1) failNotice += `\n(${failed.length - 1} older FAILED pass(es) also unresolved.)`;
       parts.push(failNotice);
     }
@@ -98,7 +106,7 @@ function pendingDreamNotice(memspecRoot) {
         .filter((l) => l.startsWith('- '))
         .map((l) => l.replace(/\*\*/g, '').slice(2, 120));
 
-      let notice = `## Dream pass pending review\n\n${latest.name.replace('.md', '')} (${counts.join(', ')}) at dream/${latest.name} — proposals only, nothing auto-applied. Offer to walk the operator through it; after review, prepend a "_Reviewed: <date> — <disposition summary>_" line under the title and commit.`;
+      let notice = `## Dream pass pending review (${storeLabel})\n\n${latest.name.replace('.md', '')} (${counts.join(', ')}) at dream/${latest.name} — proposals only, nothing auto-applied. Offer to walk the operator through it; after review, prepend a "_Reviewed: <date> — <disposition summary>_" line under the title and commit.`;
       if (questions.length) notice += `\nOpen questions needing the operator: ${questions.join(' | ')}`;
       if (pending.length > 1) notice += `\n(${pending.length - 1} older unreviewed pass(es) also pending.)`;
       parts.push(notice);
@@ -267,9 +275,21 @@ function runHook(data) {
       if (out === null) { emit(''); return; }
       context = out;
     }
-    // Dream passes live only in the personal store, even when a project
-    // store won resolution — surface them regardless of cwd.
-    const dreamNotice = pendingDreamNotice(path.join(os.homedir(), '.memspec'));
+    // Dream passes always live in the personal store, even when a project
+    // store won resolution — surface them regardless of cwd. A project/team
+    // store can now run its own dream pass too (v0.12 precursor): check its
+    // dream/ dir as well when it's a different directory than the home
+    // store, so nothing is checked (or shown) twice for the common case
+    // where the resolved store IS the home store.
+    const homeMemspecRoot = path.join(os.homedir(), '.memspec');
+    const dreamNoticeParts = [];
+    const homeDreamNotice = pendingDreamNotice(homeMemspecRoot, 'store: ~/.memspec');
+    if (homeDreamNotice) dreamNoticeParts.push(homeDreamNotice);
+    if (path.resolve(memspecRoot) !== path.resolve(homeMemspecRoot)) {
+      const projectDreamNotice = pendingDreamNotice(memspecRoot, `store: ${memspecRoot}`);
+      if (projectDreamNotice) dreamNoticeParts.push(projectDreamNotice);
+    }
+    const dreamNotice = dreamNoticeParts.join('\n\n');
     const combined = [context, dreamNotice, claimsCheckNotice()].filter(Boolean).join('\n\n');
     if (!combined) {
       emit('');

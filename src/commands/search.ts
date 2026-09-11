@@ -4,7 +4,8 @@ import { getProfile, loadConfig } from '../lib/config.js';
 import { EDGE_TYPES, expandGraph, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
-import { type StoreSearchOptions } from '../lib/store.js';
+import { type SearchRelevanceMeta, type StoreSearchOptions } from '../lib/store.js';
+import { type DriftStatus } from '../lib/drift.js';
 import { MEMORY_TYPES, type LifecycleState, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits } from '../lib/usage.js';
 
@@ -114,7 +115,26 @@ export interface SearchResult {
    * field is omitted — the dedupe rule keeps the BM25 score visible.
    */
   expanded_via?: ExpansionHit;
+  /**
+   * DEFECT B — read-path anchor drift. Present only on active anchored records:
+   * `drifted` is true when an anchored file changed or went missing within an
+   * available repo; `anchor_unchecked` is true when at least one anchor could
+   * not be checked (repo not checked out). Both absent on unanchored records.
+   */
+  drifted?: boolean;
+  anchor_unchecked?: boolean;
+  drift?: Array<{ file: string; status: DriftStatus }>;
 }
+
+/**
+ * DEFECT C — how well the store actually covers this query.
+ * `none`  = zero active records match the query in scope.
+ * `weak`  = matches exist but are low-signal: the strongest hit's BM25 is above
+ *           the weak threshold, or the best hit matched only via title/tags with
+ *           no query term in its body. Do not infer from rank.
+ * `ok`    = a genuine match exists.
+ */
+export type Coverage = 'none' | 'weak' | 'ok';
 
 export interface SearchPayload {
   query: string;
@@ -122,7 +142,40 @@ export interface SearchPayload {
   count: number;
   full: boolean;
   results: SearchResult[];
+  coverage: Coverage;
+  coverage_note: string;
+  /** Strongest witness tier among the returned hits (anchor > operator > evidence > assertion); null when none. */
+  coverage_witness: VerifiedWith | null;
 }
+
+/**
+ * Weak-coverage BM25 cut. bm25() is negative, lower = better. Calibrated on the
+ * fixture stores (test/fixtures + the temp stores the search tests build):
+ * single-common-token, body-only hits scored about -0.5, while every real
+ * title-token or multi-term hit scored -0.95 or better (more negative). -0.7
+ * splits those with margin and errs toward `ok` — it only flags the clear noise
+ * tail, leaving legitimate single-term title matches as `ok`. The body-match
+ * signal below is the corpus-size-independent backstop, since absolute BM25
+ * shifts with IDF as the store grows.
+ */
+const WEAK_BM25_THRESHOLD = -0.7;
+
+/**
+ * Scores between this and 0 are treated as no signal, not as a weak match. At
+ * tiny corpus sizes BM25's IDF term collapses to log(1) = 0 (e.g. N=2, term in
+ * 1 doc), which surfaces as a near-zero score (~-1e-6 after float math) even for
+ * a strong title hit. The body-match test decides those cases instead.
+ */
+const BM25_NEGLIGIBLE = -1e-3;
+
+/** Witness strength order for coverage_witness (lower index = stronger). */
+const WITNESS_STRENGTH: Record<VerifiedWith, number> = {
+  anchor: 0,
+  probe: 1,
+  operator: 2,
+  evidence: 3,
+  assertion: 4,
+};
 
 /**
  * Token budget for full bodies — chars/4 heuristic, no tokenizer dependency.
@@ -284,7 +337,8 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     }
   }
 
-  let items = store.search(query, storeOptions);
+  const relevanceMeta: SearchRelevanceMeta = { topBm25: null };
+  let items = store.search(query, storeOptions, relevanceMeta);
   if (asOfDate !== undefined) {
     items = items.filter((item) => isValidAsOf(item, asOfDate));
   }
@@ -377,9 +431,27 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     }
   }
 
+  // DEFECT B — annotate read-path drift onto the active anchored rows. Bounded
+  // to the returned set; never throws; memoized SHAs keep a long-lived MCP
+  // server from re-hashing stable files per query.
+  const driftById = store.annotateDrift([...items, ...expansionItems]);
+  for (const row of results) {
+    const drift = driftById.get(row.id);
+    if (!drift) continue;
+    row.drifted = drift.drifted;
+    row.anchor_unchecked = drift.anchor_unchecked;
+    if (drift.drift.length > 0) row.drift = drift.drift;
+  }
+
   if (results.length > 0) {
     recordSearchHits(store.root, results.map((r) => r.id));
   }
+
+  // DEFECT C — coverage disclosure, judged on the SEED matches (direct query
+  // hits), not the expansion frontier. Expansion only runs when seeds exist, so
+  // zero seeds == zero results == no coverage.
+  const coverageWitness = strongestWitness(results);
+  const { coverage, coverage_note } = classifyCoverage(query, items, relevanceMeta, activeScope);
 
   return {
     query,
@@ -387,21 +459,137 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     count: results.length,
     full,
     results,
+    coverage,
+    coverage_note,
+    coverage_witness: coverageWitness,
   };
+}
+
+/** Strongest witness tier among the returned rows (null when there are none). */
+function strongestWitness(results: SearchResult[]): VerifiedWith | null {
+  let best: VerifiedWith | null = null;
+  for (const r of results) {
+    if (best === null || WITNESS_STRENGTH[r.verified_with] < WITNESS_STRENGTH[best]) {
+      best = r.verified_with;
+    }
+  }
+  return best;
+}
+
+/** Does any raw query term appear as a substring in the item's body? */
+function bodyMatchesQuery(item: MemoryItem, terms: string[]): boolean {
+  const body = item.body.toLowerCase();
+  return terms.some((t) => body.includes(t));
+}
+
+/**
+ * Light suffix strip approximating the FTS5 `porter` tokenizer, enough that a
+ * query term and an inflected form in the text collapse to the same root for
+ * the term-coverage test (`tariffs`↔`tariff`, `retries`↔`retri`). Not a full
+ * porter implementation — this is a coverage heuristic, not the FTS match.
+ */
+function coverageStem(term: string): string {
+  return term.replace(/(?:ingly|edly|ing|edly|ed|ly|es|s)$/u, '');
+}
+
+/** Distinct query terms of length >= 3, lowercased, order-preserving. */
+function coverageTerms(query: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of query.toLowerCase().split(/\s+/)) {
+    if (t.length >= 3 && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+/** A query term occurs in the text if the term or its stem appears as a substring. */
+function termOccursIn(term: string, haystack: string): boolean {
+  if (haystack.includes(term)) return true;
+  const stem = coverageStem(term);
+  return stem.length >= 3 && haystack.includes(stem);
+}
+
+function classifyCoverage(
+  query: string,
+  seeds: MemoryItem[],
+  meta: SearchRelevanceMeta,
+  scope: string | undefined,
+): { coverage: Coverage; coverage_note: string } {
+  const scopeLabel = scope ?? 'any';
+  if (seeds.length === 0) {
+    return {
+      coverage: 'none',
+      coverage_note: `no active record matches this query in scope ${scopeLabel}`,
+    };
+  }
+
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const top = seeds[0];
+
+  // Term-coverage signal (primary, corpus-size-independent). BM25 ranks a record
+  // highly for matching ONE distinct term, so a mostly-absent multi-term query
+  // ("zebra quantum flamingo tariff") can still surface a genuine-looking hit on
+  // "tariff" alone. Count the distinct query terms (>=3 chars) that occur in the
+  // top hit's title+tags+body; if under half matched, the query is only weakly
+  // covered regardless of BM25, and the note names what matched nothing.
+  const distinct = coverageTerms(query);
+  if (distinct.length > 1) {
+    const hay = `${top.title} ${top.tags.join(' ')} ${top.body}`.toLowerCase();
+    const unmatched = distinct.filter((t) => !termOccursIn(t, hay));
+    const matched = distinct.length - unmatched.length;
+    if (matched / distinct.length < 0.5) {
+      return {
+        coverage: 'weak',
+        coverage_note: `${matched} of ${distinct.length} query terms matched (unmatched: ${unmatched.join(', ')})`,
+      };
+    }
+  }
+
+  // BM25 tail signal, corpus-size-guarded. bm25() is negative (lower = better);
+  // a score in (WEAK_BM25_THRESHOLD, BM25_NEGLIGIBLE) is a real but barely-there
+  // match. Scores above BM25_NEGLIGIBLE are the degenerate near-zero (see the
+  // constant) and carry no signal — the body-match test decides those.
+  const bm25Weak = meta.topBm25 !== null && meta.topBm25 < BM25_NEGLIGIBLE && meta.topBm25 > WEAK_BM25_THRESHOLD;
+  // Corpus-size-independent signal: the best hit matched only via its title or
+  // tags, with no query term in its body. This is the "indirect match" case.
+  const bodyOnlyTagTitle = !bodyMatchesQuery(top, terms);
+
+  if (bm25Weak || bodyOnlyTagTitle) {
+    return {
+      coverage: 'weak',
+      coverage_note: 'only low-relevance matches; do not infer from rank',
+    };
+  }
+
+  return { coverage: 'ok', coverage_note: 'at least one genuine match' };
 }
 
 /**
  * CLI text/JSON formatter. Reads the same payload the MCP returns, so the
  * structured shape and the text rendering can never drift.
  */
+/**
+ * The final `Coverage:` line shared by the CLI and the MCP text renderer.
+ * Carries the deterministic coverage class, its note, and (for weak/ok) the
+ * strongest witness backing the result set, so "the store has this but only as
+ * an unverified assertion" is visible without reading every row.
+ */
+export function formatCoverageLine(payload: SearchPayload): string {
+  const witness = payload.coverage_witness ? ` (best witness: ${payload.coverage_witness})` : '';
+  if (payload.coverage === 'none') {
+    return `Coverage: none — ${payload.coverage_note}`;
+  }
+  return `Coverage: ${payload.coverage} — ${payload.coverage_note}${witness}`;
+}
+
 export function runSearch(query: string, options: SearchOptions): string {
   const payload = searchPayload(query, options);
 
-  if (payload.results.length === 0) {
-    return options.json ? '[]' : `No results for "${query}"`;
-  }
-
   if (options.json) {
+    if (payload.results.length === 0) return '[]';
     return JSON.stringify(payload.results.map((r) => ({
       id: r.id,
       type: r.type,
@@ -413,6 +601,9 @@ export function runSearch(query: string, options: SearchOptions): string {
       tags: r.tags,
       source: r.source,
       stale: r.stale,
+      ...(r.drifted !== undefined ? { drifted: r.drifted } : {}),
+      ...(r.anchor_unchecked !== undefined ? { anchor_unchecked: r.anchor_unchecked } : {}),
+      ...(r.drift !== undefined ? { drift: r.drift } : {}),
       conflicts_with: r.conflicts_with,
       refines: r.refines,
       supports: r.supports,
@@ -422,6 +613,10 @@ export function runSearch(query: string, options: SearchOptions): string {
     })), null, 2);
   }
 
+  if (payload.results.length === 0) {
+    return `No results for "${query}"\n\n${formatCoverageLine(payload)}`;
+  }
+
   const lines: string[] = [`${payload.results.length} result(s) for "${query}"`, ''];
 
   for (const item of payload.results) {
@@ -429,7 +624,8 @@ export function runSearch(query: string, options: SearchOptions): string {
     const expandedTag = item.expanded_via
       ? ` [via ${item.expanded_via.edge_type} from ${item.expanded_via.from_id} @ hop ${item.expanded_via.hops}]`
       : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${conflictTag}${expandedTag}`);
+    const driftTag = item.drifted ? ' [DRIFTED — anchored code changed; verify or supersede]' : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) {
       lines.push(`  tags: ${item.tags.join(', ')}`);
@@ -441,6 +637,8 @@ export function runSearch(query: string, options: SearchOptions): string {
     }
     lines.push('');
   }
+
+  lines.push(formatCoverageLine(payload));
 
   return lines.join('\n');
 }

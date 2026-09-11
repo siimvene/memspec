@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { ulid } from 'ulid';
-import { blobSha, normalizeAnchorPath, projectRootForStore } from '../lib/anchors.js';
+import { projectRootForStore, resolveAnchorForWrite, type AnchorResolveOptions } from '../lib/anchors.js';
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import {
   matchesConflictInferenceRule,
@@ -20,8 +20,14 @@ export interface RememberOptions {
   tags?: string;
   /** ISO timestamp or "never" — renamed from decay_after on the v0.3 surface. */
   checkBy?: string;
-  /** File paths to anchor the claim to, resolved against the project root. */
+  /** File paths to anchor the claim to. Absolute, project-relative, or repo-qualified — see resolveAnchorForWrite. */
   anchors?: string[];
+  /**
+   * Checkout directory a repo-relative anchor path belongs to, when the file
+   * lives outside the store's project root (the common case for a home-rooted
+   * personal store). Recorded as a cross-repo `repo` anchor.
+   */
+  anchorRoot?: string;
   store?: string;
   /**
    * Directory the target store is resolved from, when it differs from `cwd`.
@@ -140,23 +146,30 @@ function parseTags(raw?: string): string[] {
 }
 
 /**
- * Resolve inline anchor paths to {file, sha} pairs at write time. Files that
- * cannot be found under the project root produce a warning rather than failing
- * the write — the claim still records, the unresolved anchors are reported back.
+ * Resolve inline anchor paths to {repo?, file, sha} records at write time.
+ * Absolute paths, project-relative paths, and repo-qualified / anchor-root
+ * paths are all accepted (see resolveAnchorForWrite). Paths that resolve
+ * nowhere produce an actionable warning rather than failing the write — the
+ * claim still records, and the caller is told to pass an absolute path or
+ * anchor_root.
  */
-function resolveAnchors(projectRoot: string, files: string[]): { anchors: CodeAnchor[]; warnings: string[] } {
+function resolveAnchors(
+  projectRoot: string,
+  files: string[],
+  options: AnchorResolveOptions,
+): { anchors: CodeAnchor[]; warnings: string[] } {
   const anchors: CodeAnchor[] = [];
   const warnings: string[] = [];
 
   for (const file of files) {
-    const rel = normalizeAnchorPath(projectRoot, file);
-    const sha = blobSha(resolve(projectRoot, rel));
-    if (sha === null) {
-      warnings.push(`Skipped ${rel}: file not found under ${projectRoot}`);
+    const result = resolveAnchorForWrite(projectRoot, file, options);
+    if ('error' in result) {
+      warnings.push(result.error);
       continue;
     }
-    if (!anchors.some((a) => a.file === rel)) {
-      anchors.push({ file: rel, sha });
+    const { anchor } = result;
+    if (!anchors.some((a) => a.file === anchor.file && a.repo === anchor.repo)) {
+      anchors.push(anchor);
     }
   }
 
@@ -329,7 +342,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
 
   const anchorFiles = options.anchors ?? [];
   const anchorResolution = anchorFiles.length > 0
-    ? resolveAnchors(projectRootForStore(store.root), anchorFiles)
+    ? resolveAnchors(projectRootForStore(store.root), anchorFiles, {
+        anchorRoot: options.anchorRoot,
+        repoSearchPaths: config.anchors?.repo_search_paths,
+      })
     : { anchors: [] as CodeAnchor[], warnings: [] as string[] };
 
   // Witness: anchors present and resolved → anchor; operator source → operator; else assertion.

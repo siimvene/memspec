@@ -108,6 +108,8 @@ Calendar TTL is the wrong signal for facts about code. Memspec ties claims to fi
 - `memspec verify <id>` — refresh "still true"; drifted anchors flag for review without mutating the memory
 - `memspec reconcile` — scan all anchored memories for drift, including uncommitted edits
 
+Anchor paths may be **absolute** (preferred), project-relative, or repo-qualified (`repo/path`). Prefer absolute paths when the store's project root is not the repo you're working in — a home-rooted personal store's project root is `$HOME`, so a bare `src/x.ts` resolves nowhere and the claim silently degrades to an unanchored assertion. For a repo-relative path to a sibling checkout, pass `--anchor-root <dir>` (`anchor_root` over MCP); it is recorded as a cross-repo anchor and resolved as a sibling directory (or via `anchors.repo_search_paths`) on read. A path that resolves nowhere is reported back, never silently dropped.
+
 Drifted memories never auto-archive. They surface for human judgement via `memspec status`.
 
 ## Search
@@ -115,6 +117,10 @@ Drifted memories never auto-archive. They surface for human judgement via `memsp
 SQLite FTS5 full-text + BM25, recency-weighted per profile. Zero setup beyond `better-sqlite3`.
 
 Index rebuilds on demand from the markdown files. Lose the index, lose speed — not data.
+
+Every result set carries a **coverage** verdict so an agent can tell "the store knows nothing here" from a low-ranked hit: `none` (no active record matches), `weak` (fewer than half of the distinct query terms occur in the top hit, or a title/tag-only match, or barely above the BM25 floor — don't infer from rank; the note names which terms matched nothing), or `ok`. A `coverage_witness` names the strongest witness behind the hits (`anchor > operator > evidence > assertion`), so coverage `ok` with witness `assertion` reads as "claimed, but unverified". The CLI prints a final `Coverage:` line; JSON/MCP expose `coverage`, `coverage_note`, and `coverage_witness`.
+
+Anchored results are drift-checked on the read path: a record whose anchored file has changed since it was last anchored prints a `[DRIFTED]` marker (JSON/MCP: `drifted`, with `anchor_unchecked` when the anchor's repo is not checked out here). No `reconcile` run needed to see it.
 
 ## Trust profiles
 

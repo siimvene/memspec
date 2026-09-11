@@ -1,5 +1,5 @@
-import { resolve } from 'node:path';
-import { blobSha, getCodeAnchors, normalizeAnchorPath, projectRootForStore } from '../lib/anchors.js';
+import { getCodeAnchors, projectRootForStore, resolveAnchorForWrite } from '../lib/anchors.js';
+import { loadConfig } from '../lib/config.js';
 import { MemspecStore } from '../lib/store.js';
 import type { CodeAnchor } from '../lib/types.js';
 
@@ -7,6 +7,8 @@ export interface AnchorOptions {
   cwd?: string;
   replace?: boolean;
   source?: string;
+  /** Checkout directory a repo-relative path belongs to when it lives outside the store's project root. */
+  anchorRoot?: string;
 }
 
 export interface AnchorResult {
@@ -27,29 +29,30 @@ export function runAnchor(id: string, files: string[], options: AnchorOptions): 
   if (files.length === 0) throw new Error('No files given to anchor');
 
   const projectRoot = projectRootForStore(store.root);
+  const repoSearchPaths = loadConfig(store.root).anchors?.repo_search_paths;
   const warnings: string[] = [];
   const fresh: CodeAnchor[] = [];
 
   for (const file of files) {
-    const rel = normalizeAnchorPath(projectRoot, file);
-    const sha = blobSha(resolve(projectRoot, rel));
-    if (sha === null) {
-      warnings.push(`Skipped ${rel}: file not found under ${projectRoot}`);
+    const result = resolveAnchorForWrite(projectRoot, file, { anchorRoot: options.anchorRoot, repoSearchPaths });
+    if ('error' in result) {
+      warnings.push(result.error);
       continue;
     }
-    if (!fresh.some((a) => a.file === rel)) {
-      fresh.push({ file: rel, sha });
+    const { anchor } = result;
+    if (!fresh.some((a) => a.file === anchor.file && a.repo === anchor.repo)) {
+      fresh.push(anchor);
     }
   }
 
   if (fresh.length === 0) {
-    throw new Error(`None of the given files exist under ${projectRoot}:\n${warnings.join('\n')}`);
+    throw new Error(`None of the given files could be resolved to an anchor:\n${warnings.join('\n')}`);
   }
 
-  // Merge: fresh anchors win over existing entries for the same file.
+  // Merge: fresh anchors win over existing entries for the same (repo, file).
   const existing = options.replace ? [] : getCodeAnchors(item);
   const anchors = [
-    ...existing.filter((a) => !fresh.some((f) => f.file === a.file)),
+    ...existing.filter((a) => !fresh.some((f) => f.file === a.file && f.repo === a.repo)),
     ...fresh,
   ];
 

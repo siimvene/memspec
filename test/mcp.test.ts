@@ -290,3 +290,121 @@ test('mcp status tool returns store summary', async () => {
     await session.close();
   }
 });
+
+test('mcp search tool returns coverage, coverage_witness and drifted', async () => {
+  const { writeFile } = await import('node:fs/promises');
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  await writeFile(join(target, 'engine.ts'), 'export const e = 1;\n');
+  await runCli([
+    'remember', 'fact', 'Engine constant is exported', '--cwd', target,
+    '--body', 'engine exports e', '--source', 'test', '--anchor', 'engine.ts',
+  ]);
+  // Drift the anchored file so the read path must flag it.
+  await writeFile(join(target, 'engine.ts'), 'export const e = 2; // changed\n');
+
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target]);
+  try {
+    await session.request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'memspec-test', version: '0.0.0' },
+    });
+    session.notify('notifications/initialized', {});
+
+    const hit = await session.request('tools/call', {
+      name: 'memspec_search',
+      arguments: { query: 'engine constant', limit: 5 },
+    });
+    assert.equal(hit.error, undefined);
+    const sc = (hit.result as { structuredContent?: {
+      coverage?: string; coverage_witness?: string | null;
+      results?: Array<{ drifted?: boolean; anchor_unchecked?: boolean }>;
+    } }).structuredContent;
+    assert.ok(sc);
+    assert.equal(sc?.coverage, 'ok');
+    assert.equal(sc?.coverage_witness, 'anchor');
+    assert.equal(sc?.results?.[0]?.drifted, true);
+
+    const miss = await session.request('tools/call', {
+      name: 'memspec_search',
+      arguments: { query: 'kubernetes helm nonexistent', limit: 5 },
+    });
+    const missSc = (miss.result as { structuredContent?: { coverage?: string; coverage_witness?: string | null } }).structuredContent;
+    assert.equal(missSc?.coverage, 'none');
+    assert.equal(missSc?.coverage_witness, null);
+  } finally {
+    await session.close();
+  }
+});
+
+test('mcp remember tool records a cross-repo anchor via anchor_root', async () => {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const base = await makeTempProject();
+  const project = join(base, 'project');
+  const lib = join(base, 'lib-repo');
+  await mkdir(project, { recursive: true });
+  await mkdir(join(lib, '.git'), { recursive: true });
+  await writeFile(join(lib, 'index.ts'), 'export const v = 1;\n');
+  await runCli(['init', '--cwd', project]);
+
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', project]);
+  try {
+    await session.request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'memspec-test', version: '0.0.0' },
+    });
+    session.notify('notifications/initialized', {});
+
+    const call = await session.request('tools/call', {
+      name: 'memspec_remember',
+      arguments: {
+        type: 'fact',
+        title: 'Lib exports v',
+        body: 'entry point',
+        source: 'mcp-test',
+        anchors: ['index.ts'],
+        anchor_root: lib,
+      },
+    });
+    assert.equal(call.error, undefined);
+    const sc = (call.result as { structuredContent?: {
+      verified_with?: string;
+      anchor_warnings?: string[];
+      anchors?: Array<{ file: string; repo?: string }>;
+    } }).structuredContent;
+    assert.ok(sc);
+    assert.equal(sc?.verified_with, 'anchor');
+    assert.deepEqual(sc?.anchor_warnings, []);
+    assert.equal(sc?.anchors?.[0]?.file, 'index.ts');
+    assert.equal(sc?.anchors?.[0]?.repo, 'lib-repo');
+  } finally {
+    await session.close();
+  }
+});
+
+test('mcp remember tool warns actionably when an anchor resolves nowhere', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', project]);
+  try {
+    await session.request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'memspec-test', version: '0.0.0' },
+    });
+    session.notify('notifications/initialized', {});
+
+    const call = await session.request('tools/call', {
+      name: 'memspec_remember',
+      arguments: { type: 'fact', title: 'No anchor', body: 'x', source: 'mcp-test', anchors: ['nope.ts'] },
+    });
+    const sc = (call.result as { structuredContent?: { verified_with?: string; anchor_warnings?: string[] } }).structuredContent;
+    assert.equal(sc?.verified_with, 'assertion');
+    assert.equal(sc?.anchor_warnings?.length, 1);
+    assert.match(sc?.anchor_warnings?.[0] ?? '', /pass an absolute path or anchor_root/);
+  } finally {
+    await session.close();
+  }
+});

@@ -51,7 +51,8 @@ test('anchor fails when no given file exists', async () => {
   await assert.rejects(
     () => runCli(['anchor', id, 'nope.ts', '--cwd', target]),
     (error: Error & { stderr?: string }) => {
-      assert.match(`${error.message}\n${error.stderr ?? ''}`, /None of the given files exist/);
+      assert.match(`${error.message}\n${error.stderr ?? ''}`, /None of the given files could be resolved to an anchor/);
+      assert.match(`${error.message}\n${error.stderr ?? ''}`, /pass an absolute path or anchor_root/);
       return true;
     },
   );

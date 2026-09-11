@@ -1,9 +1,11 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { MemspecStore, type StoreSearchOptions, type LoadWarning } from './store.js';
+import { MemspecStore, type StoreSearchOptions, type LoadWarning, type SearchRelevanceMeta } from './store.js';
 import { loadConfig, type StoreLayerConfig } from './config.js';
 import { findPointer } from './registry.js';
+import { getCodeAnchors, projectRootForStore } from './anchors.js';
+import { computeDrift, type DriftInfo } from './drift.js';
 import type { MemoryItem, MemoryFrontmatter } from './types.js';
 
 /**
@@ -210,8 +212,9 @@ export class CompositeStore {
    * post-filtered pages would reintroduce exactly the starvation the
    * candidate-set filter exists to prevent.
    */
-  search(query: string, options: StoreSearchOptions = {}): MemoryItem[] {
+  search(query: string, options: StoreSearchOptions = {}, meta?: SearchRelevanceMeta): MemoryItem[] {
     const limit = options.limit ?? 10;
+    if (meta) meta.topBm25 = null;
     const active = this.layers.filter((layer) => layer.store.exists);
 
     if (active.length === 0) return [];
@@ -219,7 +222,10 @@ export class CompositeStore {
     // change the per-layer limit, which changes the per-set normalization
     // denominator inside MemspecStore.search and silently reorders results.
     // `forCwd` promises byte-identical behaviour to a bare MemspecStore here.
-    if (active.length === 1) return active[0].store.search(query, options);
+    // The BM25 meta is only meaningful for a single corpus, so it is forwarded
+    // here and left null across a rank-fused multi-layer query (coverage then
+    // falls back to the body-match signal).
+    if (active.length === 1) return active[0].store.search(query, options, meta);
 
     // Over-fetch so fusion has material below the caller's cut.
     const perLayerLimit = Math.max(limit * 2, 20);
@@ -290,6 +296,51 @@ export class CompositeStore {
       for (const scope of layer.store.scopesInUse()) seen.add(scope);
     }
     return [...seen];
+  }
+
+  /**
+   * DEFECT B — read-path drift for the given items, resolved against each
+   * item's own layer (its projectRoot + `anchors.repo_search_paths`). Only
+   * active, anchored records are checked; everything else is absent from the
+   * returned map. Never throws — an unavailable repo is `anchor_unchecked`, not
+   * drift. Bounded to at most one `loadActive` per layer, and only when the
+   * store is actually layered.
+   */
+  annotateDrift(items: MemoryItem[]): Map<string, DriftInfo> {
+    const out = new Map<string, DriftInfo>();
+    const anchored = items.filter((i) => i.state === 'active' && getCodeAnchors(i).length > 0);
+    if (anchored.length === 0) return out;
+
+    // Single layer (the personal store and every non-layered project): one
+    // projectRoot, no ownership lookup needed.
+    if (this.layers.length === 1) {
+      const store = this.layers[0].store;
+      const projectRoot = projectRootForStore(store.root);
+      const repoSearchPaths = loadConfig(store.root).anchors?.repo_search_paths;
+      for (const item of anchored) {
+        const drift = computeDrift(projectRoot, getCodeAnchors(item), { repoSearchPaths });
+        if (drift) out.set(item.id, drift);
+      }
+      return out;
+    }
+
+    // Layered: map each item to the highest-priority layer that holds it, so a
+    // cross-repo anchor resolves against the right projectRoot.
+    const pending = new Map(anchored.map((i) => [i.id, i]));
+    for (const layer of this.layers) {
+      if (pending.size === 0) break;
+      if (!layer.store.exists) continue;
+      const projectRoot = projectRootForStore(layer.store.root);
+      const repoSearchPaths = loadConfig(layer.store.root).anchors?.repo_search_paths;
+      const idsHere = new Set(layer.store.loadActive().map((i) => i.id));
+      for (const [id, item] of [...pending]) {
+        if (!idsHere.has(id)) continue;
+        const drift = computeDrift(projectRoot, getCodeAnchors(item), { repoSearchPaths });
+        if (drift) out.set(id, drift);
+        pending.delete(id);
+      }
+    }
+    return out;
   }
 
   /** Find by ID across all layers (highest priority first) */

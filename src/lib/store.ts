@@ -67,6 +67,15 @@ export interface LoadWarning {
   reason: string;
 }
 
+/**
+ * Optional out-parameter for `search`: the strongest raw BM25 score among the
+ * returned hits (most negative = best; null when there are no hits). Feeds the
+ * search-coverage classifier (DEFECT C) without a second FTS pass.
+ */
+export interface SearchRelevanceMeta {
+  topBm25: number | null;
+}
+
 export class MemspecStore {
   readonly root: string;
   readonly warnings: LoadWarning[] = [];
@@ -317,8 +326,9 @@ export class MemspecStore {
     writeFileSync(item.filePath, serializeMemoryFile(item));
   }
 
-  search(query: string, options: StoreSearchOptions = {}): MemoryItem[] {
+  search(query: string, options: StoreSearchOptions = {}, meta?: SearchRelevanceMeta): MemoryItem[] {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (meta) meta.topBm25 = null;
     if (terms.length === 0) return [];
 
     const {
@@ -344,6 +354,7 @@ export class MemspecStore {
       const matches = fts.search(query, { limit: limit * 2, types, minConfidence, scope });
 
       if (matches.length === 0) return [];
+      const bm25ById = new Map(matches.map((m) => [m.id, m.bm25Score]));
 
       const itemMap = new Map(activeItems.map((item) => [item.id, item]));
       const relevanceWeight = ranking?.relevance ?? 1;
@@ -389,10 +400,24 @@ export class MemspecStore {
         score: (rawRelevance / denom) * relevanceWeight + recency * recencyWeight,
       }));
 
-      return scored
+      const ranked = scored
         .sort((a, b) => b.score - a.score)
         .slice(0, limit)
         .map(({ item }) => item);
+
+      if (meta) {
+        // Strongest lexical match among the returned hits: the min (most
+        // negative) raw BM25. If even the best hit is weak, coverage is weak.
+        let best: number | null = null;
+        for (const item of ranked) {
+          const raw = bm25ById.get(item.id);
+          if (raw === undefined) continue;
+          if (best === null || raw < best) best = raw;
+        }
+        meta.topBm25 = best;
+      }
+
+      return ranked;
     } finally {
       fts.close();
     }
