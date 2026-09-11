@@ -255,12 +255,12 @@ test('CLI: memspec search --as-of filters by validity window', async () => {
 
   // as_of inside Q1: both surface (eternal record has no bounds, Q1 record is in window).
   const q1 = await runCli(['search', 'JWT', '--cwd', target, '--as-of', '2026-02-15T00:00:00Z', '--json']);
-  const q1Json = JSON.parse(q1.stdout) as Array<{ title: string }>;
+  const q1Json = JSON.parse(q1.stdout).results as Array<{ title: string }>;
   assert.equal(q1Json.length, 2);
 
   // as_of after Q1: only the eternal record surfaces.
   const q3 = await runCli(['search', 'JWT', '--cwd', target, '--as-of', '2026-06-29T00:00:00Z', '--json']);
-  const q3Json = JSON.parse(q3.stdout) as Array<{ title: string }>;
+  const q3Json = JSON.parse(q3.stdout).results as Array<{ title: string }>;
   assert.equal(q3Json.length, 1);
   assert.equal(q3Json[0].title, 'JWT current secret eternal');
 });

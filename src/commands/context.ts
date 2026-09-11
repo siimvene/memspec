@@ -5,7 +5,7 @@ import { loadConfig } from '../lib/config.js';
 import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType } from '../lib/types.js';
-import { recentRetrievalCounts } from '../lib/usage.js';
+import { recentRetrievalCounts, recordSurfacedHitsByLayer } from '../lib/usage.js';
 
 export interface ContextOptions {
   cwd?: string;
@@ -381,7 +381,18 @@ export function runContext(options: ContextOptions): string {
   }
 
   const format = options.format ?? 'markdown';
+  if (format !== 'json' && format !== 'markdown') throw new Error(`Unsupported format: ${format}`);
+
+  // Boot-context surfacing is a retrieval: the records the session was primed
+  // with were "retrieved" as surely as a search hit. Log them (surface
+  // `context`) to the layer that owns each one, so a pinned identity record or
+  // a team record that boots every session is never reported Cold.
+  recordSurfacedHitsByLayer(
+    store,
+    [...sections.attention.map((e) => e.item), ...sections.pinned, ...sections.main],
+    { query: options.query, surface: 'context' },
+  );
+
   if (format === 'json') return renderJson(sections);
-  if (format !== 'markdown') throw new Error(`Unsupported format: ${format}`);
   return renderMarkdown(sections, header, now);
 }

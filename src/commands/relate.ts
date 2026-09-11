@@ -53,6 +53,22 @@ function unmarkEdgeSource(item: MemoryItem, targetId: string): Record<string, un
   return Object.keys(ext).length === 0 ? undefined : ext;
 }
 
+/**
+ * Claim edges live on claims. A question group relates to its answers through
+ * `answers:` (managed by `memspec question --add`), never through
+ * refines/supports/depends_on/derived_from/conflicts_with — the other in-place
+ * mutators (anchor, verify, supersede) already refuse non-active records, and
+ * a question is never `active`.
+ */
+function assertNotQuestion(from: MemoryItem, verb: 'relate' | 'unrelate'): void {
+  if (from.kind === 'question') {
+    throw new Error(
+      `${verb} refuses a question record as --from (${from.id}): question groups carry answers, not claim edges. ` +
+        `Use \`memspec question ${from.id} --add <id>\` to change its answers.`,
+    );
+  }
+}
+
 export interface RelateOptions {
   cwd?: string;
   from: string;
@@ -92,6 +108,7 @@ export function runRelate(options: RelateOptions): RelateResult {
 
   const from = store.findById(options.from);
   if (!from) throw new Error(`Memory not found: ${options.from}`);
+  assertNotQuestion(from, 'relate');
 
   const to = store.findById(options.to);
   if (!to) throw new Error(`Memory not found: ${options.to}`);
@@ -212,6 +229,7 @@ export function runUnrelate(options: UnrelateOptions): UnrelateResult {
 
   const from = store.findById(options.from);
   if (!from) throw new Error(`Memory not found: ${options.from}`);
+  assertNotQuestion(from, 'unrelate');
 
   const viaMcp = options.channel === 'mcp';
   // MCP can never override; the override flag is honoured only on the CLI.

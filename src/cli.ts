@@ -43,12 +43,14 @@ program
   .option('--skip-import', 'skip brownfield memory import')
   .option('--skip-patch', 'skip AGENTS.md/CLAUDE.md patching')
   .option('--no-install-hooks', 'skip installing Claude Code hooks into ~/.claude/')
+  .option('--force', 'create a store here even though a parent directory already has one; without it init refuses to nest stores')
   .action(async (options: {
     cwd?: string;
     interactive?: boolean;
     skipImport?: boolean;
     skipPatch?: boolean;
     installHooks?: boolean;
+    force?: boolean;
   }) => {
     console.log(await runInit(options));
   });

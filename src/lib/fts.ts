@@ -233,6 +233,36 @@ export class FtsIndex {
   }
 }
 
+/**
+ * Tokenise texts exactly the way the index does (`porter unicode61`: same
+ * separators, case folding, diacritic handling and stemmer), by running them
+ * through a throwaway FTS5 table and reading the tokens back via `fts5vocab`.
+ * Returns one ordered token list per input (duplicates preserved). The
+ * search-coverage classifier uses this so its whole-token term test agrees
+ * with what FTS5 actually matched — a JS approximation of the tokenizer
+ * disagreed on punctuation (`remootio,`), quotes and inflections.
+ */
+export function tokenizeLikeIndex(texts: string[]): string[][] {
+  const out: string[][] = texts.map(() => []);
+  if (texts.length === 0) return out;
+  const db = new Database(':memory:');
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE tok USING fts5(text, tokenize = 'porter unicode61');
+      CREATE VIRTUAL TABLE tok_vocab USING fts5vocab(tok, 'instance');
+    `);
+    const insert = db.prepare('INSERT INTO tok (rowid, text) VALUES (?, ?)');
+    db.transaction(() => {
+      texts.forEach((text, i) => insert.run(i + 1, text));
+    })();
+    const rows = db.prepare('SELECT doc, term FROM tok_vocab ORDER BY doc, "offset"').all() as Array<{ doc: number; term: string }>;
+    for (const row of rows) out[row.doc - 1].push(row.term);
+    return out;
+  } finally {
+    db.close();
+  }
+}
+
 /** Cache is fresh iff every source file mtime <= cache mtime. */
 function isCacheFresh(cachePath: string, sourceFiles: string[]): boolean {
   try {

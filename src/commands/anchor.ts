@@ -45,6 +45,7 @@ export function runAnchor(id: string, files: string[], options: AnchorOptions): 
       continue;
     }
     const { anchor } = result;
+    if (result.warning) warnings.push(result.warning);
     if (!fresh.some((a) => a.file === anchor.file && a.repo === anchor.repo)) {
       fresh.push(anchor);
     }

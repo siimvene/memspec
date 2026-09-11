@@ -45,8 +45,9 @@ export function appendOutcome(storeRoot: string, id: string, outcome: Outcome, o
       id,
       outcome,
       at: options.at ?? new Date().toISOString(),
-      session: options.session ?? resolveSessionId(),
     };
+    const session = options.session ?? resolveSessionId();
+    if (session !== undefined) entry.session = session;
     if (options.source !== undefined) entry.source = options.source;
     if (options.note !== undefined) entry.note = options.note;
     appendFileSync(path, `${JSON.stringify(entry)}\n`, 'utf8');

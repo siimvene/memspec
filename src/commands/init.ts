@@ -169,8 +169,9 @@ export async function runInit(options: InitOptions): Promise<string> {
   const projectRoot = resolve(options.cwd ?? process.cwd());
 
   // C1: don't silently nest a store under a repo that already has one. If this
-  // directory has no store of its own but a parent (up to $HOME) does, refuse
-  // unless --force — a nested store fragments memory and hides the parent's.
+  // directory has no store of its own but a parent (within the walk fence: up
+  // to $HOME inside it, to the filesystem root outside it) does, refuse unless
+  // --force — a nested store fragments memory and hides the parent's.
   const ownStore = join(projectRoot, '.memspec');
   if (!existsSync(ownStore) && !options.force) {
     const parentStore = findStoreDirUpward(dirname(projectRoot));

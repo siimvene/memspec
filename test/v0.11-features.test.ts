@@ -218,7 +218,7 @@ test('search --type question lists question groups, open before resolved, with c
   await runCli(['question', resolvableQid, '--cwd', target, '--resolve']);
 
   const res = await runCli(['search', 'Zq-alpha', '--cwd', target, '--type', 'question', '--json']);
-  const hits = JSON.parse(res.stdout) as Array<Record<string, unknown>>;
+  const hits = JSON.parse(res.stdout).results as Array<Record<string, unknown>>;
   assert.equal(hits.length, 2);
   assert.equal(hits.every((h) => h.type === 'question'), true);
 
@@ -244,10 +244,10 @@ test('default search excludes question groups; --type question is the only path 
   await runCli(['question', 'Zq-marker-unique-search-term', '--cwd', target, '--source', 'test', '--answers', a]);
 
   const defaultRes = await runCli(['search', 'Zq-marker-unique-search-term', '--cwd', target, '--json']);
-  assert.deepEqual(JSON.parse(defaultRes.stdout), []);
+  assert.deepEqual(JSON.parse(defaultRes.stdout).results, []);
 
   const typedRes = await runCli(['search', 'Zq-marker-unique-search-term', '--cwd', target, '--type', 'question', '--json']);
-  const hits = JSON.parse(typedRes.stdout) as Array<Record<string, unknown>>;
+  const hits = JSON.parse(typedRes.stdout).results as Array<Record<string, unknown>>;
   assert.equal(hits.length, 1);
   assert.equal(hits[0].type, 'question');
   assert.equal(hits[0].title, 'Zq-marker-unique-search-term');
@@ -414,6 +414,246 @@ test('MCP memspec_verify accepts evidence_file for an anchorless record', async 
     assert.equal(structured.verified_with, 'evidence');
     const fm = matter(await readFile(join(target, '.memspec', 'memory', 'facts', `${id}.md`), 'utf8')).data as Record<string, unknown>;
     assert.equal((fm.evidence as unknown[]).length, 1);
+  } finally {
+    await session.close();
+  }
+});
+
+// --- Panel remediation: #15/#21, #31/#38, #39, #41, #42, #11, #29, #34 -----
+
+async function evidenceFiles(target: string): Promise<string[]> {
+  const dir = join(target, '.memspec', 'evidence');
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const sub of await readdir(dir)) out.push(...(await readdir(join(dir, sub))).map((f) => `${sub}/${f}`));
+  return out;
+}
+
+function rejectsWith(pattern: RegExp) {
+  return (err: Error & { stderr?: string }) => {
+    assert.match(`${err.message}\n${err.stderr ?? ''}`, pattern);
+    return true;
+  };
+}
+
+test('#15/#21: remember --answers-question with a bad id writes nothing and the retry is not a duplicate', async () => {
+  const target = await initProject();
+  const a = await addFact(target, 'Real answer');
+  await runCli(['question', 'Validated first?', '--cwd', target, '--source', 'test', '--answers', a]);
+  const qid = (await readdir(join(target, '.memspec', 'memory', 'questions')))[0].replace(/\.md$/, '');
+  const before = (await factIds(target)).length;
+
+  await assert.rejects(
+    () => runCli(['remember', 'fact', 'Orphan candidate', '--cwd', target, '--source', 'test', '--body', 'B', '--answers-question', 'ms_TYPO']),
+    rejectsWith(/Question not found: ms_TYPO/),
+  );
+  await assert.rejects(
+    () => runCli(['remember', 'fact', 'Orphan candidate', '--cwd', target, '--source', 'test', '--body', 'B', '--answers-question', a]),
+    rejectsWith(/is a claim, not a question/),
+  );
+  assert.equal((await factIds(target)).length, before, 'no record was written on either failure');
+
+  // The retry with the right id succeeds — no near-duplicate refusal.
+  const ok = await runCli(['remember', 'fact', 'Orphan candidate', '--cwd', target, '--source', 'test', '--body', 'B', '--answers-question', qid]);
+  assert.match(ok.stdout, new RegExp(`Answered question: ${qid}`));
+});
+
+test('#24: remember --answers-question into a resolved question reopens it and says so', async () => {
+  const target = await initProject();
+  const a = await addFact(target, 'Winner');
+  const b = await addFact(target, 'Loser');
+  await runCli(['question', 'Reopen via remember?', '--cwd', target, '--source', 'test', '--answers', a, b, '--closed']);
+  const qid = (await readdir(join(target, '.memspec', 'memory', 'questions')))[0].replace(/\.md$/, '');
+  await runCli(['supersede', b, '--cwd', target, '--reason', 'lost']);
+  await runCli(['question', qid, '--cwd', target, '--resolve']);
+  assert.equal((await frontmatter(target, 'memory/questions', qid)).state, 'resolved');
+
+  const out = await runCli(['remember', 'fact', 'Late challenger', '--cwd', target, '--source', 'test', '--body', 'B', '--answers-question', qid]);
+  assert.match(out.stdout, /REOPENED/);
+  const fm = await frontmatter(target, 'memory/questions', qid);
+  assert.equal(fm.state, 'open');
+  assert.equal(fm.resolved_by, undefined);
+  const status = await runCli(['status', '--cwd', target]);
+  assert.match(status.stdout, /open — 2 candidate/);
+});
+
+test('#31/#38: verify --evidence-file copies nothing when the result is needs_review', async () => {
+  const target = await initProject();
+  await writeFile(join(target, 'code.ts'), 'v1\n');
+  await runCli(['remember', 'fact', 'Anchored then drifted', '--cwd', target, '--source', 'test', '--body', 'B', '--anchor', 'code.ts']);
+  const id = (await factIds(target))[0];
+  await writeFile(join(target, 'code.ts'), 'v2 changed\n');
+  const proof = join(target, 'proof.txt');
+  await writeFile(proof, 'i looked');
+
+  // needs_review exits 1 on the CLI, so the call rejects; the report is on stdout.
+  await assert.rejects(
+    () => runCli(['verify', id, '--cwd', target, '--evidence-file', proof, '--source', 'test']),
+    (err: Error & { stdout?: string }) => {
+      assert.match(err.stdout ?? '', /NEEDS REVIEW/);
+      assert.match(err.stdout ?? '', /Memory left untouched/);
+      return true;
+    },
+  );
+  assert.deepEqual(await evidenceFiles(target), [], 'no orphan under evidence/');
+  assert.equal((await frontmatter(target, 'memory/facts', id)).evidence, undefined);
+
+  // Re-anchor, then the same verify copies and attaches.
+  await runCli(['anchor', id, 'code.ts', '--cwd', target]);
+  const ok = await runCli(['verify', id, '--cwd', target, '--evidence-file', proof, '--source', 'test']);
+  assert.match(ok.stdout, /Verified/);
+  assert.equal((await evidenceFiles(target)).length, 1);
+  assert.equal(((await frontmatter(target, 'memory/facts', id)).evidence as unknown[]).length, 1);
+
+  // A bad evidence path still fails fast, before any anchor check.
+  await assert.rejects(
+    () => runCli(['verify', id, '--cwd', target, '--evidence-file', join(target, 'nope.txt')]),
+    rejectsWith(/evidence file not found/),
+  );
+});
+
+test('#39: remember validates every input before copying evidence, so a later refusal leaves no orphan copy', async () => {
+  const target = await initProject();
+  const good = join(target, 'good.txt');
+  await writeFile(good, 'good evidence');
+  const t = await addFact(target, 'Edge target');
+
+  const attempts: string[][] = [
+    ['--evidence', good, '--evidence', join(target, 'missing.txt')],
+    ['--evidence', good, '--valid-from', 'garbage'],
+    ['--evidence', good, '--conflicts-with', 'ms_MISSING'],
+    ['--evidence', good, '--derived-from', 'ms_MISSING'],
+    ['--evidence', good, '--answers-question', 'ms_MISSING'],
+    ['--evidence', good, '--conflicts-with', t, '--refines', t],
+  ];
+  for (const extra of attempts) {
+    await assert.rejects(() => runCli(['remember', 'fact', 'Orphaning attempt', '--cwd', target, '--source', 'test', '--body', 'B', ...extra]));
+    assert.deepEqual(await evidenceFiles(target), [], `orphan left by ${extra.join(' ')}`);
+  }
+
+  const ok = await runCli(['remember', 'fact', 'Orphaning attempt', '--cwd', target, '--source', 'test', '--body', 'B', '--evidence', good]);
+  assert.match(ok.stdout, /Evidence \(1\)/);
+  assert.equal((await evidenceFiles(target)).length, 1);
+});
+
+test('#41: remember validates positive-edge targets (derived_from / refines / supports / depends_on) exist', async () => {
+  const target = await initProject();
+  const t = await addFact(target, 'Premise');
+  const before = (await factIds(target)).length;
+  for (const flag of ['--derived-from', '--refines', '--supports', '--depends-on']) {
+    await assert.rejects(
+      () => runCli(['remember', 'fact', 'Dangling edge', '--cwd', target, '--source', 'test', '--body', 'B', flag, 'ms_TYPO']),
+      rejectsWith(new RegExp(`${flag} target not found: ms_TYPO`)),
+    );
+  }
+  assert.equal((await factIds(target)).length, before);
+  const ok = await runCli(['remember', 'fact', 'Dangling edge', '--cwd', target, '--source', 'test', '--body', 'B', '--derived-from', t]);
+  assert.match(ok.stdout, new RegExp(`Derived from: ${t}`));
+});
+
+test('#42: supersede --body carries requires_human and evidence to the replacement', async () => {
+  const target = await initProject();
+  const proof = join(target, 'runbook-proof.txt');
+  await writeFile(proof, 'ran it');
+  await runCli([
+    'remember', 'procedure', 'Prod rollout', '--cwd', target, '--source', 'test', '--body', 'v1',
+    '--requires-human', 'approve prod', '--requires-human', 'rotate key', '--evidence', proof, '--evidence', 'https://example.com/run',
+  ]);
+  const procDir = join(target, '.memspec', 'memory', 'procedures');
+  const oldId = (await readdir(procDir))[0].replace(/\.md$/, '');
+
+  const out = await runCli(['supersede', oldId, '--cwd', target, '--reason', 'revised', '--body', 'v2']);
+  assert.match(out.stdout, /Carried to ms_[0-9A-Z]+: requires_human \(2 step\(s\)\), evidence \(2 entries\)/);
+  const newId = (await readdir(procDir)).map((f) => f.replace(/\.md$/, '')).find((id) => id !== oldId)!;
+  const fm = await frontmatter(target, 'memory/procedures', newId);
+  assert.deepEqual(fm.requires_human, ['approve prod', 'rotate key']);
+  assert.equal((fm.evidence as unknown[]).length, 2);
+  assert.equal(fm.supersede_reason, 'revised');
+});
+
+test('#11: --store <layer> is honoured for config.yaml-declared layers (unknown name errors, read-only layer refuses by name)', async () => {
+  const base = await makeTempProject();
+  const home = join(base, 'home');
+  const team = join(base, 'team');
+  await runCli(['init', '--cwd', home]);
+  await runCli(['init', '--cwd', team]);
+  await writeFile(join(home, '.memspec', 'config.yaml'), [
+    'stores:',
+    '  - name: personal', '    path: ~/.memspec', '    priority: 10', '    writable: true',
+    '  - name: team', `    path: ${join(team, '.memspec')}`, '    priority: 0', '    writable: false',
+    '',
+  ].join('\n'));
+  const env = { HOME: home };
+
+  await assert.rejects(
+    () => runCli(['remember', 'fact', 'Team thing', '--cwd', home, '--source', 'test', '--store', 'team'], undefined, env),
+    rejectsWith(/layer 'team' is not writable \(writable: false/),
+  );
+  await assert.rejects(
+    () => runCli(['remember', 'fact', 'Bogus thing', '--cwd', home, '--source', 'test', '--store', 'bogus'], undefined, env),
+    rejectsWith(/no layer named 'bogus' in .*config\.yaml \(have: personal, team( \(read-only\))?\)/),
+  );
+  assert.equal(existsSync(join(home, '.memspec', 'memory', 'facts')) ? (await readdir(join(home, '.memspec', 'memory', 'facts'))).length : 0, 0, 'nothing landed in the personal store');
+  assert.equal((await readdir(join(team, '.memspec', 'memory', 'facts'))).length, 0, 'nothing landed in the read-only team store');
+
+  // Naming the writable layer lands there.
+  const ok = await runCli(['remember', 'fact', 'Personal thing', '--cwd', home, '--source', 'test', '--store', 'personal'], undefined, env);
+  assert.match(ok.stdout, /Created fact memory/);
+  assert.equal((await readdir(join(home, '.memspec', 'memory', 'facts'))).length, 1);
+
+  // The legacy `--store global` spelling still reaches ~/.memspec when no layer is named global.
+  const legacy = await runCli(['remember', 'fact', 'Legacy global', '--cwd', team, '--source', 'test', '--store', 'global'], undefined, env);
+  assert.match(legacy.stdout, /Created fact memory/);
+  assert.equal((await readdir(join(home, '.memspec', 'memory', 'facts'))).length, 2);
+
+  // An unknown --store on a store with no layers at all is an error, not a silent write.
+  await assert.rejects(
+    () => runCli(['remember', 'fact', 'Nowhere', '--cwd', team, '--source', 'test', '--store', 'nowhere'], undefined, env),
+    rejectsWith(/no layer named 'nowhere' in .*\(no stores: block\)/),
+  );
+});
+
+test('#29: relate and unrelate refuse a question record as --from', async () => {
+  const target = await initProject();
+  const a = await addFact(target, 'Q answer');
+  const other = await addFact(target, 'Unrelated claim');
+  await runCli(['question', 'Edges on me?', '--cwd', target, '--source', 'test', '--answers', a]);
+  const qid = (await readdir(join(target, '.memspec', 'memory', 'questions')))[0].replace(/\.md$/, '');
+
+  await assert.rejects(
+    () => runCli(['relate', '--cwd', target, '--from', qid, '--to', other, '--type', 'refines']),
+    rejectsWith(/relate refuses a question record as --from/),
+  );
+  await assert.rejects(
+    () => runCli(['unrelate', '--cwd', target, '--from', qid, '--to', other, '--type', 'refines', '--reason', 'r']),
+    rejectsWith(/unrelate refuses a question record as --from/),
+  );
+  assert.equal((await frontmatter(target, 'memory/questions', qid)).refines, undefined);
+  // A claim → question edge is still the claim's business.
+  const ok = await runCli(['relate', '--cwd', target, '--from', other, '--to', qid, '--type', 'depends_on']);
+  assert.match(ok.stdout, /Linked/);
+});
+
+test('#34: MCP tool descriptions name derived_from and the v0.11 status sections', async () => {
+  const target = await initProject();
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target]);
+  try {
+    await initSession(session);
+    const list = await session.request('tools/list');
+    const tools = (list.result as { tools: Array<{ name: string; description?: string; inputSchema?: { properties?: Record<string, { description?: string; items?: { enum?: string[] } }> } }> }).tools;
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    for (const name of ['memspec_relate', 'memspec_unrelate']) {
+      const tool = byName.get(name)!;
+      assert.ok(tool.description?.includes('derived_from'), `${name} description`);
+      assert.ok(tool.inputSchema?.properties?.type?.description?.includes('derived_from'), `${name} type param`);
+    }
+    const search = byName.get('memspec_search')!;
+    assert.ok(search.description?.includes('derived_from / conflicts_with'), 'search expand_edges list');
+    assert.ok(search.inputSchema?.properties?.edge_types?.description?.includes('all seven'), 'edge_types default text');
+    const status = byName.get('memspec_status')!;
+    for (const word of ['cold', 'promotion_candidates', 'questions', 'evidence_backed']) {
+      assert.ok(status.description?.includes(word), `status description mentions ${word}`);
+    }
   } finally {
     await session.close();
   }

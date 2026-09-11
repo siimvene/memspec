@@ -39,65 +39,121 @@ function isWithinHome(dir: string): boolean {
 }
 
 /**
- * C1 — bounded upward walk for a `.memspec/` store directory. Starting at
- * `startDir`, climb parent directories and return the first `.memspec/` found.
+ * C1 — the ONE fenced upward walk shared by store-dir resolution
+ * (`findStoreDirUpward`) and pointer resolution (`findPointer`). Both walks
+ * must agree on where they stop, or `search` (pointer-aware) and `status`
+ * (store-dir only) resolve different stores from the same cwd.
  *
- * The walk is deliberately fenced so a session in a deep subdirectory can't
- * silently bind to a store far up the tree:
+ * Fence, in order:
  *
- *   - `MEMSPEC_NO_WALK=1` disables the walk entirely (returns null → callers
- *     fall back to the classic `<startDir>/.memspec`, i.e. today's behaviour).
- *   - When `startDir` is OUTSIDE the home directory, no walk happens — only
- *     `startDir` itself is considered. Repos living outside $HOME keep the
- *     pre-C1 "cwd only" resolution.
- *   - When inside $HOME, the climb stops AFTER checking `$HOME` (inclusive) and
- *     never steps above it.
+ *   - `MEMSPEC_NO_WALK=1`: no climb at all — only `startDir` is visited.
+ *   - `startDir` inside $HOME: climb and stop AFTER visiting `$HOME`
+ *     (inclusive). Nothing above the operator's home is ever consulted.
+ *   - `startDir` outside $HOME: climb to the filesystem root, which is what
+ *     `MemspecStore.findRoot()` did before 0.11 (`while (dir !== '/')`). A repo
+ *     at /srv/app or in a container's /work has no $HOME to stop at, and
+ *     fencing it to "cwd only" turned every subdirectory session into a
+ *     phantom `<cwd>/.memspec` (0.11 pre-release regression).
  *
- * Only `.memspec/` directories resolve here; `.memspec.yaml` pointer files are
- * a separate, explicit repo-binding mechanism handled by `findPointer` /
- * `CompositeStore.forCwd`. Returns the absolute `.memspec` path, or null.
+ * `visit` returns a value to stop the walk (the first non-undefined result is
+ * returned) or `undefined` to keep climbing.
  */
-export function findStoreDirUpward(startDir: string): string | null {
-  if (process.env.MEMSPEC_NO_WALK === '1') return null;
-
-  const home = resolve(homedir());
+export function walkUpFenced<T>(startDir: string, visit: (dir: string) => T | undefined): T | null {
   let dir = resolve(startDir);
-
-  // Outside $HOME: check the starting directory only, never climb.
-  const walk = isWithinHome(dir);
+  const noWalk = process.env.MEMSPEC_NO_WALK === '1';
+  const home = resolve(homedir());
+  const stopAtHome = isWithinHome(dir);
 
   while (true) {
-    const candidate = join(dir, '.memspec');
-    if (existsSync(candidate) && statSync(candidate).isDirectory()) return candidate;
-    if (!walk) return null;
-    if (dir === home) return null; // $HOME checked (inclusive); do not go above it
+    const hit = visit(dir);
+    if (hit !== undefined) return hit;
+    if (noWalk) return null;
+    if (stopAtHome && dir === home) return null; // $HOME visited (inclusive); never above it
     const parent = dirname(dir);
-    if (parent === dir) return null; // filesystem root guard
+    if (parent === dir) return null; // filesystem root visited
     dir = parent;
   }
 }
 
+function isStoreDir(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Walk up from cwd. At each level a `.memspec/` store directory wins; a
- * `.memspec.yaml` pointer file at a level with no store directory resolves
- * to its declared layers. Returns null when a real store (or nothing) is
- * found — callers then use the classic resolution path.
+ * C1 — bounded upward walk for a `.memspec/` store directory. Starting at
+ * `startDir`, climb parent directories (see `walkUpFenced` for the fence) and
+ * return the first `.memspec/` found. Returns null when nothing is found
+ * within the fence — callers fall back to the classic `<startDir>/.memspec`.
+ *
+ * Only `.memspec/` directories resolve here; `.memspec.yaml` pointer files are
+ * a separate, explicit repo-binding mechanism handled by `findPointer` /
+ * `CompositeStore.forCwd`.
+ */
+export function findStoreDirUpward(startDir: string): string | null {
+  return walkUpFenced(startDir, (dir) => {
+    const candidate = join(dir, '.memspec');
+    return isStoreDir(candidate) ? candidate : undefined;
+  });
+}
+
+/**
+ * A pointer REDIRECTS reads and writes to whatever path its author declared,
+ * so unlike a `.memspec/` directory (where the store is visibly where you
+ * are), the file itself has to be trusted. Refuse a pointer that
+ *
+ *   - lives in a world-writable directory (`/tmp`, `/private/tmp`, a shared
+ *     scratch dir): anyone on the machine could have planted it; or
+ *   - is owned by a different user than the one running memspec.
+ *
+ * POSIX only — on platforms without `process.getuid` every pointer is trusted.
+ * A refused pointer is reported once on stderr and otherwise treated as
+ * absent, so resolution falls through to the classic path instead of failing.
+ */
+function pointerIsTrusted(file: string, dir: string): boolean {
+  const getuid = process.getuid;
+  if (typeof getuid !== 'function') return true;
+  try {
+    const uid = getuid();
+    const dirStat = statSync(dir);
+    const fileStat = statSync(file);
+    const reasons: string[] = [];
+    if ((dirStat.mode & 0o002) !== 0) reasons.push('its directory is world-writable');
+    if (fileStat.uid !== uid) reasons.push(`it is owned by uid ${fileStat.uid}, not ${uid}`);
+    if (dirStat.uid !== uid) reasons.push(`its directory is owned by uid ${dirStat.uid}, not ${uid}`);
+    if (reasons.length === 0) return true;
+    if (!warnedPointers.has(file)) {
+      warnedPointers.add(file);
+      process.stderr.write(`memspec: ignoring untrusted ${POINTER_FILENAME} at ${file} (${reasons.join('; ')})\n`);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+const warnedPointers = new Set<string>();
+
+/**
+ * Walk up from cwd (same fence as `findStoreDirUpward`: `MEMSPEC_NO_WALK=1`
+ * → cwd only; inside $HOME → stop at $HOME; outside $HOME → filesystem root).
+ * At each level a `.memspec/` store directory wins; a trusted `.memspec.yaml`
+ * pointer file at a level with no store directory resolves to its declared
+ * layers. Returns null when a real store (or nothing) is found — callers then
+ * use the classic resolution path.
  */
 export function findPointer(cwd?: string): PointerResolution | null {
-  let dir = resolve(cwd ?? process.cwd());
-  while (true) {
-    const storeDir = join(dir, '.memspec');
-    if (existsSync(storeDir) && statSync(storeDir).isDirectory()) return null;
+  return walkUpFenced(cwd ?? process.cwd(), (dir): PointerResolution | null | undefined => {
+    if (isStoreDir(join(dir, '.memspec'))) return null; // a real store here: pointer never consulted
     const pointer = join(dir, POINTER_FILENAME);
-    if (existsSync(pointer)) {
-      const stores = parsePointer(pointer);
-      if (stores.length > 0) return { dir, stores };
-      return null; // malformed/empty pointer: fall back to classic resolution
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+    if (!existsSync(pointer)) return undefined;
+    if (!pointerIsTrusted(pointer, dir)) return undefined; // untrusted: as if absent, keep climbing
+    const stores = parsePointer(pointer);
+    if (stores.length > 0) return { dir, stores };
+    return null; // malformed/empty pointer: fall back to classic resolution
+  });
 }
 
 function parsePointer(file: string): StoreLayerConfig[] {

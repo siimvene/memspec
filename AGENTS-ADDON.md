@@ -60,8 +60,10 @@ when the claims are genuinely distinct.
 - **`--evidence <path|url>`**: attach committed proof — a benchmark file, a log excerpt, a
   screenshot (copied into `evidence/`), or a URL to an artifact (recorded, not fetched). A
   file-backed attachment upgrades an anchorless claim's witness from `assertion` to
-  `evidence`. Never point `--evidence` at anything secret: `evidence/` is committed. Attach
-  the same way at verify time with `verify --evidence-file`.
+  `evidence`. Never point `--evidence` at anything secret: `evidence/` is committed. Symlinks
+  are refused (pass the real file) and anything under the store's `local/` is refused even
+  through a symlinked directory. Attach the same way at verify time with
+  `verify --evidence-file` — it copies only when the verification is clean.
 - **Question groups** (`memspec_question` / `memspec question`): when two or more records
   answer one named question, group them instead of wiring pairwise `conflicts_with`. Mark it
   `--closed` when the listed answers are the only candidates; then as you supersede the

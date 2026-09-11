@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import type { CompositeStore } from './composite-store.js';
 
 /**
  * Per-store retrieval log. One line per result returned by a search call.
@@ -21,7 +21,13 @@ export interface UsageEntry {
   retrieved_at: string; // ISO 8601
   /** v0.11 — the search query that produced this hit, truncated to 200 chars. */
   query?: string;
-  /** v0.11 — session identifier (MEMSPEC_SESSION_ID > CLAUDE_SESSION_ID > per-process id). */
+  /**
+   * v0.11 — session identifier: `MEMSPEC_SESSION_ID` > `CLAUDE_SESSION_ID` >
+   * the process-level label the MCP server registers (`mcp:<pid>`). ABSENT
+   * when none of those applies (a bare CLI invocation): a row without a
+   * session never counts towards `sessions`, so Promotion candidates require
+   * a real session id rather than counting invocations.
+   */
   session?: string;
   /** v0.11 — 1-based position of this hit within its result set. */
   rank?: number;
@@ -32,23 +38,33 @@ export interface UsageEntry {
 const QUERY_TRUNCATE_CHARS = 200;
 
 /**
- * Per-process fallback session id. Generated once, lazily, and reused for the
- * remainder of the process lifetime — a stable identifier for "distinct
- * sessions" counting when neither env var is set (e.g. a bare CLI invocation).
+ * Process-level session label, registered by a long-lived process that IS a
+ * session — the MCP server (one process per client connection, labelled
+ * `mcp:<pid>`). Never generated on demand: a CLI process is one invocation,
+ * and stamping each with a fresh id made two `memspec search` calls from the
+ * same agent turn read as "retrieved in 2 distinct sessions".
  */
-let processSessionId: string | undefined;
+let processSessionLabel: string | undefined;
+
+/** Register the label a long-lived process (the MCP server) reports as its session. */
+export function setProcessSessionLabel(label: string | undefined): void {
+  processSessionLabel = label;
+}
 
 /**
  * Resolve the active session id: `MEMSPEC_SESSION_ID` takes priority (lets a
  * caller stitch multiple processes into one logical session), then
- * `CLAUDE_SESSION_ID` (set by the Claude Code harness), then a per-process id
- * generated once and cached for the life of the process.
+ * `CLAUDE_SESSION_ID` (set by the Claude Code harness), then the label the
+ * MCP server registered for itself. Returns undefined — and the usage row
+ * carries no `session` — when none applies. There is deliberately no
+ * per-process fallback: an id that changes on every invocation is not a
+ * session, and the CLI's parent pid is the harness's per-call shell, so it
+ * would be no better.
  */
-export function resolveSessionId(): string {
+export function resolveSessionId(): string | undefined {
   if (process.env.MEMSPEC_SESSION_ID) return process.env.MEMSPEC_SESSION_ID;
   if (process.env.CLAUDE_SESSION_ID) return process.env.CLAUDE_SESSION_ID;
-  if (!processSessionId) processSessionId = `proc_${randomUUID()}`;
-  return processSessionId;
+  return processSessionLabel;
 }
 
 export function usagePath(storeRoot: string): string {
@@ -78,7 +94,8 @@ export function recordSearchHits(storeRoot: string, ids: string[], options: Reco
     const session = options.session ?? resolveSessionId();
     const query = options.query !== undefined ? options.query.slice(0, QUERY_TRUNCATE_CHARS) : undefined;
     const lines = ids.map((id, index) => {
-      const entry: UsageEntry = { id, retrieved_at: now, session, rank: index + 1 };
+      const entry: UsageEntry = { id, retrieved_at: now, rank: index + 1 };
+      if (session !== undefined) entry.session = session;
       if (query !== undefined) entry.query = query;
       if (options.surface !== undefined) entry.surface = options.surface;
       return JSON.stringify(entry);
@@ -87,6 +104,31 @@ export function recordSearchHits(storeRoot: string, ids: string[], options: Reco
   } catch {
     // best-effort log — never fail the search
   }
+}
+
+/**
+ * Log surfaced hits to the store layer that OWNS each record, not to the
+ * primary alone. A record served from a read-only team layer through a
+ * layered view used to be logged only into the personal store's usage.jsonl,
+ * so `status` run against the team store itself reported it Cold minutes
+ * after it was retrieved. Items are grouped by their read-time `layer` stamp
+ * (absent = primary); rank is the item's position within its own layer's
+ * group. Unknown layer names fall back to the primary root.
+ */
+export function recordSurfacedHitsByLayer(
+  composite: CompositeStore,
+  items: Array<{ id: string; layer?: string }>,
+  options: RecordSearchHitsOptions = {},
+): void {
+  if (items.length === 0) return;
+  const byRoot = new Map<string, string[]>();
+  for (const item of items) {
+    const root = (item.layer ? composite.getLayer(item.layer)?.store.root : undefined) ?? composite.root;
+    const ids = byRoot.get(root) ?? [];
+    ids.push(item.id);
+    byRoot.set(root, ids);
+  }
+  for (const [root, ids] of byRoot) recordSearchHits(root, ids, options);
 }
 
 /**

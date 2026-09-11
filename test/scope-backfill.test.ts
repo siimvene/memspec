@@ -122,3 +122,29 @@ test('scope backfill: refuses to run without --map', async () => {
 
   await assert.rejects(() => execFileAsync(process.execPath, [SCRIPT, '--store', storeRoot], { cwd: REPO_ROOT }));
 });
+
+test('scope backfill: normalises legacy states like the runtime and reports the non-claim-state count', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const storeRoot = join(target, '.memspec');
+  const factsDir = join(storeRoot, 'memory', 'facts');
+  await mkdir(factsDir, { recursive: true });
+
+  // Pre-0.3 `state: captured` is `active` to the runtime (schema.ts LEGACY_STATE_MAP).
+  const legacyId = 'ms_01SB0000000000000000000HHH';
+  await writeFile(join(factsDir, `${legacyId}.md`), record(legacyId, { tags: ['plg'], state: 'captured' }));
+  // A retired record is not eligible and must be accounted for, not vanish from the report.
+  const retiredId = 'ms_01SB0000000000000000000III';
+  await writeFile(join(factsDir, `${retiredId}.md`), record(retiredId, { tags: ['plg'], state: 'retired' }));
+
+  const dry = await runBackfill(storeRoot);
+  assert.match(dry.stdout, /1 record\(s\) would be stamped with a scope/);
+  assert.match(dry.stdout, /1 record\(s\) in a non-claim state .* not eligible, left untouched/);
+
+  await runBackfill(storeRoot, ['--apply']);
+  const legacy = matter(await readFile(join(factsDir, `${legacyId}.md`), 'utf8')).data;
+  assert.equal(legacy.scope, 'plg');
+  assert.equal(legacy.state, 'captured', 'the script stamps scope only; state normalisation stays with the runtime');
+  const retired = matter(await readFile(join(factsDir, `${retiredId}.md`), 'utf8')).data;
+  assert.equal(retired.scope, undefined);
+});

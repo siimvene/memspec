@@ -34,7 +34,7 @@ v0.5 adds two retrieval-side features. All additions are backward-compatible:
 new fields and parameters are optional; missing values preserve v0.4
 behaviour.
 
-- **Follow linked notes from `memspec_search`.** New optional `expand_edges` flag follows the named links on each search match and surfaces the linked notes as additional results. `edge_types` filter narrows which link types are followed (default: all six — `refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`); `expand_depth` caps link-following depth at 1–3 hops (default 1). Linked-note hits carry an `expanded_via: {from_id, edge_type, hops}` field so callers can see why a record surfaced. Hop scoring is link-following order, no numeric decay; outbound only.
+- **Follow linked notes from `memspec_search`.** New optional `expand_edges` flag follows the named links on each search match and surfaces the linked notes as additional results. `edge_types` filter narrows which link types are followed (default: all seven — `refines`, `supports`, `depends_on`, `derived_from`, `conflicts_with`, `supersedes`, `superseded_by`); `expand_depth` caps link-following depth at 1–3 hops (default 1). Linked-note hits carry an `expanded_via: {from_id, edge_type, hops}` field so callers can see why a record surfaced. Hop scoring is link-following order, no numeric decay; outbound only.
 - **Temporal validity intervals.** New optional `valid_from` and `valid_to` ISO8601 fields on `MemoryFrontmatter`. `memspec_search` accepts an `as_of` filter that drops records whose validity window excludes the given timestamp. Orthogonal to `check_by` (which is a review schedule, not a truth window). Missing bounds mean "always valid."
 - **`memspec_remember` and `memspec_get` validity wiring.** Remember accepts `valid_from` / `valid_to` at write time on both MCP and CLI surfaces; get returns them when present.
 
@@ -249,7 +249,7 @@ A retrieval query contains:
 - **max_tokens** (optional): Token budget for the response. Default: 2000.
 - **profile** (optional): Named retrieval profile. Default: `default`.
 - **expand_edges** (optional, v0.5+): If true, follow the named links on each search match to surface linked notes as additional results. Default: false.
-- **edge_types** (optional, v0.5+): Restrict link-following to specific link types. Default: all six (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). No-op when `expand_edges` is false.
+- **edge_types** (optional, v0.5+): Restrict link-following to specific link types. Default: all seven (`refines`, `supports`, `depends_on`, `derived_from`, `conflicts_with`, `supersedes`, `superseded_by`). No-op when `expand_edges` is false.
 - **expand_depth** (optional, v0.5+): Cap on how many hops to follow, 1–3. Default: 1. No-op when `expand_edges` is false.
 - **include_superseded** (optional, v0.6+): When true with `expand_edges`, allows link-following to reach `superseded` / archived records as targets. Search matches themselves stay active-only. Default: false. No-op when `expand_edges` is false.
 - **as_of** (optional, v0.5+): ISO8601 timestamp. Drops records whose `valid_from`/`valid_to` window excludes this instant. Records without validity bounds are always returned.
@@ -266,13 +266,14 @@ A retrieval response is an ordered list of memory items, ranked by relevance, tr
 - For an active anchored hit, a read-path `drifted` flag (v0.11+) — true when an anchored file's content changed or went missing since the record was last anchored — plus `anchor_unchecked` when a cross-repo anchor's repo is not checked out here (drift could not be determined) and a per-file `drift: [{file, status}]` list. The check never mutates the record; `reconcile` remains the authority for repair.
 
 The response as a whole MUST also include (v0.11+):
-- `coverage: none | weak | ok` — a deterministic absence-disclosure verdict. `none` = no active record matches the query in the active scope; `weak` = fewer than half of the distinct query terms (length >= 3, stemmed) occur in the top hit's title+tags+body, OR the best hit matched only via title/tags with no query term in its body, OR its BM25 relevance is above the weak floor; `ok` = a genuine match exists. When the term-coverage rule fires, `coverage_note` names the unmatched query terms. Agents SHOULD treat `none`/`weak` as "the store does not reliably know this" rather than reading meaning into rank order.
-- `coverage_note` — a one-sentence human-readable gloss of the verdict.
-- `coverage_witness` — the strongest witness class among the returned hits (`anchor > operator > evidence > assertion`), or null when there are no hits, so an unverified result set is distinguishable from an anchored one without inspecting each row.
+- `coverage: none | weak | ok` — a deterministic absence-disclosure verdict. `none` = no active record matches the query in the active scope (when a narrowing type filter is active the note names it and says how many records of other types match); `weak` = fewer than half of the distinct content-bearing query terms occur in the best-covered hit's title+tags+body, OR that hit matched only via title/tags with no query term in its body, OR the top BM25 relevance is above the weak floor; `ok` = a genuine match exists. The term test tokenises the query and the hits with the index tokenizer (`porter unicode61`): punctuation and quotes are stripped, inflections collapse to one stem, matches are whole-token (`gate` is not `gateway`), English function words (`does`, `the`, `use`, ...) and words under 3 characters are ignored, and the hit judged is the BEST-covered one in the returned set, not the rank-1 row (in a layered store the fused rank-1 row can be a fallback hit from a higher-priority layer). When the term-coverage rule fires, `coverage_note` names the unmatched query terms. Agents SHOULD treat `none`/`weak` as "the store does not reliably know this" rather than reading meaning into rank order.
+- `coverage_note` — a one-sentence human-readable gloss of the verdict; weak/ok notes name the active scope when one is set.
+- `coverage_witness` — the strongest witness class among the returned hits (`anchor > operator > evidence > assertion`), or null when there are no hits, so an unverified result set is distinguishable from an anchored one without inspecting each row. An anchored hit whose anchor is `drifted` or `anchor_unchecked` counts as `evidence`, not `anchor` (the anchor no longer witnesses the current code); when that downgrade decides the value, `coverage_witness_note` carries `drifted` / `anchor unchecked` and the text line reads `best witness: evidence (drifted)`.
+- The CLI's `search --json` emits this same payload object (`query`, `profile`, `count`, `full`, `results`, `coverage`, `coverage_note`, `coverage_witness`), not a bare results array.
 
 ### 5.3 Ranking
 
-Query results are ranked by **relevance** (keyword/BM25 similarity, normalized per result set) combined with **witness recency** (how recently the claim was last verified). Confidence is gone in v0.3 — trust is communicated through the witness class, not folded into the rank. Result hits are appended to a local usage log (`usage.jsonl`), which feeds the boot-context usage boost (§5.5). v0.11 extends each row with the query, a session id, rank, and issuing surface, and pairs it with an append-only outcome log (`outcomes.jsonl`, written by `memspec_outcome` and automatically by `memspec_supersede`) — together these derive `last_referenced`/`sessions` on search hits and `memspec_get`, and the `status` Cold / Promotion-candidates surfaces. Neither log is ever written back to a memory's frontmatter.
+Query results are ranked by **relevance** (keyword/BM25 similarity, normalized per result set) combined with **witness recency** (how recently the claim was last verified). Confidence is gone in v0.3 — trust is communicated through the witness class, not folded into the rank. Result hits are appended to a local usage log (`usage.jsonl`), which feeds the boot-context usage boost (§5.5). v0.11 extends each row with the query, rank, issuing surface (`cli` | `mcp` | `context` — boot context logs what it surfaces too), and a session id when one exists (`MEMSPEC_SESSION_ID`, else `CLAUDE_SESSION_ID`, else the MCP server's `mcp:<pid>`; a bare CLI call records none — no per-process fallback, so invocations are never counted as sessions). In a layered store a row lands in the layer that owns the record. It pairs the log with an append-only outcome log (`outcomes.jsonl`, written by `memspec_outcome` and automatically by `memspec_supersede`) — together these derive `last_referenced`/`sessions` on search hits and `memspec_get`, and the `status` Cold / Promotion-candidates surfaces. Neither log is ever written back to a memory's frontmatter.
 
 ### 5.4 Retrieval Profiles
 
@@ -426,7 +427,7 @@ Agent reads and writes markdown files in `.memspec/`. No server, no dependencies
 
 ### 8.2 MCP Server
 
-Optional MCP server. Thirteen tools (eleven stable since v0.4; `memspec_unrelate` added v0.10; `memspec_outcome` added v0.11):
+Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate` added v0.10; `memspec_outcome` and `memspec_question` added v0.11):
 
 - `memspec_search` — ranked retrieval with optional type filter and profile;
   result objects carry `verified_with`, `stale`, `conflicts_with`, and the
@@ -443,7 +444,8 @@ Optional MCP server. Thirteen tools (eleven stable since v0.4; `memspec_unrelate
   `merge_from` collapses N duplicates into one survivor atomically. Reason is
   persisted on every record involved.
 - `memspec_relate` — wire a named link from one memory to another after the
-  fact: `refines`, `supports`, `depends_on`, or `conflicts_with`
+  fact: `refines`, `supports`, `depends_on`, `derived_from` (v0.11), or
+  `conflicts_with`
 - `memspec_observe` — point-in-time observation with hard expiry (default 7d)
 - `memspec_verify` — re-witness a claim; anchorless verification requires
   evidence. `check_by` (v0.11) optionally pins the next review date explicitly
@@ -455,6 +457,11 @@ Optional MCP server. Thirteen tools (eleven stable since v0.4; `memspec_unrelate
   was acted on: `useful`, `dead_end`, or `corrected` (the latter written
   automatically by `memspec_supersede`). Append-only; never mutates the
   memory itself
+- `memspec_question` (v0.11) — create or edit a question group (`kind:
+  question`): a named question listing competing answer records, `closed`
+  (the listed answers are the only candidates) or open; `add` / `close` /
+  `open` / `resolve` edit an existing group. Retrieval is via
+  `memspec_search` with `type: "question"`
 - `memspec_anchor` — link a claim to source files (records git blob SHAs)
 - `memspec_reconcile` — list anchored claims whose files have drifted
 - `memspec_status` — store health: counts by type/state/witness, stale,
@@ -482,7 +489,7 @@ Optional command-line interface (primary commands):
 - `memspec verify {id} [--evidence "{what you checked}"] [--check-by {iso|never}]` (v0.11: `--check-by`)
 - `memspec outcome {id} {useful|dead_end|corrected} [--note "{text}"] [--source {who}]` (v0.11)
 - `memspec anchor {id} {files...}` / `memspec reconcile [--since {ref}]`
-- `memspec relate --from {id} --to {id} --type {refines|supports|depends_on|conflicts_with}` (v0.4+)
+- `memspec relate --from {id} --to {id} --type {refines|supports|depends_on|derived_from|conflicts_with}` (v0.4+; `derived_from` v0.11; `--from` must be a claim, not a question group)
 - `memspec search "{query}" [--expand-edges] [--include-superseded] [--as-of {iso}]` / `memspec context [--query] [--budget]`
 - `memspec status` — the single maintenance readout
 - `memspec export --format {jsonl|graphml|dot}` (v0.4+)
@@ -689,17 +696,22 @@ This is informational — the file's physical location determines its layer, not
 
 ### 12.7 Store Resolution (walk-up)
 
-A command resolves its store from `--cwd` (default: process cwd) by walking up the directory tree toward `$HOME`; the first ancestor holding a `.memspec/` directory (or a `.memspec.yaml` pointer) is the store. A session deep in a repo, or in a repo with no store of its own, resolves the nearest real store rather than a phantom empty `<cwd>/.memspec`. The walk is fenced:
+A command resolves its store from `--cwd` (default: process cwd) by walking up the directory tree; the first ancestor holding a `.memspec/` directory (or a trusted `.memspec.yaml` pointer) is the store. A session deep in a repo, or in a repo with no store of its own, resolves the nearest real store rather than a phantom empty `<cwd>/.memspec`. The `.memspec/` walk and the pointer walk share one fence (`walkUpFenced` in `registry.ts`):
 
-- It stops at `$HOME` (inclusive); nothing above `$HOME` is consulted.
-- A cwd outside `$HOME` does not walk — only that directory is checked.
-- `MEMSPEC_NO_WALK=1` disables the walk; `<cwd>/.memspec` is used verbatim.
+- A cwd inside `$HOME` stops at `$HOME` (inclusive); nothing above `$HOME` is consulted.
+- A cwd outside `$HOME` walks to the filesystem root (the pre-0.11 `findRoot()` behaviour).
+- `MEMSPEC_NO_WALK=1` disables the walk; only cwd itself is checked, else `<cwd>/.memspec` is used verbatim.
 - A nearer `.memspec/` directory beats a farther `.memspec.yaml` pointer.
+- A pointer in a world-writable directory, or owned by another uid, is untrusted: ignored (stderr note) and the walk continues as if it were absent. POSIX only.
 - A path already ending in `.memspec` (explicit store dir) is used as-is, never walked.
 
 **Scope derives from the original cwd, not the resolved store.** When the walk climbs from a subdirectory up to a repo-root store, the active `scope` is computed from the original cwd against the store's `scopes:` map, so a session in a subdirectory is scoped correctly rather than left unscoped.
 
-`init` warns when the target directory is nested inside an existing store (a `.memspec/` exists up the tree); `--force` creates the nested store anyway.
+**Write-path layer resolution.** `CompositeStore.resolveWritable(cwd, storeName?)` (and the `writableFor` shorthand) resolve the layer a write lands in through the same layer set the read path uses: pointer layers → the resolved store's `stores:` block → the store itself. Relative `path:` entries resolve against the directory holding the declaring config, never the caller cwd. Exactly one writable layer (or the named one) is returned; zero writable layers, an unknown name, a `writable: false` name, or several writable layers without a name are refused with the layer list. `question` uses this resolution and never `init()`s a store implicitly.
+
+**Unavailable layers.** A declared layer whose store directory is absent is skipped for reads and reported as `CompositeStore.layersUnavailable: string[]` (names; `unavailableLayers()` adds paths) plus one `LoadWarning` per missing layer in `warnings`. The unlayered single-store fallback never reports itself.
+
+`init` refuses (exit 1, naming the parent store) when the target directory is nested inside an existing store (a `.memspec/` exists up the tree); `--force` creates the nested store anyway.
 
 ---
 
@@ -735,9 +747,9 @@ A memory about code state ("auth uses argon2id", "the app has 7 screens") goes s
 
 Anchors are a convention, not a schema requirement. Tools that understand them (verify, reconcile, anchor-aware decay) use them; tools that don't ignore them. Memories without anchors keep calendar-only behavior.
 
-**Cross-repo anchors.** An anchor MAY carry a `repo` field naming another repository the anchored file lives in. Verification resolves the repo as a sibling directory of the project root first, then under directories listed in `anchors.repo_search_paths` in `config.yaml`. When the repo is not checked out, verification returns `needs_review` with "anchor in repo X, fetch to verify" — the claim is flagged, never failed hard, and never mutated. Anchors without `repo` behave exactly as before.
+**Cross-repo anchors.** An anchor MAY carry a `repo` field naming another repository the anchored file lives in. `repo` MUST be a bare directory name (no separators, not absolute, not `.`/`..`); a record violating this reads as `repo_unavailable` / `anchor_unchecked` and is never resolved, so a planted record cannot turn anchor checking into a content-hash oracle over arbitrary directories. Verification resolves the repo as a sibling directory of the project root first, then under directories listed in `anchors.repo_search_paths` in `config.yaml`, which defaults to `~/git` when the config names none. When the repo is not checked out, verification returns `needs_review` with "anchor in repo X, fetch to verify" — the claim is flagged, never failed hard, and never mutated. Anchors without `repo` behave exactly as before.
 
-**Write-side resolution (v0.11).** The write side (`remember`, `anchor`) resolves an anchor path to the same `{repo, file}` form the read side understands, so anchors survive a store whose project root is not the repo being worked on (the home-rooted personal store, where the root is `$HOME`). An absolute path is recorded repo-less and project-relative when it lies inside the store's project root, otherwise against its own enclosing git repository (`repo` = that repo's basename). A relative path is tried under the project root, then under a caller-supplied `anchor_root` (CLI `--anchor-root`, MCP `anchor_root`), then as a repo-qualified `repo:path` / `repo/path` resolved as a sibling or under `anchors.repo_search_paths`. A path that resolves nowhere yields an actionable warning and the record is written without that anchor — never silently. Containment holds on every branch: a `..`, absolute, or symlink escape out of the resolved repo is treated as not found.
+**Write-side resolution (v0.11).** The write side (`remember`, `anchor`) resolves an anchor path to the same `{repo, file}` form the read side understands, so anchors survive a store whose project root is not the repo being worked on (the home-rooted personal store, where the root is `$HOME`). An absolute path is recorded repo-less and project-relative when it lies inside the store's project root AND belongs to the same git repository as that root (or to none); a file inside a different git repository is always recorded against that repository (`repo` = its basename, `file` repo-relative), even when it also lies under the project root — the home-rooted store's `$HOME/git/<repo>/…` case, where a home-relative form would read as drifted on any machine with a different layout. Every recorded `{repo, file}` form is checked against the writing store's own read-side lookup; when it would not resolve, the write still records it but returns a warning naming the directory to add to `anchors.repo_search_paths`. A relative path is tried under the project root, then under a caller-supplied `anchor_root` (CLI `--anchor-root`, MCP `anchor_root`), then as a repo-qualified `repo:path` / `repo/path` resolved as a sibling or under `anchors.repo_search_paths`. A path that resolves nowhere yields an actionable warning and the record is written without that anchor — never silently. Containment holds on every branch: a `..`, absolute, or symlink escape out of the resolved repo is treated as not found.
 
 **Anchorless verification.** As of v0.2, verifying a memory that has no anchors REQUIRES evidence text stating what was checked (recorded in `ext.last_verification.evidence`). A bare anchorless verify is the system trusting its own output and is rejected.
 

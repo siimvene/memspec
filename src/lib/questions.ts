@@ -79,16 +79,32 @@ export function createQuestion(store: MemspecStore, options: CreateQuestionOptio
   return { id, filePath };
 }
 
-/** Append answer ids to a question (validated, deduped). Returns the updated item. */
+/**
+ * Append answer ids to a question (validated, deduped). Returns the updated
+ * item. Adding a NEW, still-active candidate to a RESOLVED question reopens
+ * it: `state` goes back to `open` and `resolved_by` is cleared, because the
+ * question now has more than one live answer and "resolved — resolved_by X"
+ * would be a lie about the current record set. Callers detect the flip by
+ * comparing `state` before and after. Adding an already-listed id, or a
+ * superseded one, changes nothing about resolution.
+ */
 export function addAnswers(store: MemspecStore, questionId: string, newIds: string[]): MemoryItem {
   const question = loadQuestion(store, questionId);
-  for (const id of newIds) assertAnswerCandidate(store, id);
+  const candidates = new Map(newIds.map((id) => [id, assertAnswerCandidate(store, id)]));
   const existing = question.answers ?? [];
   const merged = [...existing];
+  let addedActive = false;
   for (const id of newIds) {
-    if (!merged.includes(id)) merged.push(id);
+    if (!merged.includes(id)) {
+      merged.push(id);
+      if (candidates.get(id)?.state === 'active') addedActive = true;
+    }
   }
   const updated: MemoryItem = { ...question, answers: merged };
+  if (question.state === 'resolved' && addedActive) {
+    updated.state = 'open';
+    updated.resolved_by = undefined;
+  }
   store.updateItem(updated);
   return updated;
 }

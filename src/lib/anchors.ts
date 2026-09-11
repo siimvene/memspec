@@ -67,7 +67,39 @@ export function getCodeAnchors(item: MemoryItem): CodeAnchor[] {
 }
 
 function expandHome(path: string): string {
+  if (path === '~') return homedir();
   return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+}
+
+/**
+ * Search paths consulted for a cross-repo anchor's checkout when the store's
+ * config.yaml declares no `anchors.repo_search_paths`. `~/git` is where the
+ * home-rooted personal store's repos live on every machine it syncs between;
+ * without it a `{repo, file}` anchor written on one machine could never be
+ * resolved on the read side (verify → repo_unavailable, search →
+ * anchor_unchecked) unless every store hand-configured the same path.
+ */
+export const DEFAULT_REPO_SEARCH_PATHS: readonly string[] = ['~/git'];
+
+/** The configured search paths, or the defaults when the config names none. */
+export function effectiveRepoSearchPaths(configured: readonly string[] | undefined): string[] {
+  return configured && configured.length > 0 ? [...configured] : [...DEFAULT_REPO_SEARCH_PATHS];
+}
+
+/**
+ * An anchor's `repo` field is a bare directory name that is appended to a
+ * trusted base (the project root's parent, or a search path). Anything else —
+ * an absolute path, a separator, `.`/`..` — would let a record planted in a
+ * shared or read-only layer point the anchor base at an arbitrary directory
+ * and turn `checkAnchors` into a content-hash oracle over files outside every
+ * repo (`repo: /etc`, `file: passwd`). Such a record is never resolved.
+ */
+export function isBareRepoName(repo: string): boolean {
+  if (typeof repo !== 'string' || repo.length === 0) return false;
+  if (repo === '.' || repo === '..') return false;
+  if (isAbsolute(repo)) return false;
+  if (repo.includes('/') || repo.includes('\\')) return false;
+  return true;
 }
 
 /**
@@ -77,7 +109,7 @@ function expandHome(path: string): string {
  * symlink). Used to catch anchors that escape their resolved base via `..`,
  * an absolute path elsewhere, or a symlink pointing out of the tree.
  */
-function canonicalize(p: string): string {
+export function canonicalize(p: string): string {
   let dir = resolve(p);
   const tail: string[] = [];
   for (;;) {
@@ -105,12 +137,23 @@ export function anchorWithinBase(base: string, file: string): boolean {
   return canonFile === canonBase || canonFile.startsWith(canonBase + sep);
 }
 
-/** Locate a cross-repo anchor's checkout: sibling of the project root first, then configured search paths. */
-export function resolveRepoRoot(projectRoot: string, repo: string, searchPaths: string[]): string | null {
-  const candidates = [
-    resolve(projectRoot, '..', repo),
-    ...searchPaths.map((path) => resolve(expandHome(path), repo)),
-  ];
+/** The directories a bare repo name is tried under, in order: the project root's parent, then each search path (or the defaults). */
+function repoCandidateBases(projectRoot: string, searchPaths: readonly string[]): string[] {
+  return [resolve(projectRoot, '..'), ...effectiveRepoSearchPaths(searchPaths).map(expandHome)];
+}
+
+/**
+ * Locate a cross-repo anchor's checkout: sibling of the project root first,
+ * then each `anchors.repo_search_paths` entry (defaulting to `~/git` when the
+ * config names none). `repo` must be a bare directory name — anything else
+ * (absolute, separators, `.`/`..`) resolves to null so the anchor reads as
+ * `repo_unavailable`, never as a probe of an arbitrary directory. Because the
+ * name is appended to a trusted base, the candidate cannot escape the project
+ * root's parent or a search path.
+ */
+export function resolveRepoRoot(projectRoot: string, repo: string, searchPaths: readonly string[]): string | null {
+  if (!isBareRepoName(repo)) return null;
+  const candidates = repoCandidateBases(projectRoot, searchPaths).map((base) => resolve(base, repo));
   for (const candidate of candidates) {
     try {
       if (statSync(candidate).isDirectory()) return candidate;
@@ -170,6 +213,10 @@ export function checkAnchors(projectRoot: string, anchors: CodeAnchor[], options
   return anchors.map((anchor) => {
     let root = projectRoot;
     if (anchor.repo) {
+      if (!isBareRepoName(anchor.repo)) {
+        process.stderr.write(`memspec: anchor repo ${JSON.stringify(anchor.repo)} is not a bare repository name; treating as unavailable.\n`);
+        return { ...anchor, currentSha: null, status: 'repo_unavailable' as const };
+      }
       const repoRoot = resolveRepoRoot(projectRoot, anchor.repo, options.repoSearchPaths ?? []);
       if (!repoRoot) {
         return { ...anchor, currentSha: null, status: 'repo_unavailable' as const };
@@ -208,10 +255,44 @@ export interface AnchorResolveOptions {
   repoSearchPaths?: string[];
 }
 
-export type AnchorResolution = { anchor: CodeAnchor } | { error: string };
+export type AnchorResolution = { anchor: CodeAnchor; warning?: string } | { error: string };
 
 function toPosix(p: string): string {
   return p.split(sep).join('/');
+}
+
+/**
+ * Build the `{repo, file}` form for a file inside `repoRoot`, and check that
+ * THIS store's read side (`resolveRepoRoot` from `projectRoot`) would find
+ * that same checkout again. When it would not — the repo is neither a
+ * sibling of the project root nor under a search path — the anchor is still
+ * recorded (another machine may resolve it), but the caller is told exactly
+ * which directory to add to `anchors.repo_search_paths`; otherwise the write
+ * says "Anchored" and every later verify says `repo_unavailable`.
+ */
+function crossRepoAnchor(
+  projectRoot: string,
+  repoRoot: string,
+  abs: string,
+  sha: string,
+  searchPaths: readonly string[],
+): AnchorResolution {
+  const relToRepo = relative(repoRoot, abs);
+  if (relToRepo === '' || relToRepo.startsWith('..') || !anchorWithinBase(repoRoot, relToRepo)) {
+    return { error: `Skipped ${abs}: resolves outside its git repository (${repoRoot})` };
+  }
+  const repo = basename(repoRoot);
+  const anchor: CodeAnchor = { file: toPosix(relToRepo), sha, repo };
+  const resolved = resolveRepoRoot(projectRoot, repo, searchPaths);
+  if (resolved && canonicalize(resolved) === canonicalize(repoRoot)) return { anchor };
+  const tried = repoCandidateBases(projectRoot, searchPaths).map((b) => join(b, repo));
+  const hint = resolved
+    ? `resolves to a different checkout (${resolved})`
+    : `is not found under ${tried.join(', ')}`;
+  return {
+    anchor,
+    warning: `Anchor ${anchor.file} recorded against repo ${repo}, but from this store that repo ${hint}; add ${dirname(repoRoot)} to anchors.repo_search_paths in config.yaml or verify will report repo_unavailable`,
+  };
 }
 
 /**
@@ -241,14 +322,23 @@ function splitRepoQualified(input: string): { repo: string; sub: string } | null
 /**
  * Resolve one write-time anchor path to a `{file, sha, repo?}` record, matching
  * what the read side can later resolve. Order:
- *  1. Absolute path → repo-less + project-relative when inside the store's own
- *     project root, otherwise recorded against the file's own git repo (walk up
- *     to `.git`), `repo` = that repo's basename.
+ *  1. Absolute path → recorded repo-less + project-relative only when the file
+ *     lies inside the store's project root AND belongs to the same git repo as
+ *     that root (or to no repo at all). A file inside a DIFFERENT git repo is
+ *     always recorded against that repo (`repo` = its basename, `file`
+ *     repo-relative) — even when it also lies under the project root. This is
+ *     the home-rooted personal store case: `$HOME/git/kvart/src/x.ts` is
+ *     inside projectRoot `$HOME`, but a `git/kvart/src/x.ts` form would read
+ *     as `drifted` on any machine whose repos live elsewhere, whereas
+ *     `{repo: kvart, file: src/x.ts}` resolves through the search paths.
  *  2. Relative path found under the project root → today's repo-less form.
  *  3. Relative path under a caller-supplied `anchorRoot` → recorded against the
  *     enclosing git repo (or the anchor root itself when it is not a checkout).
  *  4. Relative repo-qualified path (`repo:path` / `repo/path`) → repo resolved
  *     as a sibling of the project root, then under each `repoSearchPaths` entry.
+ * Every `{repo, file}` form is checked against this store's own read-side
+ * lookup; when it would not resolve, the anchor is recorded with a warning
+ * naming the directory to add to `anchors.repo_search_paths`.
  * Containment is enforced on every branch: a `..`, absolute, or symlink escape
  * out of the resolved base is treated as not found, never followed.
  */
@@ -265,20 +355,20 @@ export function resolveAnchorForWrite(
     if (sha === null) return { error: `Skipped ${input}: no readable file at that absolute path` };
 
     const relToProject = relative(projectRoot, abs);
-    if (relToProject !== '' && !relToProject.startsWith('..') && anchorWithinBase(projectRoot, relToProject)) {
+    const insideProject = relToProject !== '' && !relToProject.startsWith('..') && anchorWithinBase(projectRoot, relToProject);
+    const fileRepo = findRepoRoot(dirname(abs));
+    const projectRepo = findRepoRoot(projectRoot);
+    const sameRepoAsProject = fileRepo === null
+      || (projectRepo !== null && canonicalize(fileRepo) === canonicalize(projectRepo));
+    if (insideProject && sameRepoAsProject) {
       return { anchor: { file: toPosix(relToProject), sha } };
     }
-    const repoRoot = findRepoRoot(dirname(abs));
-    if (!repoRoot) {
+    if (!fileRepo) {
       return {
         error: `Skipped ${input}: outside the store's project root (${projectRoot}) and not inside any git repository; anchor it from within its repo or pass anchor_root`,
       };
     }
-    const relToRepo = relative(repoRoot, abs);
-    if (relToRepo.startsWith('..') || !anchorWithinBase(repoRoot, relToRepo)) {
-      return { error: `Skipped ${input}: resolves outside its git repository (${repoRoot})` };
-    }
-    return { anchor: { file: toPosix(relToRepo), sha, repo: basename(repoRoot) } };
+    return crossRepoAnchor(projectRoot, fileRepo, abs, sha, searchPaths);
   }
 
   const rootsTried: string[] = [projectRoot];
@@ -302,10 +392,7 @@ export function resolveAnchorForWrite(
         // what the read side resolves; fall back to the anchor root when it is
         // not itself a git checkout (mirrors the sibling-dir read path).
         const repoRoot = findRepoRoot(dirname(abs)) ?? base;
-        const relToRepo = relative(repoRoot, abs);
-        if (!relToRepo.startsWith('..') && anchorWithinBase(repoRoot, relToRepo)) {
-          return { anchor: { file: toPosix(relToRepo), sha, repo: basename(repoRoot) } };
-        }
+        return crossRepoAnchor(projectRoot, repoRoot, abs, sha, searchPaths);
       }
     }
   }
@@ -313,7 +400,7 @@ export function resolveAnchorForWrite(
   // 3. Repo-qualified: sibling of the project root, then each search path.
   const rq = splitRepoQualified(input);
   if (rq) {
-    rootsTried.push(resolve(projectRoot, '..', rq.repo), ...searchPaths.map((p) => resolve(expandHome(p), rq.repo)));
+    rootsTried.push(...repoCandidateBases(projectRoot, searchPaths).map((b) => resolve(b, rq.repo)));
     const repoRoot = resolveRepoRoot(projectRoot, rq.repo, searchPaths);
     if (repoRoot && anchorWithinBase(repoRoot, rq.sub)) {
       const sha = blobSha(resolve(repoRoot, rq.sub));

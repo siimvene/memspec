@@ -30,7 +30,7 @@ test('search --json returns valid JSON', async () => {
   await runCli(['remember','decision', 'Use REST', '--cwd', target, '--body', 'REST over GraphQL', '--source', 'test']);
 
   const result = await runCli(['search', 'REST', '--cwd', target, '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.ok(Array.isArray(parsed));
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].type, 'decision');
@@ -82,7 +82,7 @@ test('search ranks exact phrase matches higher than scattered term matches', asy
   await runCli(['remember','fact', 'DB backup files over NFS', '--cwd', target, '--body', 'Network file shares for backups', '--source', 'test']);
 
   const result = await runCli(['search', 'files over db', '--cwd', target, '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.ok(parsed.length === 2);
   // The item with adjacent phrase "files over DB" must rank first
   assert.equal(parsed[0].title, 'Use files over DB');
@@ -132,4 +132,28 @@ profiles:
   const result = await runCli(['search', 'JWT', '--cwd', target]);
   assert.match(result.stdout, /Adopt JWT auth/);
   assert.doesNotMatch(result.stdout, /JWT auth tokens/);
+});
+
+test('search --json emits the same payload object as the MCP tool, including coverage fields', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  await runCli(['remember', 'fact', 'Payload shape fact', '--cwd', target, '--body', 'payload shape body', '--source', 'test']);
+
+  const hit = JSON.parse((await runCli(['search', 'payload shape', '--cwd', target, '--json'])).stdout);
+  assert.deepEqual(
+    Object.keys(hit).sort(),
+    ['count', 'coverage', 'coverage_note', 'coverage_witness', 'full', 'profile', 'query', 'results'],
+  );
+  assert.equal(hit.query, 'payload shape');
+  assert.equal(hit.count, 1);
+  assert.equal(hit.coverage, 'ok');
+  assert.equal(hit.coverage_witness, 'assertion');
+  assert.equal(hit.results[0].title, 'Payload shape fact');
+
+  // Zero hits is an object with coverage none, not the bare literal `[]`.
+  const miss = JSON.parse((await runCli(['search', 'zebra flamingo', '--cwd', target, '--json'])).stdout);
+  assert.deepEqual(miss.results, []);
+  assert.equal(miss.count, 0);
+  assert.equal(miss.coverage, 'none');
+  assert.equal(miss.coverage_witness, null);
 });

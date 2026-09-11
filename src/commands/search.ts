@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { CompositeStore } from '../lib/composite-store.js';
 import { getProfile, loadConfig } from '../lib/config.js';
+import { tokenizeLikeIndex } from '../lib/fts.js';
 import { EDGE_TYPES, expandGraph, isDerived, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
@@ -163,9 +164,11 @@ export interface SearchResult {
 /**
  * DEFECT C — how well the store actually covers this query.
  * `none`  = zero active records match the query in scope.
- * `weak`  = matches exist but are low-signal: the strongest hit's BM25 is above
- *           the weak threshold, or the best hit matched only via title/tags with
- *           no query term in its body. Do not infer from rank.
+ * `weak`  = matches exist but are low-signal: fewer than half of the distinct
+ *           content-bearing query terms occur (whole-token, index-tokenised) in
+ *           the best-covered hit, or the top BM25 is above the weak threshold,
+ *           or the best-covered hit matched only via title/tags with no query
+ *           term in its body. Do not infer from rank.
  * `ok`    = a genuine match exists.
  */
 export type Coverage = 'none' | 'weak' | 'ok';
@@ -180,6 +183,14 @@ export interface SearchPayload {
   coverage_note: string;
   /** Strongest witness tier among the returned hits (anchor > operator > evidence > assertion); null when none. */
   coverage_witness: VerifiedWith | null;
+  /**
+   * Present when `coverage_witness` was reached by tiering an anchor DOWN: the
+   * strongest row is anchored but its anchor is `drifted` (code changed) or
+   * `anchor_unchecked` (repo not checked out), so it counts as `evidence`, and
+   * the text line says so ("best witness: evidence (drifted)"). Absent when the
+   * strongest witness stands on its own.
+   */
+  coverage_witness_note?: 'drifted' | 'anchor unchecked';
 }
 
 /**
@@ -442,7 +453,7 @@ function questionSearchPayload(
     results,
     coverage,
     coverage_note,
-    coverage_witness: strongestWitness(results),
+    coverage_witness: strongestWitness(results).tier,
   };
 }
 
@@ -627,7 +638,34 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   // hits), not the expansion frontier. Expansion only runs when seeds exist, so
   // zero seeds == zero results == no coverage.
   const coverageWitness = strongestWitness(results);
-  const { coverage, coverage_note } = classifyCoverage(query, items, relevanceMeta, activeScope);
+  // A type filter only NARROWS when it leaves some claim type out; the default
+  // profile's `types: [fact, decision, procedure]` is every claim type and is
+  // not worth naming in the note.
+  const narrowingTypes = types && types.length > 0 && MEMORY_TYPES.some((t) => !types.includes(t))
+    ? types
+    : undefined;
+  const classified = classifyCoverage(query, items, relevanceMeta, activeScope, narrowingTypes);
+  const coverage = classified.coverage;
+  let coverage_note = classified.coverage_note;
+
+  // A type filter (explicit `--type`, or the profile's `types:`) can be the
+  // only reason a query reads none/weak. One extra FTS pass — only in that
+  // case, and only when a narrowing filter is active — says whether records
+  // of OTHER types match, so the agent knows to retry without the filter
+  // instead of concluding "nothing here".
+  if (coverage !== 'ok' && narrowingTypes) {
+    const typeSet = new Set<string>(narrowingTypes);
+    let others = 0;
+    try {
+      others = store.search(query, { ...storeOptions, types: undefined })
+        .filter((item) => !typeSet.has(item.type ?? 'observation')).length;
+    } catch {
+      others = 0; // the unfiltered probe is advisory; never fail the search over it
+    }
+    if (others > 0) {
+      coverage_note += `; ${others} record(s) of other types match — retry without the type filter`;
+    }
+  }
 
   return {
     query,
@@ -637,7 +675,8 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     results,
     coverage,
     coverage_note,
-    coverage_witness: coverageWitness,
+    coverage_witness: coverageWitness.tier,
+    ...(coverageWitness.note !== undefined ? { coverage_witness_note: coverageWitness.note } : {}),
   };
 }
 
@@ -650,58 +689,99 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
  * existing `VERIFIED_WITH` order (anchor > probe > operator > evidence >
  * assertion); `assertion` is already the floor and stays `assertion`.
  */
-function coverageWitnessTier(r: SearchResult): VerifiedWith {
-  if (!r.derived) return r.verified_with;
-  const idx = VERIFIED_WITH.indexOf(r.verified_with);
-  return VERIFIED_WITH[Math.min(idx + 1, VERIFIED_WITH.length - 1)];
-}
-
-/** Strongest witness tier among the returned rows (null when there are none). */
-function strongestWitness(results: SearchResult[]): VerifiedWith | null {
-  let best: VerifiedWith | null = null;
-  for (const r of results) {
-    const tier = coverageWitnessTier(r);
-    if (best === null || WITNESS_STRENGTH[tier] < WITNESS_STRENGTH[best]) {
-      best = tier;
-    }
+function coverageWitnessTier(r: SearchResult): { tier: VerifiedWith; note?: SearchPayload['coverage_witness_note'] } {
+  let tier = r.verified_with;
+  let note: SearchPayload['coverage_witness_note'];
+  // An anchor only witnesses the code it was taken against. Once that code has
+  // changed (drifted) or cannot be seen here (unchecked), the row's own warning
+  // says "verify or supersede" — the summary must not outrank it by still
+  // reporting `anchor`. The recorded SHA still counts as evidence of what was
+  // once observed, so it lands on `evidence`, not the floor.
+  if (tier === 'anchor' && (r.drifted === true || r.anchor_unchecked === true)) {
+    tier = 'evidence';
+    note = r.drifted === true ? 'drifted' : 'anchor unchecked';
   }
-  return best;
-}
-
-/** Does any raw query term appear as a substring in the item's body? */
-function bodyMatchesQuery(item: MemoryItem, terms: string[]): boolean {
-  const body = item.body.toLowerCase();
-  return terms.some((t) => body.includes(t));
+  if (r.derived) {
+    const idx = VERIFIED_WITH.indexOf(tier);
+    tier = VERIFIED_WITH[Math.min(idx + 1, VERIFIED_WITH.length - 1)];
+  }
+  return { tier, note };
 }
 
 /**
- * Light suffix strip approximating the FTS5 `porter` tokenizer, enough that a
- * query term and an inflected form in the text collapse to the same root for
- * the term-coverage test (`tariffs`↔`tariff`, `retries`↔`retri`). Not a full
- * porter implementation — this is a coverage heuristic, not the FTS match.
+ * Strongest witness tier among the returned rows (null when there are none).
+ * On a tie between a row that reached the tier on its own and one that was
+ * tiered down from a drifted/unchecked anchor, the self-standing row wins and
+ * no note is attached.
  */
-function coverageStem(term: string): string {
-  return term.replace(/(?:ingly|edly|ing|edly|ed|ly|es|s)$/u, '');
-}
-
-/** Distinct query terms of length >= 3, lowercased, order-preserving. */
-function coverageTerms(query: string): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const t of query.toLowerCase().split(/\s+/)) {
-    if (t.length >= 3 && !seen.has(t)) {
-      seen.add(t);
-      out.push(t);
+function strongestWitness(results: SearchResult[]): { tier: VerifiedWith | null; note?: SearchPayload['coverage_witness_note'] } {
+  let best: { tier: VerifiedWith; note?: SearchPayload['coverage_witness_note'] } | null = null;
+  for (const r of results) {
+    const cand = coverageWitnessTier(r);
+    if (best === null || WITNESS_STRENGTH[cand.tier] < WITNESS_STRENGTH[best.tier]) {
+      best = cand;
+    } else if (WITNESS_STRENGTH[cand.tier] === WITNESS_STRENGTH[best.tier] && best.note && !cand.note) {
+      best = cand;
     }
   }
+  return best ?? { tier: null };
+}
+
+/**
+ * Function words that carry no topical signal. A natural-language query
+ * ("does the kvart gateway use mtls") must not read as covered because a hit
+ * happens to contain "does", "the" and "use". Checked against the raw
+ * lowercased word (punctuation trimmed), before stemming.
+ */
+const COVERAGE_STOPWORDS = new Set([
+  'a', 'about', 'after', 'again', 'all', 'also', 'an', 'and', 'any', 'are', 'as', 'at',
+  'be', 'because', 'been', 'before', 'being', 'between', 'both', 'but', 'by',
+  'can', 'could', 'did', 'do', 'does', 'doing', 'done', 'during',
+  'each', 'ever', 'for', 'from', 'get', 'got', 'had', 'has', 'have', 'having', 'here', 'how',
+  'if', 'in', 'into', 'is', 'it', 'its', 'just', 'like', 'made', 'make', 'me', 'more', 'most', 'my',
+  'need', 'needs', 'never', 'no', 'not', 'now', 'of', 'on', 'only', 'or', 'other', 'our', 'out', 'over',
+  'per', 'same', 'should', 'so', 'some', 'still', 'such', 'than', 'that', 'the', 'their', 'them', 'then',
+  'there', 'these', 'they', 'this', 'those', 'through', 'to', 'up', 'use', 'used', 'uses', 'using',
+  'very', 'via', 'was', 'way', 'we', 'were', 'what', 'when', 'where', 'whether', 'which', 'while', 'who',
+  'why', 'will', 'with', 'within', 'without', 'would', 'you', 'your',
+]);
+
+/** One coverage term: the index token to test for, and the raw word to print. */
+interface CoverageTerm {
+  token: string;
+  label: string;
+}
+
+/**
+ * Distinct content-bearing query terms, in query order. `rawWords` is the
+ * whitespace split of the lowercased query; `rawTokens[i]` is what the index
+ * tokenizer makes of `rawWords[i]` (punctuation and quotes gone, stemmed).
+ * Stopwords and words shorter than 3 characters are dropped on the RAW word,
+ * so `use` (stem `us`) is excluded for being a function word, not for its stem
+ * length. Distinctness is by token, so `tariff` and `tariffs` count once.
+ */
+function coverageTerms(rawWords: string[], rawTokens: string[][]): CoverageTerm[] {
+  const seen = new Set<string>();
+  const out: CoverageTerm[] = [];
+  rawWords.forEach((raw, i) => {
+    const label = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+    if (label.length < 3 || COVERAGE_STOPWORDS.has(label)) return;
+    const tokens = rawTokens[i];
+    for (const token of tokens) {
+      if (seen.has(token)) continue;
+      seen.add(token);
+      out.push({ token, label: tokens.length === 1 ? label : token });
+    }
+  });
   return out;
 }
 
-/** A query term occurs in the text if the term or its stem appears as a substring. */
-function termOccursIn(term: string, haystack: string): boolean {
-  if (haystack.includes(term)) return true;
-  const stem = coverageStem(term);
-  return stem.length >= 3 && haystack.includes(stem);
+/** Per-seed token sets, tokenised by the index tokenizer. */
+interface SeedTokens {
+  item: MemoryItem;
+  /** title + tags + body */
+  all: Set<string>;
+  body: Set<string>;
 }
 
 function classifyCoverage(
@@ -709,33 +789,70 @@ function classifyCoverage(
   seeds: MemoryItem[],
   meta: SearchRelevanceMeta,
   scope: string | undefined,
+  types: readonly string[] | undefined,
 ): { coverage: Coverage; coverage_note: string } {
   const scopeLabel = scope ?? 'any';
+  const typeLabel = types && types.length > 0 ? `${types.join('/')} ` : '';
   if (seeds.length === 0) {
     return {
       coverage: 'none',
-      coverage_note: `no active record matches this query in scope ${scopeLabel}`,
+      coverage_note: `no active ${typeLabel}record matches this query in scope ${scopeLabel}`,
     };
   }
+  // weak/ok notes name the scope only when one is active — a store without
+  // scoping keeps the pre-0.11 wording byte-for-byte.
+  const inScope = scope !== undefined ? ` in scope ${scope}` : '';
 
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const top = seeds[0];
+  // Tokenise the query words and every seed with the SAME tokenizer the index
+  // uses (unicode61 separators + porter), in one throwaway FTS5 pass, so the
+  // term test below is a whole-token comparison that agrees with what FTS5
+  // matched: `remootio,` ≡ `remootio`, `tariffs` ≡ `tariff`, and `gate` does not
+  // match inside `gateway`.
+  const rawWords = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const tokenised = tokenizeLikeIndex([
+    ...rawWords,
+    ...seeds.flatMap((s) => [`${s.title} ${s.tags.join(' ')}`, s.body]),
+  ]);
+  const rawTokens = tokenised.slice(0, rawWords.length);
+  const seedTokens: SeedTokens[] = seeds.map((item, i) => {
+    const titleTags = tokenised[rawWords.length + i * 2];
+    const body = new Set(tokenised[rawWords.length + i * 2 + 1]);
+    return { item, all: new Set([...titleTags, ...body]), body };
+  });
+
+  const distinct = coverageTerms(rawWords, rawTokens);
+  // Body-probe tokens: the content terms when there are any, else every query
+  // token (an all-stopword query still has to be judged on something).
+  const probe = distinct.length > 0 ? distinct.map((t) => t.token) : [...new Set(rawTokens.flat())];
+
+  // Coverage is judged on the BEST-COVERED seed, not on seeds[0]. In a layered
+  // store the fused rank-1 hit can be a junk OR-fallback row from the higher-
+  // priority layer while the exact match sits at #2 (RRF tie broken by layer
+  // priority); in a single store BM25 can rank a one-term title hit above a
+  // record carrying every term. The question is "does the store cover this
+  // query", so the strongest witness among the returned set answers it.
+  let best = seedTokens[0];
+  let bestMatched = -1;
+  for (const s of seedTokens) {
+    const matched = distinct.filter((t) => s.all.has(t.token)).length;
+    if (matched > bestMatched) {
+      best = s;
+      bestMatched = matched;
+    }
+  }
 
   // Term-coverage signal (primary, corpus-size-independent). BM25 ranks a record
   // highly for matching ONE distinct term, so a mostly-absent multi-term query
   // ("zebra quantum flamingo tariff") can still surface a genuine-looking hit on
-  // "tariff" alone. Count the distinct query terms (>=3 chars) that occur in the
-  // top hit's title+tags+body; if under half matched, the query is only weakly
-  // covered regardless of BM25, and the note names what matched nothing.
-  const distinct = coverageTerms(query);
+  // "tariff" alone. If under half of the distinct content terms occur in the
+  // best-covered hit, the query is only weakly covered regardless of BM25, and
+  // the note names what matched nothing.
   if (distinct.length > 1) {
-    const hay = `${top.title} ${top.tags.join(' ')} ${top.body}`.toLowerCase();
-    const unmatched = distinct.filter((t) => !termOccursIn(t, hay));
-    const matched = distinct.length - unmatched.length;
-    if (matched / distinct.length < 0.5) {
+    const unmatched = distinct.filter((t) => !best.all.has(t.token));
+    if (bestMatched / distinct.length < 0.5) {
       return {
         coverage: 'weak',
-        coverage_note: `${matched} of ${distinct.length} query terms matched (unmatched: ${unmatched.join(', ')})`,
+        coverage_note: `${bestMatched} of ${distinct.length} query terms matched${inScope} (unmatched: ${unmatched.map((t) => t.label).join(', ')})`,
       };
     }
   }
@@ -745,18 +862,19 @@ function classifyCoverage(
   // match. Scores above BM25_NEGLIGIBLE are the degenerate near-zero (see the
   // constant) and carry no signal — the body-match test decides those.
   const bm25Weak = meta.topBm25 !== null && meta.topBm25 < BM25_NEGLIGIBLE && meta.topBm25 > WEAK_BM25_THRESHOLD;
-  // Corpus-size-independent signal: the best hit matched only via its title or
-  // tags, with no query term in its body. This is the "indirect match" case.
-  const bodyOnlyTagTitle = !bodyMatchesQuery(top, terms);
+  // Corpus-size-independent signal: the best-covered hit matched only via its
+  // title or tags, with no query token in its body. This is the "indirect
+  // match" case.
+  const bodyOnlyTagTitle = !probe.some((token) => best.body.has(token));
 
   if (bm25Weak || bodyOnlyTagTitle) {
     return {
       coverage: 'weak',
-      coverage_note: 'only low-relevance matches; do not infer from rank',
+      coverage_note: `only low-relevance matches${inScope}; do not infer from rank`,
     };
   }
 
-  return { coverage: 'ok', coverage_note: 'at least one genuine match' };
+  return { coverage: 'ok', coverage_note: `at least one genuine match${inScope}` };
 }
 
 /**
@@ -770,7 +888,8 @@ function classifyCoverage(
  * an unverified assertion" is visible without reading every row.
  */
 export function formatCoverageLine(payload: SearchPayload): string {
-  const witness = payload.coverage_witness ? ` (best witness: ${payload.coverage_witness})` : '';
+  const witnessNote = payload.coverage_witness_note ? ` (${payload.coverage_witness_note})` : '';
+  const witness = payload.coverage_witness ? ` (best witness: ${payload.coverage_witness}${witnessNote})` : '';
   if (payload.coverage === 'none') {
     return `Coverage: none — ${payload.coverage_note}`;
   }
@@ -780,37 +899,14 @@ export function formatCoverageLine(payload: SearchPayload): string {
 export function runSearch(query: string, options: SearchOptions): string {
   const payload = searchPayload(query, options);
 
+  // `--json` is the SAME payload object the MCP tool returns (`{query, profile,
+  // count, full, results, coverage, coverage_note, coverage_witness}`), so a
+  // script gets the coverage verdict too. 0.11 breaking change: before this it
+  // was a bare results array (and the literal `[]` on zero hits), which made
+  // "no results" indistinguishable from "weak" and hid the coverage fields the
+  // README promised.
   if (options.json) {
-    if (payload.results.length === 0) return '[]';
-    return JSON.stringify(payload.results.map((r) => ({
-      id: r.id,
-      type: r.type,
-      title: r.title,
-      state: r.state,
-      verified_with: r.verified_with,
-      created: r.created,
-      last_verified: r.last_verified,
-      tags: r.tags,
-      source: r.source,
-      stale: r.stale,
-      ...(r.drifted !== undefined ? { drifted: r.drifted } : {}),
-      ...(r.anchor_unchecked !== undefined ? { anchor_unchecked: r.anchor_unchecked } : {}),
-      ...(r.drift !== undefined ? { drift: r.drift } : {}),
-      ...(r.last_referenced !== undefined ? { last_referenced: r.last_referenced } : {}),
-      ...(r.sessions !== undefined ? { sessions: r.sessions } : {}),
-      ...(r.layer !== undefined ? { layer: r.layer } : {}),
-      ...(r.requires_human !== undefined ? { requires_human: r.requires_human } : {}),
-      ...(r.derived !== undefined ? { derived: r.derived } : {}),
-      conflicts_with: r.conflicts_with,
-      refines: r.refines,
-      supports: r.supports,
-      depends_on: r.depends_on,
-      ...(r.closed !== undefined ? { closed: r.closed } : {}),
-      ...(r.answers !== undefined ? { answers: r.answers } : {}),
-      ...(r.resolved_by !== undefined ? { resolved_by: r.resolved_by } : {}),
-      ...(r.body !== undefined ? { body: r.body } : {}),
-      ...(r.expanded_via !== undefined ? { expanded_via: r.expanded_via } : {}),
-    })), null, 2);
+    return JSON.stringify(payload, null, 2);
   }
 
   if (payload.results.length === 0) {

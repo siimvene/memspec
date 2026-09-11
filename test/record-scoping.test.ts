@@ -319,10 +319,10 @@ test('CLI --scope threads through remember and search', async () => {
   ]);
 
   const hit = await runCli(['search', 'invoices', '--cwd', project, '--scope', 'plg', '--json']);
-  assert.equal(JSON.parse(hit.stdout).length, 1);
+  assert.equal(JSON.parse(hit.stdout).results.length, 1);
 
   const miss = await runCli(['search', 'invoices', '--cwd', project, '--scope', 'kleidia', '--json']);
-  assert.equal(miss.stdout.trim(), '[]');
+  assert.deepEqual(JSON.parse(miss.stdout).results, []);
 });
 
 // --- stale on-disk index -----------------------------------------------------

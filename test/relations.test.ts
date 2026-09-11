@@ -221,7 +221,7 @@ test('search results expose conflicts_with, refines, supports, depends_on arrays
   ]);
 
   const out = await runCli(['search', 'alpha', '--cwd', target, '--json']);
-  const parsed = JSON.parse(out.stdout) as Array<Record<string, unknown>>;
+  const parsed = JSON.parse(out.stdout).results as Array<Record<string, unknown>>;
   assert.ok(parsed.length >= 1);
 
   for (const hit of parsed) {

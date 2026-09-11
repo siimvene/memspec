@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { MemspecStore, type StoreSearchOptions, type LoadWarning, type SearchRelevanceMeta } from './store.js';
 import { loadConfig, type StoreLayerConfig } from './config.js';
-import { findPointer } from './registry.js';
+import { findPointer, POINTER_FILENAME } from './registry.js';
 import { getCodeAnchors, projectRootForStore } from './anchors.js';
 import { computeDrift, type DriftInfo } from './drift.js';
 import type { MemoryItem, MemoryFrontmatter } from './types.js';
@@ -31,15 +31,43 @@ export interface StoreLayer {
   writable: boolean;
 }
 
+/** Result of `CompositeStore.resolveWritable`: the layer a write must target. */
+export interface WritableResolution {
+  layer: StoreLayer;
+  composite: CompositeStore;
+  /** Where the layer list came from: a `.memspec.yaml` pointer, a store's `stores:` block, or no layering at all. */
+  via: 'pointer' | 'config' | 'single';
+}
+
 export class CompositeStore {
   readonly layers: StoreLayer[];
   readonly primary: MemspecStore;
+  /**
+   * DEFECT #20 — names of configured layers whose store directory does not
+   * exist on this machine (not cloned, typo, moved). Every read skips them
+   * silently; this list lets `search`/`status` say so instead of reporting
+   * `coverage: none` as if the store were empty. Empty for the unlayered
+   * fallback (a not-yet-created project store is a normal state, not a
+   * missing layer).
+   */
+  readonly layersUnavailable: string[];
+  /** File that declared the layers (config.yaml or .memspec.yaml), for messages. */
+  readonly declaredIn: string | undefined;
 
-  constructor(layers: StoreLayerConfig[], projectRoot?: string) {
+  /**
+   * @param layers       Layer declarations (from a `stores:` block or pointer).
+   * @param projectRoot  Directory RELATIVE layer paths resolve against — the
+   *   directory holding the config/pointer that declared them, never the
+   *   caller's cwd (#1). Also the cwd for the unlayered fallback.
+   * @param declaredIn   The declaring file, named in warnings and errors.
+   */
+  constructor(layers: StoreLayerConfig[], projectRoot?: string, declaredIn?: string) {
+    this.declaredIn = declaredIn;
     if (layers.length === 0) {
       // Fallback: just the project store
       this.primary = new MemspecStore(projectRoot);
       this.layers = [{ name: 'project', store: this.primary, priority: 10, writable: true }];
+      this.layersUnavailable = [];
       return;
     }
 
@@ -68,6 +96,19 @@ export class CompositeStore {
     // Primary = highest priority writable store
     const writable = this.layers.find((l) => l.writable);
     this.primary = writable?.store ?? this.layers[0].store;
+    this.layersUnavailable = this.layers.filter((l) => !l.store.exists).map((l) => l.name);
+  }
+
+  /**
+   * #20 — the unavailable layers with their resolved paths, for notes and
+   * JSON. Derived from `layersUnavailable` (fixed at construction), so the
+   * unlayered fallback — whose single project store may simply not exist yet —
+   * never reports itself as a missing layer.
+   */
+  unavailableLayers(): Array<{ name: string; path: string; writable: boolean }> {
+    return this.layers
+      .filter((l) => this.layersUnavailable.includes(l.name))
+      .map((l) => ({ name: l.name, path: l.store.root, writable: l.writable }));
   }
 
   /**
@@ -106,19 +147,102 @@ export class CompositeStore {
    * ignored.
    */
   static forCwd(cwd?: string): CompositeStore {
-    // A `.memspec.yaml` pointer file (repo without its own store) declares
-    // the layers explicitly; a `.memspec/` directory closer to cwd wins.
+    return CompositeStore.resolveLayered(cwd).composite;
+  }
+
+  /**
+   * The one place that turns a cwd into a layer set — shared by the read path
+   * (`forCwd`) and the write path (`resolveWritable`), so both agree on which
+   * stores are in scope. Order:
+   *
+   *   1. A `.memspec.yaml` pointer file (repo without its own store) declares
+   *      the layers explicitly; a `.memspec/` directory closer to cwd wins.
+   *   2. The walked-up store's own config.yaml `stores:` block. Relative layer
+   *      paths resolve against THAT store's parent directory — the directory
+   *      holding the config that declared them — never against the caller's
+   *      cwd (#1: from `repo/service/api`, `path: .memspec` used to resolve to
+   *      `repo/service/api/.memspec`, a phantom, so retrieval saw nothing).
+   *   3. No layering: a single-layer composite over the walked-up store,
+   *      byte-identical to a bare `MemspecStore(cwd)`.
+   */
+  private static resolveLayered(cwd?: string): { composite: CompositeStore; via: WritableResolution['via'] } {
     const pointer = findPointer(cwd);
     if (pointer) {
-      return new CompositeStore(pointer.stores, pointer.dir);
+      return {
+        composite: new CompositeStore(pointer.stores, pointer.dir, join(pointer.dir, POINTER_FILENAME)),
+        via: 'pointer',
+      };
     }
     const probe = new MemspecStore(cwd);
     const config = loadConfig(probe.root);
     if (config.stores && config.stores.length > 0) {
-      return new CompositeStore(config.stores, cwd);
+      return {
+        composite: new CompositeStore(config.stores, dirname(probe.root), probe.configPath),
+        via: 'config',
+      };
     }
     // No explicit layering — preserve v0.6 single-store behaviour exactly.
-    return new CompositeStore([], cwd);
+    return { composite: new CompositeStore([], cwd), via: 'single' };
+  }
+
+  /**
+   * #45 — the layer a WRITE from `cwd` must land in, resolved through the same
+   * layer set the read path uses. Before this, `remember`/`observe`/`question`
+   * honoured a `.memspec.yaml` pointer but ignored a walked-up store's own
+   * `stores:` block and wrote into the probe store, which is not a layer of
+   * the read view for that cwd — the record was unsearchable from where it
+   * was written.
+   *
+   *   - `storeName` given: that layer, or throw listing the layers; throw if it
+   *     is `writable: false`.
+   *   - otherwise exactly one writable layer: that one.
+   *   - zero writable layers: throw (every layer is read-only here).
+   *   - several writable layers: throw — ambiguous; the caller must pass
+   *     `--store <name>`. A silently-guessed store is how team knowledge leaks
+   *     into the personal store and vice versa.
+   *
+   * Never creates anything; callers `init()` the returned layer's store
+   * themselves if they want the skeleton (`question` deliberately does not).
+   */
+  static resolveWritable(cwd?: string, storeName?: string): WritableResolution {
+    const { composite, via } = CompositeStore.resolveLayered(cwd);
+    const where = composite.declaredIn ?? `${composite.root} (no stores: block)`;
+    const describe = (l: StoreLayer) => `${l.name}${l.writable ? '' : ' (read-only)'}`;
+
+    let target: StoreLayer | undefined;
+    if (storeName) {
+      target = composite.layers.find((l) => l.name === storeName);
+      if (!target) {
+        throw new Error(
+          `no layer named '${storeName}' in ${where} (have: ${composite.layers.map(describe).join(', ')})`,
+        );
+      }
+      if (!target.writable) {
+        throw new Error(
+          `layer '${target.name}' is not writable (writable: false, ${target.store.root}); ` +
+            'read-only layers refuse remember/observe/question writes',
+        );
+      }
+      return { layer: target, composite, via };
+    }
+
+    const writable = composite.layers.filter((l) => l.writable);
+    if (writable.length === 1) return { layer: writable[0], composite, via };
+    if (writable.length === 0) {
+      throw new Error(
+        `no writable store layer in scope: ${where} declares only read-only layers ` +
+          `(${composite.layers.map(describe).join(', ')})`,
+      );
+    }
+    throw new Error(
+      `ambiguous write target: ${writable.length} writable layers in scope (${writable.map((s) => s.name).join(', ')}) — ` +
+        'pass --store <name> to say where this memory belongs',
+    );
+  }
+
+  /** #45 — convenience over `resolveWritable`: the store a write from `cwd` targets. */
+  static writableFor(cwd?: string, storeName?: string): MemspecStore {
+    return CompositeStore.resolveWritable(cwd, storeName).layer.store;
   }
 
   get exists(): boolean {
@@ -129,8 +253,20 @@ export class CompositeStore {
     return this.primary.root;
   }
 
+  /**
+   * Per-file load warnings from every layer, preceded by one warning per
+   * configured layer whose store directory is absent (#20) so callers that
+   * already print `warnings` surface the missing layer without new wiring.
+   */
   get warnings(): LoadWarning[] {
-    return this.layers.flatMap((l) => l.store.warnings);
+    const missing: LoadWarning[] = this.unavailableLayers().map((l) => ({
+      file: l.path,
+      reason:
+        `store layer '${l.name}'${l.writable ? '' : ' (read-only)'} is not available at ${l.path}` +
+        (this.declaredIn ? ` (declared in ${this.declaredIn})` : '') +
+        '; its records are missing from this view',
+    }));
+    return [...missing, ...this.layers.flatMap((l) => l.store.warnings)];
   }
 
   /**

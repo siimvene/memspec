@@ -1,4 +1,5 @@
-import { MemspecStore } from '../lib/store.js';
+import type { MemspecStore } from '../lib/store.js';
+import { CompositeStore } from '../lib/composite-store.js';
 import { loadConfig } from '../lib/config.js';
 import { assertKnownScope } from '../lib/scope.js';
 import {
@@ -51,10 +52,24 @@ function parseTags(raw?: string): string[] {
  * in which case it is an existing question id.
  */
 export function runQuestion(titleOrId: string, options: QuestionOptions): QuestionResult {
-  const store = new MemspecStore(options.cwd);
-  store.init();
-
   const isMutate = Boolean(options.add?.length || options.close || options.open || options.resolve);
+
+  // #2 — resolve the store exactly like `remember` does: a `.memspec.yaml`
+  // pointer's writable layer, else the walked-up store's `stores:` block, else
+  // the walked-up store itself. NEVER `init()` here: the old unconditional
+  // `new MemspecStore(cwd).init()` created a phantom `<repo>/.memspec/` in a
+  // pointer-file repo (even when the call then failed), and a `.memspec/`
+  // closer to cwd beats the pointer, so every later read and write silently
+  // landed in the phantom instead of the declared layers.
+  const resolved = CompositeStore.resolveWritable(options.cwd);
+  let store: MemspecStore = resolved.layer.store;
+  if (isMutate) {
+    // An existing question is edited where it lives; a read-only layer refuses
+    // (named in the error). Unknown id: fall through to the writable layer so
+    // `loadQuestion` raises its own not-found error.
+    const owner = resolved.composite.assertWritableLayerForId(titleOrId);
+    if (owner) store = owner.store;
+  }
 
   if (!isMutate) {
     const source = options.source?.trim();

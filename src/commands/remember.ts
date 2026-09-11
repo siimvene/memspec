@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { ulid } from 'ulid';
 import { projectRootForStore, resolveAnchorForWrite, type AnchorResolveOptions } from '../lib/anchors.js';
 import { getDecayDays, loadConfig } from '../lib/config.js';
@@ -8,12 +8,11 @@ import {
   rankByLexicalCloseness,
 } from '../lib/inference.js';
 import { effectiveSourceKind, inferSourceKind } from '../lib/source.js';
-import { findPointer, POINTER_FILENAME, resolveLayerPath } from '../lib/registry.js';
 import { assertKnownScope, assertScopeRequired, resolveScopeForCwd } from '../lib/scope.js';
-import { MemspecStore } from '../lib/store.js';
-import { attachEvidence, isFileBackedEvidence } from '../lib/evidence.js';
-import { addAnswers } from '../lib/questions.js';
-import { MEMORY_TYPES, type CodeAnchor, type EvidenceEntry, type MemoryType, type VerifiedWith } from '../lib/types.js';
+import { CompositeStore } from '../lib/composite-store.js';
+import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
+import { addAnswers, loadQuestion } from '../lib/questions.js';
+import { MEMORY_TYPES, type CodeAnchor, type EvidenceEntry, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 
 export interface RememberOptions {
   cwd?: string;
@@ -112,6 +111,8 @@ export interface RememberResult {
   requiresHuman?: string[];
   /** v0.11 — the question id this record was added to as an answer, when requested. */
   answeredQuestion?: string;
+  /** v0.11 — true when adding this record reopened a previously resolved question. */
+  reopenedQuestion?: boolean;
 }
 
 /**
@@ -186,6 +187,7 @@ function resolveAnchors(
       continue;
     }
     const { anchor } = result;
+    if (result.warning) warnings.push(result.warning);
     if (!anchors.some((a) => a.file === anchor.file && a.repo === anchor.repo)) {
       anchors.push(anchor);
     }
@@ -224,29 +226,39 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   // target follows it. `options.cwd` is deliberately left alone — see the
   // scope derivation below.
   const storeSelectionCwd = options.storeRoot ?? options.cwd;
-  const pointer = findPointer(storeSelectionCwd);
-  let storeCwd = storeSelectionCwd;
-  if (pointer) {
-    const writable = pointer.stores.filter((s) => s.writable);
-    let target = writable.length === 1 ? writable[0] : undefined;
-    if (options.store) {
-      target = pointer.stores.find((s) => s.name === options.store);
-      if (!target) {
-        throw new Error(
-          `no layer named '${options.store}' in ${pointer.dir}/${POINTER_FILENAME} (have: ${pointer.stores.map((s) => s.name).join(', ')})`
-        );
-      }
-      if (!target.writable) throw new Error(`layer '${target.name}' is not writable`);
-    }
-    if (!target) {
-      throw new Error(
-        `ambiguous write target: ${writable.length} writable layers in scope (${writable.map((s) => s.name).join(', ')}) — pass --store <name> to say where this memory belongs`
-      );
-    }
-    storeCwd = resolveLayerPath(target.path, pointer.dir);
+  // `CompositeStore.resolveWritable` applies one rule to a `.memspec.yaml`
+  // pointer, a walked-up store's own `stores:` block, and the unlayered case:
+  // `--store <name>` must name a declared layer (unknown → error listing the
+  // layers; `writable: false` → refused by name), and with no name exactly one
+  // writable layer must be in scope. Previously only the pointer branch looked
+  // at `--store`, so `--store team` on a layered personal store wrote to the
+  // personal store and exited 0 (#11).
+  // `--store global` is the legacy "write to ~/.memspec" spelling: the CLI/MCP
+  // already pointed storeRoot at the home directory, so when that store
+  // declares no layer literally named `global`, the name is dropped and the
+  // home store's own writable layer receives the write.
+  const layered = CompositeStore.forCwd(storeSelectionCwd);
+  let storeName = options.store;
+  if (storeName === 'global' && options.storeRoot !== undefined && !layered.getLayer('global')) {
+    storeName = undefined;
   }
-
-  const store = new MemspecStore(storeCwd);
+  // No name, several writable layers, and the layer set came from the
+  // walked-up store's OWN config.yaml `stores:` block (the documented default
+  // declares `project` + `global`, both writable): default to the layer that
+  // IS the declaring store. That is where every pre-0.11 write landed (the
+  // write path ignored `stores:` entirely), and it is a layer of the read view
+  // for this cwd, so the record stays searchable from where it was written.
+  // A pointer-file repo keeps the strict rule: name the layer or be refused.
+  if (!storeName && layered.declaredIn && basename(layered.declaredIn) === 'config.yaml') {
+    const writableLayers = layered.layers.filter((l) => l.writable);
+    if (writableLayers.length > 1) {
+      const declaringRoot = resolve(dirname(layered.declaredIn));
+      const own = writableLayers.find((l) => resolve(l.store.root) === declaringRoot);
+      if (own) storeName = own.name;
+    }
+  }
+  const resolvedWrite = CompositeStore.resolveWritable(storeSelectionCwd, storeName);
+  const store = resolvedWrite.layer.store;
   store.init();
 
   const config = loadConfig(store.root);
@@ -379,14 +391,51 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       })
     : { anchors: [] as CodeAnchor[], warnings: [] as string[] };
 
-  // S3 — evidence attachments. Local files are copied under <store>/evidence/;
-  // http(s) URLs are recorded as pointers, never fetched. Done before witness
-  // resolution so a file-backed entry can promote an anchorless assertion.
-  const evidenceEntries: EvidenceEntry[] = [];
-  for (const item of options.evidence ?? []) {
-    evidenceEntries.push(attachEvidence(store.root, item));
+  // S3 — evidence attachments. VALIDATED here (missing, symlink, over 5 MB,
+  // under local/), COPIED only after every other input has passed, right
+  // before writeItem — a copy followed by a later refusal (bad valid_from,
+  // unknown edge target, missing second evidence path) would orphan a file in
+  // the committed evidence/ directory. The validated kind is enough to decide
+  // the witness class now.
+  const evidenceInputs = options.evidence ?? [];
+  const evidenceSources = evidenceInputs.map((item) => validateEvidenceSource(store.root, item));
+  const hasFileEvidence = evidenceSources.some((s) => s.kind === 'file');
+
+  // Edge targets are looked up in the write target first, then in the read
+  // views of the store-selection cwd and the working cwd: a global record may
+  // legitimately relate to a project record that only the project's layered
+  // view can see.
+  const lookups: Array<{ findById(id: string): MemoryItem | null }> = [store, CompositeStore.forCwd(storeSelectionCwd)];
+  if (options.cwd && resolve(options.cwd) !== resolve(storeSelectionCwd ?? process.cwd())) {
+    lookups.push(CompositeStore.forCwd(options.cwd));
   }
-  const hasFileEvidence = evidenceEntries.some(isFileBackedEvidence);
+  const targetExists = (targetId: string): boolean => lookups.some((l) => l.findById(targetId) !== null);
+
+  // Positive edges (refines / supports / depends_on / derived_from) point at
+  // records that must exist — a `derived_from: [ms_TYPO]` would mark the record
+  // derived, tier its witness down, and dangle in every chain and export.
+  // Same rule `relate` and `--conflicts-with` already apply.
+  const positiveEdgeInputs: Array<[string, string[] | undefined]> = [
+    ['--refines', options.refines],
+    ['--supports', options.supports],
+    ['--depends-on', options.dependsOn],
+    ['--derived-from', options.derivedFrom],
+  ];
+  for (const [flag, ids] of positiveEdgeInputs) {
+    for (const targetId of ids ?? []) {
+      if (targetId && !targetExists(targetId)) {
+        throw new Error(`${flag} target not found: ${targetId}`);
+      }
+    }
+  }
+
+  // v0.11 — the question this record answers must exist and be a question
+  // BEFORE the record is written: a bad id used to leave the freshly-written
+  // claim on disk while the command reported failure, and the natural retry
+  // then hit the near-duplicate refusal.
+  const answeredQuestionBefore = options.answersQuestion
+    ? loadQuestion(store, options.answersQuestion)
+    : undefined;
 
   // Witness (descending strength anchor > operator > evidence > assertion):
   // anchors resolved → anchor; operator source → operator; file-backed evidence
@@ -459,9 +508,6 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const requiresHuman = dedupe(options.requiresHuman);
   if (requiresHuman) itemData.requires_human = requiresHuman;
 
-  // v0.11 — evidence attachments (files already copied above).
-  if (evidenceEntries.length > 0) itemData.evidence = evidenceEntries;
-
   // v0.5 Phase 2 — temporal validity. Validate early so callers see a
   // friendly error instead of a Zod schema dump from the writer.
   const assertIsoOrUndefined = (label: string, value: string | undefined): string | undefined => {
@@ -498,7 +544,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
           `--conflicts-with ${targetId} contradicts a positive edge (refines/supports/depends_on) to the same target; declare one relationship, not both.`,
         );
       }
-      if (!store.findById(targetId)) {
+      if (!targetExists(targetId)) {
         throw new Error(`--conflicts-with target not found: ${targetId}`);
       }
     }
@@ -508,13 +554,22 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     itemData.ext = { ...(itemData.ext ?? {}), edge_sources: edgeSources };
   }
 
+  // v0.11 — evidence attachments: every input above has passed, so copying is
+  // now the last step before the write (see the validation note above).
+  const evidenceEntries: EvidenceEntry[] = evidenceInputs.map((item) => attachEvidence(store.root, item));
+  if (evidenceEntries.length > 0) itemData.evidence = evidenceEntries;
+
   const filePath = store.writeItem(itemData);
 
-  // v0.11 — register the fresh record as an answer to a question in one call.
+  // v0.11 — register the fresh record as an answer to a question in one call
+  // (the question was validated before the write). Adding a live candidate to
+  // a RESOLVED question reopens it; say so.
   let answeredQuestion: string | undefined;
-  if (options.answersQuestion) {
-    addAnswers(store, options.answersQuestion, [id]);
+  let reopenedQuestion = false;
+  if (options.answersQuestion && answeredQuestionBefore) {
+    const updated = addAnswers(store, options.answersQuestion, [id]);
     answeredQuestion = options.answersQuestion;
+    reopenedQuestion = answeredQuestionBefore.state === 'resolved' && updated.state !== 'resolved';
   }
 
   const lines = [`Created ${type} memory ${id} at ${filePath}`];
@@ -534,7 +589,11 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     }
   }
   if (answeredQuestion) {
-    lines.push(`Answered question: ${answeredQuestion}`);
+    lines.push(
+      reopenedQuestion
+        ? `Answered question: ${answeredQuestion} (was resolved — REOPENED: state open, resolved_by cleared; resolve it again once one answer survives)`
+        : `Answered question: ${answeredQuestion}`,
+    );
   }
   if (anchorResolution.anchors.length > 0) {
     lines.push(`Anchored to ${anchorResolution.anchors.length} file(s):`);
@@ -571,5 +630,6 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     derived: derivedFrom ? true : undefined,
     requiresHuman: requiresHuman ?? undefined,
     answeredQuestion,
+    reopenedQuestion: reopenedQuestion || undefined,
   };
 }

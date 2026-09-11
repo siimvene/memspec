@@ -1,7 +1,7 @@
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import { checkAnchors, getCodeAnchors, projectRootForStore, type AnchorStatus } from '../lib/anchors.js';
 import { getProbe } from '../lib/probe.js';
-import { attachEvidence } from '../lib/evidence.js';
+import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { effectiveSourceKind } from '../lib/source.js';
@@ -57,16 +57,17 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
 
   // v0.11 — an attached evidence file/URL is committed proof of the check, so it
   // satisfies the anchorless-witness requirement the same way --evidence text
-  // does. Copy it now (before the refusal) so a file-backed entry counts.
-  const attachedEvidence: EvidenceEntry | undefined = options.evidenceFile
-    ? attachEvidence(store.root, options.evidenceFile)
-    : undefined;
+  // does. Validate it now (missing file, symlink, over 5 MB, under local/) so a
+  // bad path fails fast — but COPY it only on the clean path below: a
+  // needs_review result leaves the record untouched and must not leave an
+  // orphan file in the committed evidence/ directory either.
+  if (options.evidenceFile) validateEvidenceSource(store.root, options.evidenceFile);
 
   // An anchorless verify has no mechanical witness — without evidence text it
   // is the system trusting its own output. Refuse it. A stored probe does NOT
   // substitute: verify never executes probes (see below), so an unexercised
   // probe witnesses nothing.
-  if (anchors.length === 0 && !options.evidence?.trim() && !attachedEvidence) {
+  if (anchors.length === 0 && !options.evidence?.trim() && !options.evidenceFile) {
     throw new Error(
       `${id} has no code anchors — anchorless verification requires --evidence "what you checked". ` +
       (probe
@@ -152,7 +153,12 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   else if (options.source && effectiveSourceKind({ source: options.source }) === 'operator') verifiedWith = 'operator';
   else verifiedWith = 'evidence';
 
-  // v0.11 — append any attached evidence to the record's committed evidence list.
+  // v0.11 — copy/record the attached evidence now that the drift and
+  // unavailable branches are ruled out, and append it to the record's
+  // committed evidence list. Only a verify that mutates the record copies.
+  const attachedEvidence: EvidenceEntry | undefined = options.evidenceFile
+    ? attachEvidence(store.root, options.evidenceFile)
+    : undefined;
   const evidence = attachedEvidence
     ? [...(item.evidence ?? []), attachedEvidence]
     : item.evidence;

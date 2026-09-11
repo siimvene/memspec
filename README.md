@@ -18,7 +18,7 @@ Agents `remember` claims and `observe` notes; everything lands as markdown under
 - **Three claim types + observations.** `fact`, `decision`, `procedure` with per-type TTLs; `observation` for point-in-time notes with hard expiry.
 - **Lifecycle, not curation.** `active | superseded | retired`. Corrections create a new memory linked back to the original; supersede chains preserve the reason on every record involved. Past TTL = stale flag at read time, never deletion.
 - **Code-anchored verification.** Tie memories to git blob SHAs. When code drifts, memspec flags drifted anchors for review instead of letting facts about code rot silently.
-- **Linked notes** (v0.5+). Records reference other records by id (`refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`). Search can follow these links one or more hops to surface neighbours alongside direct matches; `--include-superseded` lets link-following reach archived predecessors (v0.6+).
+- **Linked notes** (v0.5+). Records reference other records by id (`refines`, `supports`, `depends_on`, `derived_from`, `conflicts_with`, `supersedes`, `superseded_by`). Search can follow these links one or more hops to surface neighbours alongside direct matches; `--include-superseded` lets link-following reach archived predecessors (v0.6+).
 - **Temporal validity** (v0.5+). Optional `valid_from` / `valid_to` per memory. Search with `--as-of <iso>` filters by world-state truth window, orthogonal to the `check_by` review schedule.
 - **Operator-tier storage** (v0.4+). Records sourced by the operator land in a separate filesystem path with stricter overwrite protection (`--override-operator` required to supersede).
 - **Layered stores** (v0.6+). A project `.memspec/` and a global `~/.memspec/` merge at retrieval time — project records take priority, global merges as a lower layer. Every search, context, and MCP path honours the configured `stores:` layers. A repo without its own store can bind to external stores via a `.memspec.yaml` pointer file (v0.9+).
@@ -26,7 +26,7 @@ Agents `remember` claims and `observe` notes; everything lands as markdown under
 - **Transcript ingestion** (v0.9+). `normalize` → `distill` → `reduce` turns raw harness session logs (Claude Code, Codex) into weekly experience digests; the dream pass diffs them against memory writes to catch work that happened but was never recorded. Raw transcripts never leave the machine.
 - **Dedup-aware writes.** `remember` refuses near-duplicate claims and points at the existing record, so memory accretes corrections via `supersede` instead of silent duplicates.
 - **FTS5/BM25 search.** SQLite FTS5 relevance, recency-weighted, ranked per profile.
-- **MCP server.** Eleven tools, first-class integration with Claude Code, Cursor, Codex.
+- **MCP server.** Fourteen tools, first-class integration with Claude Code, Cursor, Codex.
 - **Witnessed claims.** Every memory carries `verified_with` (`anchor | operator | evidence | assertion`) — provenance, not a confidence score.
 - **Dream pass** (v0.7+). Periodic reflection script (`memspec-dream`) reads the last N days of memspec writes and git log, asks an LLM to surface stale memories, supersede candidates, verify candidates, missing relations, and behavioural rules worth promoting. Output is review material, never auto-applied.
 - **Zero infrastructure.** `npm install -g memspec` + `memspec init`. No accounts, no API keys, no hosted services.
@@ -121,7 +121,7 @@ memspec remember procedure "Rotate the signing key" --source human:siim \
 
 ## Evidence attachments (`--evidence`, v0.11)
 
-Attach committed proof to a claim. A local file is copied, content-addressed, into `<store>/evidence/<sha256>/…` (refused over 5 MB, or from the machine-local `local/` subtree); an `http(s)` URL is recorded as a pointer and never fetched. A file-backed attachment witnesses an anchorless claim as `evidence` — stronger than a bare assertion. `verify --evidence-file <path>` attaches the same way.
+Attach committed proof to a claim. A local file is copied, content-addressed, into `<store>/evidence/<sha256>/…` (refused over 5 MB, from the machine-local `local/` subtree — checked on real paths, so a symlinked parent directory doesn't slip past — or when the path itself is a symlink: pass the real file); an `http(s)` URL is recorded as a pointer and never fetched. A file-backed attachment witnesses an anchorless claim as `evidence` — stronger than a bare assertion. `verify --evidence-file <path>` attaches the same way, but only on a clean verification: a `needs_review` result copies nothing. `remember` validates every input (all evidence paths, dates, edge targets, the answered question) before the first copy, so a refused write never leaves an orphan under `evidence/`. The entry's `source` field is provenance, never an absolute path: `~/…` for a file under your home directory, `<repo>:<path>` inside a git checkout, otherwise omitted (the basename is in `name`).
 
 ```bash
 memspec remember fact "p99 latency is 40ms under 2k rps" --source claude-code \
@@ -154,7 +154,9 @@ Calendar TTL is the wrong signal for facts about code. Memspec ties claims to fi
 - `memspec verify <id>` — refresh "still true"; drifted anchors flag for review without mutating the memory
 - `memspec reconcile` — scan all anchored memories for drift, including uncommitted edits
 
-Anchor paths may be **absolute** (preferred), project-relative, or repo-qualified (`repo/path`). Prefer absolute paths when the store's project root is not the repo you're working in — a home-rooted personal store's project root is `$HOME`, so a bare `src/x.ts` resolves nowhere and the claim silently degrades to an unanchored assertion. For a repo-relative path to a sibling checkout, pass `--anchor-root <dir>` (`anchor_root` over MCP); it is recorded as a cross-repo anchor and resolved as a sibling directory (or via `anchors.repo_search_paths`) on read. A path that resolves nowhere is reported back, never silently dropped.
+Anchor paths may be **absolute** (preferred), project-relative, or repo-qualified (`repo/path`). Prefer absolute paths when the store's project root is not the repo you're working in — a home-rooted personal store's project root is `$HOME`, so a bare `src/x.ts` resolves nowhere and the claim silently degrades to an unanchored assertion. For a repo-relative path to a sibling checkout, pass `--anchor-root <dir>` (`anchor_root` over MCP). A path that resolves nowhere is reported back, never silently dropped.
+
+**Which form gets recorded.** A file that belongs to the same git repo as the store's project root (or to no repo) is recorded project-relative and repo-less. A file inside a *different* git repo is always recorded as `{repo: <basename>, file: <repo-relative>}` — even when it also lies under the project root. That is the personal-store case: `$HOME/git/kvart/src/x.ts` becomes `{repo: kvart, file: src/x.ts}`, which resolves on every machine the store syncs to, where a `git/kvart/src/x.ts` form would read as drifted the moment the repo lived somewhere else. On read, `repo` is looked up as a sibling of the project root, then under each `anchors.repo_search_paths` entry in `config.yaml` — **defaulting to `~/git` when none is configured** (set the list explicitly, e.g. `[~, ~/git]`, on a machine whose checkouts live elsewhere). `repo` must be a bare directory name: a record carrying an absolute or traversal `repo` reads as `repo_unavailable` / `anchor_unchecked`, never as a probe of that directory. When a write records a `{repo, file}` anchor that this store could not resolve on read, the result says so and names the directory to add to `repo_search_paths`.
 
 Drifted memories never auto-archive. They surface for human judgement via `memspec status`.
 
@@ -164,13 +166,13 @@ SQLite FTS5 full-text + BM25, recency-weighted per profile. Zero setup beyond `b
 
 Index rebuilds on demand from the markdown files. Lose the index, lose speed — not data.
 
-Every result set carries a **coverage** verdict so an agent can tell "the store knows nothing here" from a low-ranked hit: `none` (no active record matches), `weak` (fewer than half of the distinct query terms occur in the top hit, or a title/tag-only match, or barely above the BM25 floor — don't infer from rank; the note names which terms matched nothing), or `ok`. A `coverage_witness` names the strongest witness behind the hits (`anchor > operator > evidence > assertion`), so coverage `ok` with witness `assertion` reads as "claimed, but unverified". A **derived** hit (any `derived_from` edge — see "Derived vs observed" above) counts one tier weaker than its own `verified_with` when `coverage_witness` is computed — e.g. `evidence` reads as `assertion` — because the record's own witness only attests to how the inference step was checked, not to the ground truth its premises rest on; `assertion` is already the floor and stays `assertion`. The CLI prints a final `Coverage:` line; JSON/MCP expose `coverage`, `coverage_note`, and `coverage_witness`.
+Every result set carries a **coverage** verdict so an agent can tell "the store knows nothing here" from a low-ranked hit: `none` (no active record matches; with a narrowing `--type` filter the note names the filter and how many records of other types do match), `weak` (fewer than half of the distinct content-bearing query terms occur in the best-covered hit, or a title/tag-only match, or barely above the BM25 floor — don't infer from rank; the note names which terms matched nothing), or `ok`. The term test uses the index tokenizer, so `remootio, hubitat, gate` and `"remootio relay" hubitat` count like their bare words, `tariffs` matches `tariff`, `gate` does not match `gateway`, and function words (`does the ... use`) are ignored; in a layered store the hit judged is the best-covered one, not whichever layer won the rank-1 tiebreak. Weak/ok notes name the active scope when one is set. A `coverage_witness` names the strongest witness behind the hits (`anchor > operator > evidence > assertion`), so coverage `ok` with witness `assertion` reads as "claimed, but unverified"; a drifted or unchecked anchor counts as `evidence` and the line says so (`best witness: evidence (drifted)`). A **derived** hit (any `derived_from` edge — see "Derived vs observed" above) counts one tier weaker than its own `verified_with` when `coverage_witness` is computed — e.g. `evidence` reads as `assertion` — because the record's own witness only attests to how the inference step was checked, not to the ground truth its premises rest on; `assertion` is already the floor and stays `assertion`. The CLI prints a final `Coverage:` line; `search --json` and MCP return the same payload object (`query`, `count`, `results`, `coverage`, `coverage_note`, `coverage_witness`).
 
 Anchored results are drift-checked on the read path: a record whose anchored file has changed since it was last anchored prints a `[DRIFTED]` marker (JSON/MCP: `drifted`, with `anchor_unchecked` when the anchor's repo is not checked out here). No `reconcile` run needed to see it.
 
 ## Usage receipts & outcomes
 
-Every search hit is logged to a local, gitignored `usage.jsonl` — one row per result, carrying the query (truncated to 200 chars), a session id (`MEMSPEC_SESSION_ID` > `CLAUDE_SESSION_ID` > a per-process id), the hit's rank, and which surface issued the search (`cli` | `mcp`). Search hits and `memspec_get` results carry `last_referenced` / `sessions` back to the caller when known — read-only derivations, never written to frontmatter.
+Every search hit is logged to a local, gitignored `usage.jsonl` — one row per result, carrying the query (truncated to 200 chars), the hit's rank, which surface issued it (`cli` | `mcp` | `context`), and a session id when one exists: `MEMSPEC_SESSION_ID`, else `CLAUDE_SESSION_ID`, else `mcp:<pid>` inside the MCP server (one process per client connection, so the process is the session). A bare CLI invocation with none of those carries **no** session — there is deliberately no per-process fallback, because an id that changes on every call would make two searches in one agent turn count as two sessions. Rows without a session never contribute to `sessions`, so Promotion candidates require real session ids (the `status` text says so). Boot context (`memspec context`, the session-start hook) logs the records it surfaces with surface `context`, so a pinned record that boots every session is never reported cold. In a layered store each row lands in the store that owns the record, so a read-only team layer accumulates its own receipts. Search hits and `memspec_get` results carry `last_referenced` / `sessions` back to the caller when known — read-only derivations, never written to frontmatter.
 
 Retrieval alone doesn't say whether a memory actually helped. `memspec outcome <id> <useful|dead_end|corrected> [--note] [--source]` (CLI + `memspec_outcome` MCP tool) appends a durable, append-only receipt to `outcomes.jsonl` without ever mutating the record. `supersede` records a `corrected` outcome automatically for every id it collapses — you don't have to call it yourself when you already know a claim was wrong. Record `dead_end` whenever a retrieved memory turned out wrong or useless for the task at hand; it feeds `status`'s two usage-derived surfaces:
 
@@ -227,19 +229,24 @@ memspec init --cwd ~/.memspec
 
 ## Store resolution
 
-Every command resolves which store to use from `--cwd` (defaulting to the process cwd) by **walking up the directory tree**: from the starting directory toward `$HOME`, the first ancestor holding a `.memspec/` directory (or a `.memspec.yaml` pointer) is the store. A session started three directories deep in a repo, or in a repo with no store of its own, resolves the nearest real store instead of a phantom empty `<cwd>/.memspec`.
+Every command resolves which store to use from `--cwd` (defaulting to the process cwd) by **walking up the directory tree**: the first ancestor holding a `.memspec/` directory (or a `.memspec.yaml` pointer) is the store. A session started three directories deep in a repo, or in a repo with no store of its own, resolves the nearest real store instead of a phantom empty `<cwd>/.memspec`.
 
-The walk is fenced:
+The walk is fenced, and the `.memspec/` walk and the `.memspec.yaml` pointer walk share **the same fence** (so `search`, which honours pointers, and `status`, which does not, always agree on the store):
 
-- **It stops at `$HOME` (inclusive).** A home-rooted `~/.memspec` is found; nothing above `$HOME` is ever consulted.
-- **A cwd outside `$HOME` does not walk at all** — only that directory is checked, matching the pre-walk behaviour.
-- **`MEMSPEC_NO_WALK=1` disables it** entirely: `<cwd>/.memspec` is used verbatim.
+- **Inside `$HOME` it stops at `$HOME` (inclusive).** A home-rooted `~/.memspec` is found; nothing above `$HOME` is ever consulted — a `.memspec/` or pointer file in `/Users` or `/home` cannot capture a session.
+- **Outside `$HOME` it walks to the filesystem root**, as memspec always did before 0.11: a repo at `/srv/app`, `/opt/x`, or a container's `/work` resolves `/srv/app/.memspec` from any subdirectory.
+- **`MEMSPEC_NO_WALK=1` disables it** entirely: only cwd itself is checked (a `.memspec/` or pointer file right there still applies); otherwise `<cwd>/.memspec` is used verbatim.
 - **A nearer `.memspec/` directory beats a farther `.memspec.yaml` pointer** — the closest store to cwd wins.
+- **A pointer file is only honoured when it can be trusted**: one that sits in a world-writable directory (`/tmp`, a shared scratch dir) or is owned by another user is ignored with a stderr note and resolution continues as if it were absent. A `.memspec/` directory says where you are; a pointer *redirects* reads and writes to whatever path its author chose, so it has to be yours.
 - An explicit store path (one that already ends in `.memspec`, e.g. `MEMSPEC_ROOT=~/.memspec` or `--store global`) is used as-is and never walked.
 
 **Scope derives from the original cwd, not the resolved store.** When the walk climbs from `repo/service/api` up to `repo/.memspec`, the active `scope` is still computed from `repo/service/api` against the store's `scopes:` map — so a session in a subdirectory is scoped correctly rather than left unscoped.
 
-`init` warns when it would create a store nested inside an existing one (a `.memspec/` already exists up the tree); pass `--force` to create the nested store deliberately.
+**Writes follow the same layers as reads.** When the resolved store's `config.yaml` (or a pointer file) declares `stores:`, a write from that cwd targets the single writable layer — or the one named by `--store <name>` — never the walked-up store itself unless it is one of the layers. Relative `path:` entries resolve against the directory that holds the config that declared them, not against the caller's cwd. Zero writable layers refuses; several writable layers without `--store` refuses as ambiguous; `--store` naming a `writable: false` layer refuses. `memspec question` resolves its store exactly the same way and never creates a store as a side effect.
+
+**Missing layers are reported, not dropped.** A configured layer whose directory is absent on this machine (not cloned yet, typo, moved) is still skipped for reads, but the composite now carries `layers_unavailable: [name]` and a warning naming the path, so a `coverage: none` can say "the team layer isn't here" instead of "the store is empty".
+
+`init` **refuses** to create a store nested inside an existing one (a `.memspec/` already exists up the tree, `~/.memspec` included) and exits 1 naming the parent store; pass `--force` to create the nested store deliberately.
 
 ## Multi-store: pointer files & scope claims
 
@@ -334,7 +341,10 @@ Records written before scoping existed (or written since without a scope) can be
   evidence/                                # committed evidence attachments (v0.11)
   archive/                                 # superseded + retired
   config.yaml                              # decay, profiles, scopes, stores
+  .gitignore                               # usage.jsonl, outcomes.jsonl, local/, logs/ — telemetry, never memory
 ```
+
+The `.gitignore` is written by `init` and kept current on every write: a store created before 0.11 gets `outcomes.jsonl`, `local/` and `logs/` appended on its first 0.11 write (only the missing lines, under a short comment), so `git add -A` in a synced store never picks up per-machine telemetry.
 
 Frontmatter fields per record: `id`, `kind` (`claim | observation | question`), `type`, `state`, `source`, `source_kind`, `verified_with` (`anchor | operator | evidence | assertion`), `tags`, `check_by`, `anchors`, `supersedes`, `superseded_by`, `conflicts_with`, `refines`, `supports`, `depends_on`, `derived_from`, optional `requires_human` (procedures), `evidence`, `answers` / `closed` / `resolved_by` (questions), `valid_from` / `valid_to`. Human-readable, git-diffable, greppable.
 
@@ -342,7 +352,7 @@ Frontmatter fields per record: `id`, `kind` (`claim | observation | question`), 
 
 | Command | What |
 |---|---|
-| `memspec init` | Create `.memspec/`, configure search, install hooks |
+| `memspec init` | Create `.memspec/`, install hooks |
 | `memspec remember <type> <title> --source <who>` | Write a fact/decision/procedure |
 | `memspec observe <text>` | Capture a point-in-time observation |
 | `memspec search <query> [--expand-edges] [--include-superseded] [--as-of <iso>]` | Search; optionally follow linked notes |

@@ -98,17 +98,17 @@ test('search JSON carries drifted; it flips on edit and clears on re-anchor', as
   ]);
   const id = await lastId(project, 'facts');
 
-  const before = JSON.parse((await runCli(['search', 'engine constant', '--cwd', project, '--json'])).stdout);
+  const before = JSON.parse((await runCli(['search', 'engine constant', '--cwd', project, '--json'])).stdout).results;
   assert.equal(before[0].id, id);
   assert.equal(before[0].drifted, false);
 
   await writeFile(join(project, 'engine.ts'), 'export const e = 2; // changed\n');
-  const after = JSON.parse((await runCli(['search', 'engine constant', '--cwd', project, '--json'])).stdout);
+  const after = JSON.parse((await runCli(['search', 'engine constant', '--cwd', project, '--json'])).stdout).results;
   assert.equal(after[0].drifted, true);
   assert.deepEqual(after[0].drift, [{ file: 'engine.ts', status: 'changed' }]);
 
   await runCli(['anchor', id, 'engine.ts', '--cwd', project]);
-  const reanchored = JSON.parse((await runCli(['search', 'engine constant', '--cwd', project, '--json'])).stdout);
+  const reanchored = JSON.parse((await runCli(['search', 'engine constant', '--cwd', project, '--json'])).stdout).results;
   assert.equal(reanchored[0].drifted, false);
 });
 
@@ -138,7 +138,7 @@ test('a cross-repo anchor whose repo is not checked out reads as anchor_unchecke
     'verified_with: anchor\nanchors:\n  - file: src/x.ts\n    sha: deadbeef\n    repo: ghost-service',
   );
   await writeFile(path, withAnchor);
-  const res = JSON.parse((await runCli(['search', 'cross repo claim', '--cwd', project, '--json'])).stdout);
+  const res = JSON.parse((await runCli(['search', 'cross repo claim', '--cwd', project, '--json'])).stdout).results;
   assert.equal(res[0].drifted, false);
   assert.equal(res[0].anchor_unchecked, true);
 });
@@ -220,13 +220,13 @@ test('read-path drift agrees with reconcile for a home-rooted store with a repo-
   assert.match(raw, /repo: analysis/);
   assert.match(raw, /file: ESTATE\.md/);
 
-  const before = JSON.parse((await runCli(['search', 'estate simulation flywheel', '--cwd', home, '--json'])).stdout);
+  const before = JSON.parse((await runCli(['search', 'estate simulation flywheel', '--cwd', home, '--json'])).stdout).results;
   const beforeRow = before.find((r: { id: string }) => r.id === id);
   assert.equal(beforeRow.drifted, false);
   assert.equal(beforeRow.anchor_unchecked, false);
 
   await writeFile(join(repo, 'ESTATE.md'), '# estate\nCHANGED CONTENT\n');
-  const after = JSON.parse((await runCli(['search', 'estate simulation flywheel', '--cwd', home, '--json'])).stdout);
+  const after = JSON.parse((await runCli(['search', 'estate simulation flywheel', '--cwd', home, '--json'])).stdout).results;
   const afterRow = after.find((r: { id: string }) => r.id === id);
   assert.equal(afterRow.drifted, true);
   assert.deepEqual(afterRow.drift, [{ file: 'ESTATE.md', status: 'changed' }]);
@@ -262,7 +262,7 @@ test('search JSON and CLI text echo requires_human on a procedure hit', async ()
   ]);
 
   const jsonRes = await runCli(['search', 'signing key', '--cwd', project, '--json']);
-  const [hit] = JSON.parse(jsonRes.stdout);
+  const [hit] = JSON.parse(jsonRes.stdout).results;
   assert.deepEqual(hit.requires_human, ['approve console', 'confirm HSM']);
 
   const textRes = await runCli(['search', 'signing key', '--cwd', project]);
@@ -278,7 +278,7 @@ test('search JSON and CLI text omit requires_human when absent', async () => {
   ]);
 
   const jsonRes = await runCli(['search', 'no human steps', '--cwd', project, '--json']);
-  const [hit] = JSON.parse(jsonRes.stdout);
+  const [hit] = JSON.parse(jsonRes.stdout).results;
   assert.equal('requires_human' in hit, false);
 
   const textRes = await runCli(['search', 'no human steps', '--cwd', project]);
@@ -300,7 +300,7 @@ test('search JSON and CLI text mark a derived record (derived: true, "(derived)"
   ]);
 
   const jsonRes = await runCli(['search', 'Derived echo conclusion', '--cwd', project, '--json']);
-  const [hit] = JSON.parse(jsonRes.stdout);
+  const [hit] = JSON.parse(jsonRes.stdout).results;
   assert.equal(hit.derived, true);
 
   const textRes = await runCli(['search', 'Derived echo conclusion', '--cwd', project]);
@@ -316,7 +316,7 @@ test('search JSON and CLI text omit derived when the record carries no derived_f
   ]);
 
   const jsonRes = await runCli(['search', 'Not derived at all', '--cwd', project, '--json']);
-  const [hit] = JSON.parse(jsonRes.stdout);
+  const [hit] = JSON.parse(jsonRes.stdout).results;
   assert.equal('derived' in hit, false);
 
   const textRes = await runCli(['search', 'Not derived at all', '--cwd', project]);
@@ -344,7 +344,7 @@ test('coverage_witness counts a derived record one tier weaker (evidence -> asse
   ]);
 
   const res = await runCli(['search', 'Tier-down derived evidence', '--cwd', project, '--json']);
-  const [hit] = JSON.parse(res.stdout);
+  const [hit] = JSON.parse(res.stdout).results;
   assert.equal(hit.derived, true);
   assert.equal(hit.verified_with, 'evidence'); // the record's own witness is unaffected
 
@@ -369,4 +369,288 @@ test('coverage_witness leaves a derived, assertion-witnessed record at assertion
 
   const textRes = await runCli(['search', 'Tier-floor derived assertion', '--cwd', project]);
   assert.match(textRes.stdout, /best witness: assertion/);
+});
+
+// --- coverage: index-tokenised whole-token term test, stopwords, best-covered hit ---
+
+test('coverage term test tokenises like the index: punctuation and quotes do not flip a full match to weak', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await runCli([
+    'remember', 'fact', 'Remootio gate relay', '--cwd', project,
+    '--body', 'Remootio relay opens the gate; Hubitat driver polls status.', '--source', 'test',
+  ]);
+
+  const commas = await runCli(['search', 'remootio, hubitat, gate', '--cwd', project]);
+  assert.match(commas.stdout, /Coverage: ok/);
+
+  const quoted = await runCli(['search', '"remootio relay" hubitat', '--cwd', project]);
+  assert.match(quoted.stdout, /Coverage: ok/);
+});
+
+test('coverage term test is whole-token: "gate" does not match inside "gateway"', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await runCli([
+    'remember', 'fact', 'Kvart gateway policy', '--cwd', project,
+    '--body', 'the api gateway terminates tls at the edge', '--source', 'test',
+  ]);
+  const res = await runCli(['search', 'gate relay tls', '--cwd', project]);
+  assert.match(res.stdout, /Coverage: weak/);
+  assert.match(res.stdout, /1 of 3 query terms matched \(unmatched: gate, relay\)/);
+});
+
+test('coverage ignores function words: a natural-language question about an absent topic reads weak, not ok', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await runCli([
+    'remember', 'procedure', 'Kvart backup pull', '--cwd', project,
+    '--body', 'does a nightly rsync of the kvart database; use with care.', '--source', 'test',
+  ]);
+  const keyword = await runCli(['search', 'kvart gateway mtls', '--cwd', project]);
+  assert.match(keyword.stdout, /Coverage: weak/);
+
+  const natural = await runCli(['search', 'does the kvart gateway use mtls', '--cwd', project]);
+  assert.match(natural.stdout, /Coverage: weak/);
+  assert.match(natural.stdout, /1 of 3 query terms matched \(unmatched: gateway, mtls\)/);
+});
+
+test('coverage is judged on the best-covered hit, not seeds[0]: a layered junk rank-1 hit does not mask the exact match', async () => {
+  const personal = await makeTempProject();
+  const team = await makeTempProject();
+  await runCli(['init', '--cwd', personal, '--no-interactive', '--no-install-hooks']);
+  await runCli(['init', '--cwd', team, '--no-interactive', '--no-install-hooks']);
+  // Higher-priority writable layer holds a record sharing only the token "kvart".
+  await runCli([
+    'remember', 'procedure', 'Kvart backup pull', '--cwd', personal,
+    '--body', 'does a nightly rsync of the kvart database', '--source', 'test',
+  ]);
+  // Lower-priority read-only layer holds the record carrying every term.
+  await runCli([
+    'remember', 'fact', 'Kvart gateway mTLS', '--cwd', team,
+    '--body', 'the kvart gateway uses mtls via step-ca', '--source', 'team:eval',
+  ]);
+  await writeFile(join(personal, '.memspec', 'config.yaml'), [
+    'stores:',
+    '  - name: personal',
+    `    path: ${join(personal, '.memspec')}`,
+    '    priority: 10',
+    '    writable: true',
+    '  - name: team',
+    `    path: ${join(team, '.memspec')}`,
+    '    priority: 0',
+    '    writable: false',
+    '',
+  ].join('\n'));
+
+  const res = JSON.parse((await runCli(['search', 'kvart gateway mtls', '--cwd', personal, '--json'])).stdout);
+  assert.equal(res.results.length, 2);
+  assert.equal(res.coverage, 'ok', res.coverage_note);
+});
+
+test('coverage weak/ok notes name the active scope', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project, '--no-interactive', '--no-install-hooks']);
+  await writeFile(join(project, '.memspec', 'config.yaml'), `scopes:\n  kvart: ['${join(project, 'kvart')}/**']\n`);
+  await runCli([
+    'remember', 'fact', 'Kvart invoices nightly', '--cwd', project,
+    '--body', 'invoices are generated nightly', '--source', 'test', '--scope', 'kvart',
+  ]);
+  const ok = await runCli(['search', 'invoices nightly', '--cwd', project, '--scope', 'kvart']);
+  assert.match(ok.stdout, /Coverage: ok — at least one genuine match in scope kvart/);
+
+  const weak = await runCli(['search', 'invoices zebra flamingo', '--cwd', project, '--scope', 'kvart']);
+  assert.match(weak.stdout, /1 of 3 query terms matched in scope kvart \(unmatched: zebra, flamingo\)/);
+});
+
+test('coverage_witness tiers a drifted anchor down to evidence and says so', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await writeFile(join(project, 'drift-witness.ts'), 'export const a = 1;\n');
+  await runCli([
+    'remember', 'fact', 'Drift witness constant', '--cwd', project,
+    '--body', 'drift witness exports a', '--source', 'test', '--anchor', 'drift-witness.ts',
+  ]);
+  const clean = await runCli(['search', 'drift witness constant', '--cwd', project]);
+  assert.match(clean.stdout, /best witness: anchor\)/);
+
+  await writeFile(join(project, 'drift-witness.ts'), 'export const a = 2;\n');
+  const drifted = await runCli(['search', 'drift witness constant', '--cwd', project]);
+  assert.match(drifted.stdout, /\[DRIFTED/);
+  assert.match(drifted.stdout, /best witness: evidence \(drifted\)/);
+
+  const json = JSON.parse((await runCli(['search', 'drift witness constant', '--cwd', project, '--json'])).stdout);
+  assert.equal(json.coverage_witness, 'evidence');
+  assert.equal(json.coverage_witness_note, 'drifted');
+});
+
+test('coverage_witness tiers an unchecked anchor (repo not checked out) down to evidence', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await runCli(['remember', 'fact', 'Unchecked witness claim', '--cwd', project, '--body', 'x', '--source', 'test']);
+  const id = await lastId(project, 'facts');
+  const path = join(project, '.memspec', 'memory', 'facts', `${id}.md`);
+  const raw = await readFact(project, id);
+  await writeFile(path, raw.replace(
+    /^verified_with: .*$/m,
+    'verified_with: anchor\nanchors:\n  - file: src/x.ts\n    sha: deadbeef\n    repo: ghost-service',
+  ));
+  const res = await runCli(['search', 'unchecked witness claim', '--cwd', project]);
+  assert.match(res.stdout, /best witness: evidence \(anchor unchecked\)/);
+});
+
+test('coverage none/weak notes name a narrowing type filter and count matches of other types', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await runCli([
+    'remember', 'decision', 'Use step-ca for mTLS', '--cwd', project,
+    '--body', 'kvart gateway mtls via step-ca', '--source', 'test',
+  ]);
+  const none = await runCli(['search', 'kvart mtls', '--cwd', project, '--type', 'fact']);
+  assert.match(none.stdout, /Coverage: none — no active fact record matches this query in scope any; 1 record\(s\) of other types match — retry without the type filter/);
+
+  // The default profile's types cover every claim type: not a narrowing filter, not named.
+  const plain = await runCli(['search', 'zebra flamingo', '--cwd', project]);
+  assert.match(plain.stdout, /Coverage: none — no active record matches this query in scope any$/m);
+});
+
+// --- Panel remediation: #5 / #16 / #9 -------------------------------------
+
+test('#5: an absolute anchor inside a HOME-rooted store but in another git repo is recorded as {repo, file}, not HOME-relative', async () => {
+  const home = await makeTempProject(); // stands in for $HOME
+  const repo = join(home, 'git', 'kvart');
+  await mkdir(join(repo, '.git'), { recursive: true });
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'x.ts'), 'export const a = 1;\n');
+  await runCli(['init', '--cwd', home]);
+
+  // No anchors.repo_search_paths configured: the ~/git default must carry it.
+  const rem = await runCli([
+    'remember', 'fact', 'Kvart x', '--cwd', repo, '--store', 'global', '--source', 'test',
+    '--anchor', join(repo, 'src', 'x.ts'),
+  ], undefined, { HOME: home });
+  assert.match(rem.stdout, /Anchored to 1 file/);
+  assert.doesNotMatch(rem.stdout, /recorded against repo/, 'default ~/git search path resolves it, so no warning');
+
+  const id = await lastId(home, 'facts');
+  const raw = await readFact(home, id);
+  assert.match(raw, /repo: kvart/);
+  assert.match(raw, /file: src\/x\.ts/);
+  assert.doesNotMatch(raw, /file: git\/kvart/);
+
+  // Read side agrees with no config: verify clean, search not drifted/unchecked.
+  const v = await runCli(['verify', id, '--cwd', home], undefined, { HOME: home });
+  assert.match(v.stdout, /1 anchor\(s\) unchanged/);
+  const row = JSON.parse((await runCli(['search', 'Kvart x', '--cwd', home, '--json'], undefined, { HOME: home })).stdout).results
+    .find((r: { id: string }) => r.id === id);
+  assert.equal(row.drifted, false);
+  assert.equal(row.anchor_unchecked, false);
+
+  // And genuine drift is still detected through the {repo, file} form.
+  await writeFile(join(repo, 'src', 'x.ts'), 'export const a = 2;\n');
+  const after = JSON.parse((await runCli(['search', 'Kvart x', '--cwd', home, '--json'], undefined, { HOME: home })).stdout).results
+    .find((r: { id: string }) => r.id === id);
+  assert.equal(after.drifted, true);
+});
+
+test('#5: an absolute anchor inside the project\'s own repo stays repo-less and project-relative', async () => {
+  const project = await makeTempProject();
+  await mkdir(join(project, '.git'), { recursive: true });
+  await mkdir(join(project, 'src'), { recursive: true });
+  await writeFile(join(project, 'src', 'own.ts'), 'export const own = 1;\n');
+  await runCli(['init', '--cwd', project]);
+  await runCli(['remember', 'fact', 'Own file', '--cwd', project, '--source', 'test', '--anchor', join(project, 'src', 'own.ts')]);
+  const raw = await readFact(project, await lastId(project, 'facts'));
+  assert.match(raw, /file: src\/own\.ts/);
+  assert.doesNotMatch(raw, /repo:/);
+});
+
+test('#16: anchor_root form on a HOME-rooted store round-trips through verify and search with no repo_search_paths configured', async () => {
+  const home = await makeTempProject();
+  const repo = join(home, 'git', 'kvart');
+  await mkdir(join(repo, '.git'), { recursive: true });
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'a.ts'), 'a\n');
+  await runCli(['init', '--cwd', home]);
+
+  const rem = await runCli([
+    'remember', 'fact', 'Kvart a', '--cwd', home, '--source', 'test',
+    '--anchor', 'src/a.ts', '--anchor-root', repo,
+  ], undefined, { HOME: home });
+  assert.match(rem.stdout, /Anchored to 1 file/);
+  const id = await lastId(home, 'facts');
+  assert.match(await readFact(home, id), /repo: kvart/);
+
+  const v = await runCli(['verify', id, '--cwd', home], undefined, { HOME: home });
+  assert.match(v.stdout, /Verified/);
+  const row = JSON.parse((await runCli(['search', 'Kvart a', '--cwd', home, '--json'], undefined, { HOME: home })).stdout).results
+    .find((r: { id: string }) => r.id === id);
+  assert.equal(row.anchor_unchecked, false);
+});
+
+test('#16: a {repo, file} anchor this store cannot resolve on read is still written but warns with the directory to add', async () => {
+  const base = await makeTempProject();
+  const home = join(base, 'home');
+  const checkouts = join(base, 'srv', 'checkouts');
+  const elsewhere = join(checkouts, 'faraway');
+  await mkdir(home, { recursive: true });
+  await mkdir(join(elsewhere, '.git'), { recursive: true });
+  await writeFile(join(elsewhere, 'f.ts'), 'f\n');
+  await runCli(['init', '--cwd', home]);
+
+  const rem = await runCli([
+    'remember', 'fact', 'Faraway f', '--cwd', home, '--source', 'test',
+    '--anchor', 'f.ts', '--anchor-root', elsewhere,
+  ], undefined, { HOME: home });
+  assert.match(rem.stdout, /Anchored to 1 file/);
+  assert.match(rem.stdout, /recorded against repo faraway/);
+  assert.ok(rem.stdout.includes(`add ${checkouts} to anchors.repo_search_paths`), rem.stdout);
+
+  // Configure the named directory and the read side resolves it.
+  await writeFile(join(home, '.memspec', 'config.yaml'), `anchors:\n  repo_search_paths:\n    - ${checkouts}\n`);
+  const id = await lastId(home, 'facts');
+  const v = await runCli(['verify', id, '--cwd', home], undefined, { HOME: home });
+  assert.match(v.stdout, /1 anchor\(s\) unchanged/);
+});
+
+test('#9: a non-bare anchor repo (absolute or traversal) is repo_unavailable / anchor_unchecked, never a hash oracle', async () => {
+  const { checkAnchors } = await import('../src/lib/anchors.js');
+  const { computeDrift } = await import('../src/lib/drift.js');
+  const { createHash } = await import('node:crypto');
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+
+  const passwd = await readFile('/etc/passwd');
+  const sha = createHash('sha1').update(`blob ${passwd.length}\0`).update(passwd).digest('hex');
+
+  // (An empty `repo` is falsy and takes the repo-less path — contained to the
+  // project root, so it reads `missing`, which is also no oracle.)
+  for (const repo of ['/etc', '../../../../../../../etc', '.', '..', 'a/b', 'a\\b']) {
+    const statuses = checkAnchors(project, [{ file: 'passwd', sha, repo }]);
+    assert.equal(statuses[0].status, 'repo_unavailable', `repo=${JSON.stringify(repo)} via checkAnchors`);
+    assert.equal(statuses[0].currentSha, null);
+    const drift = computeDrift(project, [{ file: 'passwd', sha, repo }]);
+    assert.deepEqual(drift, { drifted: false, anchor_unchecked: true, drift: [{ file: 'passwd', status: 'repo_unavailable' }] }, `repo=${JSON.stringify(repo)} via computeDrift`);
+  }
+
+  // The same record through the CLI reads as unchecked, and verify needs review.
+  const id = 'ms_01J0000000000000000000000A';
+  await writeFile(join(project, '.memspec', 'memory', 'facts', `${id}.md`), [
+    '---', `id: ${id}`, 'kind: claim', 'type: fact', 'state: active', 'created: 2026-01-01T00:00:00.000Z',
+    'source: planted', 'tags: []', 'check_by: never', 'verified_with: anchor',
+    'anchors:', '  - file: passwd', `    sha: ${sha}`, '    repo: /etc', '---', '# Passwd oracle', '',
+  ].join('\n'));
+  const row = JSON.parse((await runCli(['search', 'passwd oracle', '--cwd', project, '--json'])).stdout).results
+    .find((r: { id: string }) => r.id === id);
+  assert.equal(row.drifted, false);
+  assert.equal(row.anchor_unchecked, true);
+  // needs_review exits 1 on the CLI, so the call rejects; the report is on stdout.
+  await assert.rejects(
+    () => runCli(['verify', id, '--cwd', project]),
+    (err: Error & { stdout?: string; stderr?: string }) => {
+      assert.match(err.stdout ?? '', /NEEDS REVIEW/);
+      assert.match(err.stderr ?? '', /is not a bare repository name/);
+      return true;
+    },
+  );
 });

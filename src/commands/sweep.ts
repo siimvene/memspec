@@ -6,23 +6,36 @@ export interface SweepOptions {
   cwd?: string;
   dryRun?: boolean;
   /**
-   * Path to a file with one `<id>\t<y|n>` line per stale candidate — a
-   * non-interactive alternative to the stdin prompt loop. Ids missing from
-   * the file default to 'n' (kept). Ignored when `dryRun` is set.
+   * Path to a file with one `<id> <y|n>` line (tab- or space-separated) per
+   * stale candidate — a non-interactive alternative to the stdin prompt loop.
+   * Ids missing from the file default to 'n' (kept); unparsable lines and ids
+   * matching no candidate are reported as warnings. Ignored when `dryRun` is set.
    */
   answers?: string;
 }
 
-/** Parse `<id>\t<y|n>` lines into an id → answer map. Blank lines skipped. */
-function parseAnswers(raw: string): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const line of raw.split('\n')) {
+/**
+ * Parse `<id> <y|n>` lines (any whitespace separator — tab or spaces) into an
+ * id → answer map. Blank lines skipped. A line that is not exactly two fields
+ * with a `y|yes|n|no` answer is reported in `warnings`, never silently treated
+ * as `n`: an answers file written with spaces used to parse every id as
+ * `<id> y` and retire nothing.
+ */
+function parseAnswers(raw: string): { answers: Map<string, string>; warnings: string[] } {
+  const answers = new Map<string, string>();
+  const warnings: string[] = [];
+  raw.split('\n').forEach((line, index) => {
     const trimmed = line.trim();
-    if (!trimmed) continue;
-    const [id, answer] = trimmed.split('\t');
-    if (id) map.set(id.trim(), (answer ?? '').trim().toLowerCase());
-  }
-  return map;
+    if (!trimmed) return;
+    const fields = trimmed.split(/\s+/);
+    const answer = (fields[1] ?? '').toLowerCase();
+    if (fields.length !== 2 || !['y', 'yes', 'n', 'no'].includes(answer)) {
+      warnings.push(`line ${index + 1} ignored (expected "<id> <y|n>"): ${trimmed}`);
+      return;
+    }
+    answers.set(fields[0], answer);
+  });
+  return { answers, warnings };
 }
 
 /**
@@ -49,8 +62,13 @@ export async function runSweep(options: SweepOptions): Promise<string> {
 
   if (options.answers) {
     const raw = await readFile(options.answers, 'utf8');
-    const answers = parseAnswers(raw);
+    const { answers, warnings } = parseAnswers(raw);
     const lines: string[] = [];
+    const candidateIds = new Set(candidates.map((item) => item.id));
+    for (const id of answers.keys()) {
+      if (!candidateIds.has(id)) warnings.push(`${id} matches no stale candidate — ignored`);
+    }
+    for (const warning of warnings) lines.push(`WARNING: ${warning}`);
     let retired = 0;
     for (const item of candidates) {
       lines.push(`\n[${item.type ?? 'observation'}] ${item.title}`);

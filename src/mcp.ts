@@ -22,6 +22,7 @@ import { homedir } from 'node:os';
 import { CompositeStore } from './lib/composite-store.js';
 import { buildLineage } from './lib/lineage.js';
 import { computeUsageStats } from './lib/usage-stats.js';
+import { setProcessSessionLabel } from './lib/usage.js';
 
 const { values } = parseArgs({
   options: { cwd: { type: 'string' } },
@@ -30,6 +31,12 @@ const { values } = parseArgs({
 });
 
 const defaultCwd = typeof values.cwd === 'string' ? values.cwd : process.env.MEMSPEC_ROOT ?? undefined;
+
+// One MCP server process serves one client connection for its whole lifetime,
+// so the process IS the session: label usage/outcome rows `mcp:<pid>` when no
+// MEMSPEC_SESSION_ID / CLAUDE_SESSION_ID is set. Honest about what it is — a
+// per-connection id, not a per-invocation one (see usage.ts resolveSessionId).
+setProcessSessionLabel(`mcp:${process.pid}`);
 
 const server = new McpServer({
   name: 'memspec',
@@ -74,7 +81,7 @@ function renderSearchText(payload: SearchPayload): string {
 
 server.tool(
   'memspec_search',
-  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Trust the top-level `coverage` field over rank when deciding whether the store actually knows something: `coverage: "none"` means no active record matches — treat it as "nothing here", do not infer an answer from an empty or low-rank result; `coverage: "weak"` means the matches are low-relevance (fewer than half the query terms occur in the top hit — the coverage_note names the unmatched ones — or a title/tag-only match, or barely above the BM25 floor) — do not read meaning into rank order. `coverage_witness` names the strongest witness backing the hits (anchor > operator > evidence > assertion): coverage "ok" with witness "assertion" is "the store claims this but nothing has verified it". A result carrying `drifted: true` is anchored to code that has since changed — verify or supersede it before relying on it; `anchor_unchecked: true` means its repo is not checked out here so drift could not be checked. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface linked-note matches — records reached by following the named links on each search match (refines / supports / depends_on / conflicts_with / supersedes / superseded_by); linked-note hits carry an `expanded_via` field naming the match and link that surfaced them. Pass as_of to filter by world-state validity at a specific point in time. A hit carries `derived: true` when it was inferred rather than observed (any derived_from edge) — its coverage_witness counts one tier weaker for exactly that reason — and `requires_human` when it is a procedure with steps only a human may perform. Pass type=question to list question groups instead (they are otherwise invisible to this tool): each hit carries `closed`, `answers`, and `resolved_by`.',
+  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Trust the top-level `coverage` field over rank when deciding whether the store actually knows something: `coverage: "none"` means no active record matches — treat it as "nothing here", do not infer an answer from an empty or low-rank result; `coverage: "weak"` means the matches are low-relevance (fewer than half the query terms occur in the top hit — the coverage_note names the unmatched ones — or a title/tag-only match, or barely above the BM25 floor) — do not read meaning into rank order. `coverage_witness` names the strongest witness backing the hits (anchor > operator > evidence > assertion): coverage "ok" with witness "assertion" is "the store claims this but nothing has verified it". A result carrying `drifted: true` is anchored to code that has since changed — verify or supersede it before relying on it; `anchor_unchecked: true` means its repo is not checked out here so drift could not be checked. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface linked-note matches — records reached by following the named links on each search match (refines / supports / depends_on / derived_from / conflicts_with / supersedes / superseded_by); linked-note hits carry an `expanded_via` field naming the match and link that surfaced them. Pass as_of to filter by world-state validity at a specific point in time. A hit carries `derived: true` when it was inferred rather than observed (any derived_from edge) — its coverage_witness counts one tier weaker for exactly that reason — and `requires_human` when it is a procedure with steps only a human may perform. Pass type=question to list question groups instead (they are otherwise invisible to this tool): each hit carries `closed`, `answers`, and `resolved_by`.',
   {
     query: z.string().describe('Search terms'),
     type: z.enum(['fact', 'decision', 'procedure', 'question']).optional().describe('Filter by memory type. "question" is a distinct retrieval path: question groups never carry state active, so they are otherwise invisible to search — this is the only way to list them (open groups first, then resolved; filtered by a case-insensitive title substring match when a query is given).'),
@@ -82,7 +89,7 @@ server.tool(
     profile: z.string().optional().describe('Retrieval profile name from config'),
     full: z.boolean().optional().describe('Include each result body inline (token-budgeted). Defaults to previews only.'),
     expand_edges: z.boolean().optional().describe('v0.5: when true, follow the named links on each search match and surface the linked notes as additional results (each carries an `expanded_via` descriptor). Default false — v0.4 behaviour preserved.'),
-    edge_types: z.array(z.enum(EDGE_TYPES)).optional().describe('v0.5: subset of link types to follow when expand_edges is true. Default: all six (refines, supports, depends_on, conflicts_with, supersedes, superseded_by). Order is preserved for deterministic output.'),
+    edge_types: z.array(z.enum(EDGE_TYPES)).optional().describe('v0.5: subset of link types to follow when expand_edges is true. Default: all seven (refines, supports, depends_on, derived_from, conflicts_with, supersedes, superseded_by). Order is preserved for deterministic output.'),
     expand_depth: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe('v0.5: how many hops to follow when expanding linked notes (1–3). Default 1 — single hop.'),
     as_of: z.string().optional().describe('ISO 8601 timestamp; drop results whose world-state validity window excludes this point. Records without valid_from/valid_to are treated as always valid. Orthogonal to check_by staleness.'),
     include_superseded: z.boolean().optional().describe('v0.6: when true with expand_edges, allow link-following to reach superseded/archived notes as targets (search matches themselves stay active-only). Default false.'),
@@ -278,6 +285,8 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
       requires_human: result.requiresHuman ?? null,
       evidence: result.evidence ?? null,
       answered_question: result.answeredQuestion ?? null,
+      // v0.11 — true when this record reopened a previously resolved question.
+      reopened_question: result.reopenedQuestion ?? false,
     };
     if (result.suggestedConflicts) {
       // v0.10 — lexical conflict candidates, SUGGESTION ONLY. The tool does not
@@ -297,7 +306,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
 
 server.tool(
   'memspec_remember',
-  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Prefer ABSOLUTE file paths in anchors (e.g. /Users/you/git/repo/src/x.ts): this server may run against a personal/global store whose project root is your home directory, so a bare repo-relative path like "src/x.ts" resolves nowhere and the claim silently degrades to an unanchored assertion. If you must pass repo-relative paths, also pass anchor_root pointing at that repo\'s checkout. An anchor that resolves nowhere comes back in anchor_warnings telling you what to pass. Search first to avoid duplicates. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
+  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Prefer ABSOLUTE file paths in anchors (e.g. /Users/you/git/repo/src/x.ts): this server may run against a personal/global store whose project root is your home directory, so a bare repo-relative path like "src/x.ts" resolves nowhere and the claim silently degrades to an unanchored assertion. If you must pass repo-relative paths, also pass anchor_root pointing at that repo\'s checkout. A file inside a git repo other than the store\'s own is recorded as {repo, file} and resolved on read as a sibling of the project root or under anchors.repo_search_paths (default ~/git). An anchor that resolves nowhere comes back in anchor_warnings telling you what to pass; an anchor recorded against a repo this store cannot resolve on read also warns, naming the directory to add to repo_search_paths. Search first to avoid duplicates. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
   {
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
@@ -515,7 +524,7 @@ server.tool(
 
 server.tool(
   'memspec_status',
-  'Check memory store health. Counts by type/state/witness, stale flags, drifted anchors, declared and inferred conflicts, schema violations, and sweep candidates. Use when unsure if the store is populated or healthy, or after running migrations.',
+  'Check memory store health. Counts by type/state/witness, stale flags, drifted anchors, declared and inferred conflicts, schema violations, and sweep candidates. v0.11 sections: `cold` (active records created > 30 days ago never retrieved, or not retrieved in 60+ days — usage-log derived, so a store whose records are read only through another store\'s layered view may look colder than it is), `promotion_candidates` (active observations and young assertion-only facts retrieved in 2+ distinct real sessions with no dead_end outcome — candidates only, nothing is auto-promoted; a session is MEMSPEC_SESSION_ID / CLAUDE_SESSION_ID / this MCP server, never a bare CLI invocation), `questions` (question groups with their elimination disposition: open — N candidates, resolved by elimination — survivor, or resolved — resolved_by), and `evidence_backed` (active records carrying committed file evidence). Use when unsure if the store is populated or healthy, or after running migrations.',
   {},
   async () => {
     try {
@@ -533,11 +542,11 @@ server.tool(
 
 server.tool(
   'memspec_relate',
-  'Wire a typed edge from one memory to another without rewriting either record. Edge types: refines (this elaborates the target; parent stays valid), supports (this is evidence for the target), depends_on (this presupposes the target), conflicts_with (declared contradiction). Dedupes silently; replaying the same call is a no-op.',
+  'Wire a typed edge from one memory to another without rewriting either record. Edge types: refines (this elaborates the target; parent stays valid), supports (this is evidence for the target), depends_on (this presupposes the target), derived_from (this was INFERRED from the target rather than observed; marks the record derived), conflicts_with (declared contradiction). A target cannot carry both a conflicts_with and a positive edge. `from` must be a claim: a question group manages its answers through memspec_question, never through claim edges. Dedupes silently; replaying the same call is a no-op.',
   {
-    from: z.string().describe('Memory id the edge originates from (the edge is written into this record)'),
+    from: z.string().describe('Memory id the edge originates from (the edge is written into this record; must be a claim, not a question)'),
     to: z.string().describe('Memory id the edge points at'),
-    type: relationTypeSchema.describe('Edge type: refines | supports | depends_on | conflicts_with'),
+    type: relationTypeSchema.describe('Edge type: refines | supports | depends_on | derived_from | conflicts_with'),
   },
   async ({ from, to, type }) => {
     try {
@@ -560,11 +569,11 @@ server.tool(
 
 server.tool(
   'memspec_unrelate',
-  'Remove a typed edge from one memory — the inverse of memspec_relate, and the only way to retract an edge (edges were append-only before v0.10, so a wrong conflicts_with was permanent). Edge types: refines | supports | depends_on | conflicts_with. Operator-sourced records are read-only over MCP: removing an edge from operator memory is refused here and must be done with `memspec unrelate --override-operator` at a terminal, where a human authorizes it. Every removal is logged durably into the record (who, when, why). Removing an edge that is not present is a reported no-op, not an error.',
+  'Remove a typed edge from one memory — the inverse of memspec_relate, and the only way to retract an edge (edges were append-only before v0.10, so a wrong conflicts_with was permanent). Edge types: refines | supports | depends_on | derived_from | conflicts_with. Operator-sourced records are read-only over MCP: removing an edge from operator memory is refused here and must be done with `memspec unrelate --override-operator` at a terminal, where a human authorizes it. Every removal is logged durably into the record (who, when, why). Removing an edge that is not present is a reported no-op, not an error.',
   {
     from: z.string().describe('Memory id the edge originates from (the edge is removed from this record)'),
     to: z.string().describe('Memory id the edge points at'),
-    type: relationTypeSchema.describe('Edge type to remove: refines | supports | depends_on | conflicts_with'),
+    type: relationTypeSchema.describe('Edge type to remove: refines | supports | depends_on | derived_from | conflicts_with'),
     reason: z.string().describe('Why the edge is being removed. Persisted into ext.edge_removals on the record.'),
     source: z.string().optional().describe('Who is removing the edge'),
   },

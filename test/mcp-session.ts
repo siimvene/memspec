@@ -28,7 +28,7 @@ export class McpSession {
     reject: (error: Error) => void;
   }>();
 
-  constructor(args: string[]) {
+  constructor(args: string[], env?: NodeJS.ProcessEnv) {
     this.child = spawn(
       process.execPath,
       ['--import', 'tsx', ...args],
@@ -37,6 +37,9 @@ export class McpSession {
         env: {
           ...process.env,
           TZ: 'UTC',
+          // Overrides land last so a test can clear session env vars
+          // (MEMSPEC_SESSION_ID / CLAUDE_SESSION_ID) or redirect HOME.
+          ...env,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       },

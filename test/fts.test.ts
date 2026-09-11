@@ -15,7 +15,7 @@ test('FTS5: stemming finds "configuration" when searching "configured"', async (
 
   // "configured" should find "configuration" via stemming (not a substring match)
   const result = await runCli(['search', 'configured', '--cwd', target, '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.ok(parsed.length >= 1, 'stemming should match configured → configuration');
   assert.equal(parsed[0].title, 'Server configuration approach');
 });
@@ -31,7 +31,7 @@ test('FTS5: word boundaries prevent "file" matching "profile"', async () => {
 
   // Searching "file" should find "Config file locations" but NOT "User profile settings"
   const result = await runCli(['search', 'file', '--cwd', target, '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.ok(parsed.length >= 1, 'should find the file item');
   assert.equal(parsed[0].title, 'Config file locations');
   // "profile" should NOT match "file" with word boundaries
@@ -52,7 +52,7 @@ test('FTS5: BM25 ranking outperforms naive keyword scoring on term spam', async 
     '--body', 'AWS platform, GCP platform, Azure platform are all cloud platforms we evaluated. Platform platform platform.', '--source', 'test']);
 
   const result = await runCli(['search', 'platform engineering', '--cwd', target, '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.ok(parsed.length >= 1);
   assert.equal(parsed[0].title, 'Platform engineering strategy');
 });
@@ -67,7 +67,7 @@ test('FTS5: existing phrase ranking still works', async () => {
     '--body', 'Network file shares', '--source', 'test']);
 
   const result = await runCli(['search', 'files over db', '--cwd', target, '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.ok(parsed.length === 2);
   assert.equal(parsed[0].title, 'Use files over DB');
 });
@@ -85,7 +85,7 @@ test('FTS5: multi-word query with absent terms still finds the best match', asyn
     '--body', 'VLAN trunking on the lab switch', '--source', 'test']);
 
   const result = await runCli(['search', 'Kleidia ICP target customers defence government strategy', '--cwd', target, '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.ok(parsed.length >= 1, 'OR fallback should rescue queries with absent terms');
   assert.equal(parsed[0].title, 'Kleidia ICP');
 });
@@ -101,7 +101,7 @@ test('FTS5: OR fallback does not dilute exact AND matches', async () => {
 
   // Both terms present in one item: AND must win, the partial match stays out
   const result = await runCli(['search', 'JWT auth', '--cwd', target, '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.equal(parsed.length, 1, 'AND should be tried before falling back to OR');
   assert.equal(parsed[0].title, 'JWT auth tokens');
 });
@@ -114,7 +114,7 @@ test('FTS5: type filtering works with FTS backend', async () => {
   await runCli(['remember','decision', 'Chose JWT', '--cwd', target, '--body', 'JWT decision', '--source', 'test']);
 
   const result = await runCli(['search', 'JWT', '--cwd', target, '--type', 'fact', '--json']);
-  const parsed = JSON.parse(result.stdout);
+  const parsed = JSON.parse(result.stdout).results;
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].type, 'fact');
 });

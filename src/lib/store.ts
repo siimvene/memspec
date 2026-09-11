@@ -77,6 +77,65 @@ export interface SearchRelevanceMeta {
   topBm25: number | null;
 }
 
+/**
+ * Files every store's .gitignore must list. These are per-machine telemetry or
+ * secrets, never memory: `usage.jsonl` (retrieval log), `outcomes.jsonl`
+ * (outcome receipts, auto-written by `supersede` since 0.11), `local/`
+ * (trajectories, digests, secrets — `--evidence` refuses to copy from it) and
+ * `logs/`. A store synced by `git add -A` would otherwise ship them.
+ */
+export const REQUIRED_GITIGNORE_ENTRIES = ['usage.jsonl', 'outcomes.jsonl', 'local/', 'logs/'] as const;
+
+const STORE_GITIGNORE_TEMPLATE =
+  '# Derived search index — rebuildable from files\n' +
+  '*.db\n*.db-journal\n*.db-wal\n.fts.db\n.fts.db-journal\n.fts.db-wal\n' +
+  '# Per-clone reconcile checkpoint\n.reconcile.json\n' +
+  '# Local retrieval log — boot usage_boost input\nusage.jsonl\n' +
+  '# Local outcome receipts (memspec outcome / supersede) — never memory\noutcomes.jsonl\n' +
+  '# Machine-local subtree: trajectories, digests, secrets — never committed\nlocal/\n' +
+  'logs/\n';
+
+/** `local` and `local/` (or `/local/`) ignore the same directory. */
+function gitignoreKey(line: string): string {
+  return line.trim().replace(/^\/+/, '').replace(/\/+$/, '');
+}
+
+/**
+ * Idempotent: make sure `<storeRoot>/.gitignore` lists every entry in
+ * `REQUIRED_GITIGNORE_ENTRIES`. Creates the file from the full template when
+ * it is missing; otherwise appends only the entries that are absent (under a
+ * short comment), preserving whatever the operator already has. Returns the
+ * entries appended (empty when nothing changed). No-op when the store
+ * directory itself does not exist — a probe must never conjure a store.
+ *
+ * Called from `init()` and from every write path (`writeItem`, outcome
+ * append), so an existing store gets the 0.11 lines on its first 0.11 write
+ * rather than after a manual step.
+ */
+export function ensureStoreGitignore(storeRoot: string): string[] {
+  if (!existsSync(storeRoot)) return [];
+  const gitignorePath = join(storeRoot, '.gitignore');
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, STORE_GITIGNORE_TEMPLATE);
+    return [...REQUIRED_GITIGNORE_ENTRIES];
+  }
+  const current = readFileSync(gitignorePath, 'utf8');
+  const have = new Set(
+    current
+      .split('\n')
+      .filter((l) => l.trim() !== '' && !l.trimStart().startsWith('#'))
+      .map(gitignoreKey),
+  );
+  const missing = REQUIRED_GITIGNORE_ENTRIES.filter((e) => !have.has(gitignoreKey(e)));
+  if (missing.length === 0) return [];
+  const prefix = current.length === 0 || current.endsWith('\n') ? '' : '\n';
+  writeFileSync(
+    gitignorePath,
+    current + prefix + '# memspec 0.11: local telemetry, never memory\n' + missing.join('\n') + '\n',
+  );
+  return missing;
+}
+
 export class MemspecStore {
   readonly root: string;
   readonly warnings: LoadWarning[] = [];
@@ -141,13 +200,9 @@ export class MemspecStore {
       mkdirSync(dir, { recursive: true });
     }
 
-    const gitignorePath = join(this.root, '.gitignore');
-    if (!existsSync(gitignorePath)) {
-      writeFileSync(
-        gitignorePath,
-        '# Derived search index — rebuildable from files\n*.db\n*.db-journal\n*.db-wal\n.fts.db\n.fts.db-journal\n.fts.db-wal\n# Per-clone reconcile checkpoint\n.reconcile.json\n# Local retrieval log — boot usage_boost input\nusage.jsonl\n',
-      );
-    }
+    // Creates the template on a fresh store; appends the 0.11 entries
+    // (outcomes.jsonl, local/, logs/) to a pre-0.11 store's existing file.
+    ensureStoreGitignore(this.root);
 
     if (!existsSync(this.configPath)) {
       writeFileSync(this.configPath, defaultConfigYaml());
@@ -185,6 +240,10 @@ export class MemspecStore {
     const dir = resolve(filePath, '..');
     mkdirSync(dir, { recursive: true });
     writeFileSync(filePath, serializeMemoryFile(item));
+    // Every write path keeps the store's .gitignore current, so a store
+    // created before 0.11 picks up `outcomes.jsonl` / `local/` / `logs/` on
+    // its first 0.11 write instead of committing telemetry on the next sync.
+    ensureStoreGitignore(this.root);
     return filePath;
   }
 

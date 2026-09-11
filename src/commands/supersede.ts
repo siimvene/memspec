@@ -5,7 +5,7 @@ import { effectiveSourceKind } from '../lib/source.js';
 import { assertKnownScope } from '../lib/scope.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
-import { DEFAULT_DECAY_DAYS, type MemoryItem, type MemoryType } from '../lib/types.js';
+import { DEFAULT_DECAY_DAYS, type EvidenceEntry, type MemoryItem, type MemoryType } from '../lib/types.js';
 
 export interface SupersedeOptions {
   cwd?: string;
@@ -59,6 +59,29 @@ function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason:
     return `${reason} [override_operator used on operator-sourced record]`;
   }
   return reason;
+}
+
+/**
+ * v0.11 fields the replacement inherits from the records collapsing into it:
+ * the union of `requires_human` steps (order preserved, deduped) and the union
+ * of `evidence` entries (deduped by sha256 for files, url for pointers).
+ */
+function carryV011Fields(contributors: MemoryItem[]): { requiresHuman: string[]; evidence: EvidenceEntry[] } {
+  const requiresHuman: string[] = [];
+  const evidence: EvidenceEntry[] = [];
+  const seenEvidence = new Set<string>();
+  for (const item of contributors) {
+    for (const step of item.requires_human ?? []) {
+      if (!requiresHuman.includes(step)) requiresHuman.push(step);
+    }
+    for (const entry of item.evidence ?? []) {
+      const key = entry.sha256 ? `sha:${entry.sha256}` : entry.url ? `url:${entry.url}` : JSON.stringify(entry);
+      if (seenEvidence.has(key)) continue;
+      seenEvidence.add(key);
+      evidence.push(entry);
+    }
+  }
+  return { requiresHuman, evidence };
 }
 
 /**
@@ -168,6 +191,15 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     if (survivorScope) {
       replacement.scope = survivorScope;
     }
+    // v0.11 fields ride along to the replacement. `requires_human` is the
+    // actuation boundary: a revised procedure body does not make the
+    // human-only step safe for an unattended runner, so dropping it silently
+    // (as the fixed field list above used to) removed a safety rule with no
+    // trace on the new record. Committed evidence stays attached to the
+    // claim's lineage too — the files are content-addressed in the store.
+    const carried = carryV011Fields([target, ...mergeItems]);
+    if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
+    if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
     store.writeItem(replacement);
 
     target.state = 'superseded';
@@ -188,11 +220,15 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     }
 
     const mergedNote = mergeItems.length > 0 ? ` (merged ${mergeItems.length + 1} → 1)` : '';
+    const carriedNotes: string[] = [];
+    if (carried.requiresHuman.length > 0) carriedNotes.push(`requires_human (${carried.requiresHuman.length} step(s))`);
+    if (carried.evidence.length > 0) carriedNotes.push(`evidence (${carried.evidence.length} entr${carried.evidence.length === 1 ? 'y' : 'ies'})`);
+    const carriedLine = carriedNotes.length > 0 ? `\nCarried to ${newId}: ${carriedNotes.join(', ')}` : '';
     return {
       survivor_id: newId,
       superseded_ids: collapsedIds,
       reason: baseReason,
-      message: `Superseded ${collapsedIds.join(', ')} → ${newId}${mergedNote}\nReason: ${baseReason}`,
+      message: `Superseded ${collapsedIds.join(', ')} → ${newId}${mergedNote}\nReason: ${baseReason}${carriedLine}`,
     };
   }
 

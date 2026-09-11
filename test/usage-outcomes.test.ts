@@ -7,6 +7,7 @@ import { makeTempProject, REPO_ROOT, runCli } from './helpers.js';
 import { McpSession } from './mcp-session.js';
 import { buildStatusReport } from '../src/commands/status.js';
 import { MemspecStore } from '../src/lib/store.js';
+import { computeUsageStats } from '../src/lib/usage-stats.js';
 import type { MemoryFrontmatter } from '../src/lib/types.js';
 
 /**
@@ -165,6 +166,94 @@ test('supersede records a "corrected" outcome for every id it collapses (replace
     assert.equal(byId.get(id).outcome, 'corrected');
   }
   assert.ok(!byId.has(survivorId), 'the survivor itself is not superseded and gets no outcome row');
+});
+
+// --- Panel remediation: #26, #27 -------------------------------------------
+
+test('#26: a CLI search with no session env carries no session (no per-process id), so two invocations never read as two sessions', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  const id = await firstId((await runCli(['remember', 'fact', 'Session-less fact', '--cwd', target, '--source', 'test'])).stdout);
+  const noSession = { MEMSPEC_SESSION_ID: '', CLAUDE_SESSION_ID: '' };
+
+  await runCli(['search', 'Session-less', '--cwd', target], undefined, noSession);
+  await runCli(['search', 'Session-less', '--cwd', target], undefined, noSession);
+  const rows = (await readFile(join(target, '.memspec', 'usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.equal(row.session, undefined);
+    assert.equal(row.surface, 'cli');
+  }
+  assert.equal(computeUsageStats(join(target, '.memspec')).get(id)?.sessions, 0);
+
+  // A real harness id is honoured, and so is the outcome log's session.
+  await runCli(['search', 'Session-less', '--cwd', target], undefined, { MEMSPEC_SESSION_ID: '', CLAUDE_SESSION_ID: 'harness-1' });
+  await runCli(['outcome', id, 'useful', '--cwd', target], undefined, noSession);
+  const usage = (await readFile(join(target, '.memspec', 'usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(usage[2].session, 'harness-1');
+  const outcomes = (await readFile(join(target, '.memspec', 'outcomes.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(outcomes[0].session, undefined);
+
+  // The status text says what a session is.
+  const status = await runCli(['status', '--cwd', target]);
+  assert.match(status.stdout, /counts distinct real session ids .*CLI searches without one carry no session and never count/);
+});
+
+test('#26: the MCP server labels its rows mcp:<pid> — one session per server process, not per call', async () => {
+  const target = await makeTempProject();
+  await runCli(['init', '--cwd', target]);
+  await runCli(['remember', 'fact', 'Server-side fact', '--cwd', target, '--source', 'test']);
+
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target], { MEMSPEC_SESSION_ID: '', CLAUDE_SESSION_ID: '' });
+  try {
+    await session.request('initialize', {
+      protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'memspec-test', version: '0.0.0' },
+    });
+    session.notify('notifications/initialized', {});
+    await session.request('tools/call', { name: 'memspec_search', arguments: { query: 'Server-side' } });
+    await session.request('tools/call', { name: 'memspec_search', arguments: { query: 'Server-side' } });
+  } finally {
+    await session.close();
+  }
+  const rows = (await readFile(join(target, '.memspec', 'usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].session, /^mcp:\d+$/);
+  assert.equal(rows[0].session, rows[1].session, 'same server process, same session');
+});
+
+test('#27: context logs surfaced records with surface "context", into the layer that owns each record', async () => {
+  const base = await makeTempProject();
+  const home = join(base, 'home');
+  const team = join(base, 'team');
+  await runCli(['init', '--cwd', home]);
+  await runCli(['init', '--cwd', team]);
+  const personalId = await firstId((await runCli(['remember', 'fact', 'Personal boot fact', '--cwd', home, '--source', 'test'])).stdout);
+  const teamId = await firstId((await runCli(['remember', 'fact', 'Team boot fact', '--cwd', team, '--source', 'test'])).stdout);
+  await writeFile(join(home, '.memspec', 'config.yaml'), [
+    'stores:',
+    '  - name: personal', '    path: ~/.memspec', '    priority: 10', '    writable: true',
+    '  - name: team', `    path: ${join(team, '.memspec')}`, '    priority: 0', '    writable: false',
+    '',
+  ].join('\n'));
+
+  const out = await runCli(['context', '--cwd', home], undefined, { HOME: home, MEMSPEC_SESSION_ID: 'boot-1' });
+  assert.match(out.stdout, /Personal boot fact/);
+  assert.match(out.stdout, /Team boot fact/);
+
+  const personalRows = (await readFile(join(home, '.memspec', 'usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  const teamRows = (await readFile(join(team, '.memspec', 'usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(personalRows.map((r) => r.id), [personalId]);
+  assert.deepEqual(teamRows.map((r) => r.id), [teamId], 'the team record is logged into the team store, not the primary');
+  for (const row of [...personalRows, ...teamRows]) {
+    assert.equal(row.surface, 'context');
+    assert.equal(row.session, 'boot-1');
+    assert.equal(row.query, undefined);
+  }
+
+  // status against the team store now sees the retrieval.
+  const teamStats = computeUsageStats(join(team, '.memspec')).get(teamId);
+  assert.ok(teamStats?.last_referenced, 'team store has a receipt for its own record');
+  assert.equal(teamStats?.sessions, 1);
 });
 
 test('status Cold and Promotion candidates derive from a hand-written usage.jsonl/outcomes.jsonl', async () => {

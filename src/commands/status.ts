@@ -447,7 +447,12 @@ export function runStatus(options: StatusOptions): string {
     lines.push(`  ... and ${report.cold.length - 10} more`);
   }
 
-  lines.push('', '## Promotion candidates', 'candidates only, nothing auto-promoted');
+  lines.push(
+    '',
+    '## Promotion candidates',
+    'candidates only, nothing auto-promoted',
+    'counts distinct real session ids (MEMSPEC_SESSION_ID / CLAUDE_SESSION_ID / the MCP server); CLI searches without one carry no session and never count',
+  );
   lines.push(`${report.promotion_candidates.length} candidate(s):`);
   for (const c of report.promotion_candidates.slice(0, 10)) {
     lines.push(`  ${c.id} — ${c.title}`);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +8,7 @@ import { validateFrontmatter } from '../src/lib/schema.js';
 import { parseMemoryFile, serializeMemoryFile } from '../src/lib/frontmatter.js';
 import { EDGE_TYPES, expandGraph, isDerived } from '../src/lib/graph-walk.js';
 import { buildLineage } from '../src/lib/lineage.js';
-import { attachEvidence, isFileBackedEvidence, MAX_EVIDENCE_BYTES } from '../src/lib/evidence.js';
+import { attachEvidence, describeEvidenceSource, isFileBackedEvidence, MAX_EVIDENCE_BYTES, validateEvidenceSource } from '../src/lib/evidence.js';
 import { createQuestion, addAnswers, eliminationStatus, resolveQuestion, setClosed, assertAnswerCandidate, QUESTIONS_SUBDIR } from '../src/lib/questions.js';
 import { MemspecStore } from '../src/lib/store.js';
 import type { MemoryFrontmatter, MemoryItem } from '../src/lib/types.js';
@@ -150,7 +150,8 @@ test('S3: attachEvidence copies a local file content-addressed and returns a fil
   assert.ok(entry.sha256 && entry.sha256.length === 64);
   assert.equal(entry.name, 'proof.txt');
   assert.equal(entry.path, `evidence/${entry.sha256!.slice(0, 12)}/proof.txt`);
-  assert.equal(entry.source, src);
+  // #30: never the absolute path — a tmpdir file is neither under $HOME nor in a repo, so no source at all.
+  assert.equal(entry.source, undefined);
   assert.ok(entry.captured_at);
   assert.ok(existsSync(join(root, entry.path!)));
   assert.equal(isFileBackedEvidence(entry), true);
@@ -284,4 +285,88 @@ test('S4: assertAnswerCandidate rejects a retired answer', async () => {
   const a = addClaim(store, 'RetA');
   store.moveToArchive({ ...a }, 'retired');
   assert.throws(() => assertAnswerCandidate(store, a.id), /must be active or superseded/);
+});
+
+// --- Panel remediation: #8/#22, #30, #24 ----------------------------------
+
+test('#8/#22: a symlink pointing into local/ is refused (symlinked source), and a symlinked ancestor directory does not defeat the local/ guard', async () => {
+  const { root } = await freshStore();
+  await mkdir(join(root, 'local'), { recursive: true });
+  const secret = join(root, 'local', 'secrets.env');
+  await writeFile(secret, 'TOP_SECRET=abc\n');
+  const outside = await mkdtemp(join(tmpdir(), 'memspec-ev-link-'));
+
+  await symlink(secret, join(outside, 'notes.txt'));
+  assert.throws(() => attachEvidence(root, join(outside, 'notes.txt')), /refusing symlinked evidence source/);
+
+  await symlink(join(root, 'local'), join(outside, 'ldir'));
+  assert.throws(() => attachEvidence(root, join(outside, 'ldir', 'secrets.env')), /refusing to copy evidence out of the local\/ subtree/);
+
+  // Any symlinked source is refused, even a harmless one: what lands in the
+  // committed evidence/ dir must be what the caller pointed at.
+  const plain = join(outside, 'plain.txt');
+  await writeFile(plain, 'plain');
+  await symlink(plain, join(outside, 'plain-link.txt'));
+  assert.throws(() => attachEvidence(root, join(outside, 'plain-link.txt')), /refusing symlinked evidence source/);
+  assert.equal(existsSync(join(root, 'evidence')), false, 'nothing was copied');
+});
+
+test('#39: validateEvidenceSource decides every refusal without copying; attachEvidence copies only after it passes', async () => {
+  const { root } = await freshStore();
+  const dir = await mkdtemp(join(tmpdir(), 'memspec-ev-val-'));
+  const good = join(dir, 'good.txt');
+  await writeFile(good, 'ok');
+  assert.deepEqual(validateEvidenceSource(root, 'https://example.com/x'), { kind: 'url', url: 'https://example.com/x' });
+  assert.equal(validateEvidenceSource(root, good).kind, 'file');
+  assert.throws(() => validateEvidenceSource(root, join(dir, 'missing.txt')), /evidence file not found/);
+  assert.throws(() => validateEvidenceSource(root, dir), /not a regular file/);
+  assert.equal(existsSync(join(root, 'evidence')), false, 'validation never copies');
+});
+
+test('#30: evidence source is recorded ~-relative under HOME, repo-relative inside a checkout, and omitted otherwise', async () => {
+  const { homedir } = await import('node:os');
+  const home = homedir();
+  assert.equal(describeEvidenceSource(join(home, 'Documents', 'clients', 'x', 'report.pdf')), '~/Documents/clients/x/report.pdf');
+
+  const base = await mkdtemp(join(tmpdir(), 'memspec-ev-src-'));
+  await mkdir(join(base, 'repo', '.git', 'sub'), { recursive: true });
+  await mkdir(join(base, 'repo', 'docs'), { recursive: true });
+  await writeFile(join(base, 'repo', 'docs', 'proof.txt'), 'p');
+  assert.equal(describeEvidenceSource(join(base, 'repo', 'docs', 'proof.txt')), 'repo:docs/proof.txt');
+
+  await writeFile(join(base, 'loose.txt'), 'l');
+  assert.equal(describeEvidenceSource(join(base, 'loose.txt')), undefined);
+
+  const { root } = await freshStore();
+  const entry = attachEvidence(root, join(base, 'repo', 'docs', 'proof.txt'));
+  assert.equal(entry.source, 'repo:docs/proof.txt');
+  assert.equal(entry.name, 'proof.txt');
+  assert.ok(!entry.source!.startsWith('/'));
+});
+
+test('#24: adding a new active answer to a resolved question reopens it (state open, resolved_by cleared); a superseded or already-listed answer does not', async () => {
+  const { store } = await freshStore();
+  const a = addClaim(store, 'Reopen A');
+  const b = addClaim(store, 'Reopen B');
+  const { id: qid } = createQuestion(store, { title: 'Reopen?', answers: [a.id, b.id], closed: true, source: 'test' });
+  store.moveToArchive({ ...store.findById(b.id)!, state: 'superseded' }, 'superseded');
+  resolveQuestion(store, qid);
+  assert.equal(store.findById(qid)!.state, 'resolved');
+  assert.equal(store.findById(qid)!.resolved_by, a.id);
+
+  // Re-adding the survivor, or a superseded answer, leaves resolution alone.
+  addAnswers(store, qid, [a.id]);
+  addAnswers(store, qid, [b.id]);
+  assert.equal(store.findById(qid)!.state, 'resolved');
+  assert.equal(store.findById(qid)!.resolved_by, a.id);
+
+  const c = addClaim(store, 'Reopen C');
+  const updated = addAnswers(store, qid, [c.id]);
+  assert.equal(updated.state, 'open');
+  assert.equal(updated.resolved_by, undefined);
+  const reloaded = store.findById(qid)!;
+  assert.equal(reloaded.state, 'open');
+  assert.equal(reloaded.resolved_by, undefined);
+  assert.deepEqual(reloaded.answers, [a.id, b.id, c.id]);
+  assert.equal(eliminationStatus(reloaded, new Map(store.loadAll().map((i) => [i.id, i]))).state, 'open');
 });

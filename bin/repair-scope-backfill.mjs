@@ -47,6 +47,23 @@ function isOperatorRecord(data) {
   return effectiveSourceKind(data) === 'operator';
 }
 
+// --- legacy state normalisation: parity with src/lib/schema.ts LEGACY_STATE_MAP
+// The runtime maps pre-0.3 states on read; this script reads raw frontmatter,
+// so without the same map a `state: captured` record would be skipped as
+// "no usable state" and silently stay unscoped. Keep in lockstep.
+const LEGACY_STATE_MAP = {
+  captured: 'active',
+  corrected: 'superseded',
+  decayed: 'retired',
+  archived: 'retired',
+};
+
+function effectiveState(data) {
+  return typeof data.state === 'string' && data.state in LEGACY_STATE_MAP
+    ? LEGACY_STATE_MAP[data.state]
+    : data.state;
+}
+
 // --- atomic write + journal, same pattern as repair-inferred-conflicts.mjs --
 
 function writeFileAtomic(file, content) {
@@ -191,7 +208,8 @@ function main() {
     }
     const data = parsed.data;
     if (!data.id) continue; // not a memspec record
-    if (data.state !== 'active' && data.state !== 'superseded') { noState++; continue; }
+    const state = effectiveState(data);
+    if (state !== 'active' && state !== 'superseded') { noState++; continue; }
     if (data.scope !== undefined && data.scope !== null && data.scope !== '') { alreadyScoped++; continue; }
 
     const tags = asIdArray(data.tags);
@@ -258,6 +276,7 @@ function main() {
   }
   if (ambiguous.length > 20) console.log(`  ... and ${ambiguous.length - 20} more`);
   console.log(`[repair:scope-backfill] ${unmatched} record(s) matched no map entry — left untouched`);
+  console.log(`[repair:scope-backfill] ${noState} record(s) in a non-claim state (questions, retired, open/resolved) — not eligible, left untouched`);
   if (skippedOperator.length > 0) {
     console.log(`[repair:scope-backfill] ${skippedOperator.length} operator-sourced record(s) SKIPPED (pass --include-operator to backfill them too):`);
     for (const r of skippedOperator.slice(0, 20)) console.log(`  ${r.id}: would be scope ${r.scope}`);

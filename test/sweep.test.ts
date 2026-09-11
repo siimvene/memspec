@@ -80,3 +80,25 @@ test('sweep reports when nothing is stale', async () => {
   const result = await runCli(['sweep', '--cwd', target]);
   assert.match(result.stdout, /No stale items to sweep/);
 });
+
+test('sweep --answers accepts space-separated lines and warns on unparsable lines and unknown ids', async () => {
+  const { writeFile } = await import('node:fs/promises');
+  const target = await makeTempProject();
+  await setupStaleFact(target);
+  const [factFile] = await readdir(join(target, '.memspec', 'memory', 'facts'));
+  const id = factFile.replace(/\.md$/, '');
+
+  const answers = join(target, 'answers.txt');
+  await writeFile(answers, [
+    `${id}   y`, // spaces, not a tab
+    'this line is garbage',
+    'ms_01ZZZZZZZZZZZZZZZZZZZZZZZZ n',
+    '',
+  ].join('\n'));
+
+  const result = await runCli(['sweep', '--cwd', target, '--answers', answers]);
+  assert.match(result.stdout, /Retired 1 of 1 stale item\(s\)/);
+  assert.match(result.stdout, /WARNING: line 2 ignored \(expected "<id> <y\|n>"\): this line is garbage/);
+  assert.match(result.stdout, /WARNING: ms_01ZZZZZZZZZZZZZZZZZZZZZZZZ matches no stale candidate — ignored/);
+  assert.equal((await readdir(join(target, '.memspec', 'memory', 'facts'))).length, 0);
+});

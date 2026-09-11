@@ -222,7 +222,9 @@ test('mcp search tool returns coverage, coverage_witness and drifted', async () 
     } }).structuredContent;
     assert.ok(sc);
     assert.equal(sc?.coverage, 'ok');
-    assert.equal(sc?.coverage_witness, 'anchor');
+    // The only anchor in the set has drifted, so it witnesses as `evidence`,
+    // not `anchor` (0.11 remediation #36).
+    assert.equal(sc?.coverage_witness, 'evidence');
     assert.equal(sc?.results?.[0]?.drifted, true);
 
     const miss = await session.request('tools/call', {
