@@ -653,8 +653,9 @@ stores:
 ### 12.3 Precedence Rules
 
 When multiple layers contain memories:
-- **Search**: Results from all layers are merged, deduplicated by ID. Higher-priority layers win on ID collisions.
-- **Write**: Writes go to the highest-priority writable layer by default. An explicit layer name may be specified.
+- **Search**: Results from all layers are merged, deduplicated by ID. Higher-priority layers win on ID collisions. A hit served from a non-primary layer carries a `layer: <name>` field (JSON) / `(layer: <name>)` suffix (text); hits from the primary writable layer carry none, so single-store retrieval is byte-identical.
+- **Write**: Writes go to the highest-priority writable layer by default. An explicit layer name may be specified. A write with no explicit target never selects a `writable: false` layer.
+- **Read-only layers (`writable: false`)**: included in every read, refused for every write. An explicit write to such a layer refuses, and an in-place edit of a record it owns (`supersede`, `relate`/`unrelate`, `verify`, `anchor`) refuses, naming the layer — the same way `writeItem` refuses a read-only target. `remember`/`observe` create new records and always land in the writable primary.
 - **Correction**: A correction in any layer marks the target as corrected, regardless of which layer the target lives in.
 
 ### 12.4 Auto-Detection
@@ -685,6 +686,20 @@ ext:
 ```
 
 This is informational — the file's physical location determines its layer, not this field.
+
+### 12.7 Store Resolution (walk-up)
+
+A command resolves its store from `--cwd` (default: process cwd) by walking up the directory tree toward `$HOME`; the first ancestor holding a `.memspec/` directory (or a `.memspec.yaml` pointer) is the store. A session deep in a repo, or in a repo with no store of its own, resolves the nearest real store rather than a phantom empty `<cwd>/.memspec`. The walk is fenced:
+
+- It stops at `$HOME` (inclusive); nothing above `$HOME` is consulted.
+- A cwd outside `$HOME` does not walk — only that directory is checked.
+- `MEMSPEC_NO_WALK=1` disables the walk; `<cwd>/.memspec` is used verbatim.
+- A nearer `.memspec/` directory beats a farther `.memspec.yaml` pointer.
+- A path already ending in `.memspec` (explicit store dir) is used as-is, never walked.
+
+**Scope derives from the original cwd, not the resolved store.** When the walk climbs from a subdirectory up to a repo-root store, the active `scope` is computed from the original cwd against the store's `scopes:` map, so a session in a subdirectory is scoped correctly rather than left unscoped.
+
+`init` warns when the target directory is nested inside an existing store (a `.memspec/` exists up the tree); `--force` creates the nested store anyway.
 
 ---
 

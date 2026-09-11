@@ -17,6 +17,7 @@ import { EDGE_TYPES } from './lib/graph-walk.js';
 import { buildStatusReport, runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
 import { runVerify } from './commands/verify.js';
+import { runQuestion } from './commands/question.js';
 import { homedir } from 'node:os';
 import { CompositeStore } from './lib/composite-store.js';
 import { buildLineage } from './lib/lineage.js';
@@ -46,7 +47,8 @@ function renderSearchText(payload: SearchPayload): string {
       ? ` [via ${item.expanded_via.edge_type} from ${item.expanded_via.from_id} @ hop ${item.expanded_via.hops}]`
       : '';
     const driftTag = item.drifted ? ' [DRIFTED — anchored code changed; verify or supersede]' : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}`);
+    const layerTag = item.layer ? ` (layer: ${item.layer})` : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}${layerTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) lines.push(`  tags: ${item.tags.join(', ')}`);
     if (item.body !== undefined) {
@@ -161,10 +163,22 @@ server.tool(
         refines: item.refines ?? [],
         supports: item.supports ?? [],
         depends_on: item.depends_on ?? [],
+        derived_from: item.derived_from ?? [],
+        // v0.11 — computed: a record with any derived_from edge was inferred.
+        derived: (item.derived_from?.length ?? 0) > 0,
+        requires_human: item.requires_human,
+        evidence: item.evidence,
+        answers: item.answers,
+        closed: item.closed,
+        resolved_by: item.resolved_by,
         valid_from: item.valid_from,
         valid_to: item.valid_to,
         last_referenced: usageStat?.last_referenced,
         sessions: usageStat?.sessions,
+        // v0.11 — the layer this record was served from, set by the composite
+        // only when the store is layered and the record lives in a non-primary
+        // layer (e.g. a read-only team store). Undefined otherwise.
+        layer: item.layer,
         lineage,
         ext: item.ext,
         body: item.body,
@@ -195,13 +209,17 @@ interface RememberArgs {
   refines?: string[];
   supports?: string[];
   depends_on?: string[];
+  derived_from?: string[];
   conflicts_with?: string[];
+  requires_human?: string[];
+  evidence?: string[];
+  answers_question?: string;
   valid_from?: string;
   valid_to?: string;
   scope?: string;
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, anchor_root, check_by, store: storeName, refines, supports, depends_on, conflicts_with, valid_from, valid_to, scope }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, anchor_root, check_by, store: storeName, refines, supports, depends_on, derived_from, conflicts_with, requires_human, evidence, answers_question, valid_from, valid_to, scope }: RememberArgs) {
   try {
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
     const result = runRemember(type, title, {
@@ -220,7 +238,11 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
       refines,
       supports,
       dependsOn: depends_on,
+      derivedFrom: derived_from,
       conflictsWith: conflicts_with,
+      requiresHuman: requires_human,
+      evidence,
+      answersQuestion: answers_question,
       validFrom: valid_from,
       validTo: valid_to,
       scope,
@@ -244,6 +266,10 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
       anchor_warnings: result.anchorWarnings,
       duplicates: result.duplicates ?? null,
       scope: result.scope ?? null,
+      derived: result.derived ?? false,
+      requires_human: result.requiresHuman ?? null,
+      evidence: result.evidence ?? null,
+      answered_question: result.answeredQuestion ?? null,
     };
     if (result.suggestedConflicts) {
       // v0.10 — lexical conflict candidates, SUGGESTION ONLY. The tool does not
@@ -277,7 +303,11 @@ server.tool(
     refines: z.array(z.string()).optional().describe('Memory ids this record refines (forms a typed edge to each target; parent stays valid)'),
     supports: z.array(z.string()).optional().describe('Memory ids this record supports (forms a typed edge — evidence backing the target)'),
     depends_on: z.array(z.string()).optional().describe('Memory ids this record depends on (forms a typed edge — presupposes the target)'),
+    derived_from: z.array(z.string()).optional().describe('Memory ids this record was INFERRED from rather than observed directly (forms a typed edge; the record is then marked derived). Use when the claim is a conclusion drawn from other records, not a direct observation.'),
     conflicts_with: z.array(z.string()).optional().describe('Memory ids this record explicitly contradicts. Caller-asserted only — each target must exist and is marked "asserted" in ext.edge_sources. Use when you have confirmed the contradiction; for mere topic overlap, act on the response\'s suggested_conflicts instead.'),
+    requires_human: z.array(z.string()).optional().describe('Procedures only: step labels or short phrases a human must perform. An unattended runner refuses these steps. Rejected on fact/decision records.'),
+    evidence: z.array(z.string()).optional().describe('Evidence attachments: local file paths (copied, content-addressed, into <store>/evidence/ — refused over 5 MB or from local/) or http(s) URLs (recorded as pointers, never fetched). A file-backed entry witnesses an anchorless claim as `evidence`.'),
+    answers_question: z.string().optional().describe('A question id to register this new record against as a competing answer, in the same call (v0.11 question groups).'),
     valid_from: z.string().optional().describe('ISO 8601 timestamp when the world-state truth becomes valid (v0.5 temporal validity; orthogonal to check_by)'),
     valid_to: z.string().optional().describe('ISO 8601 timestamp when the world-state truth ceases to hold (v0.5 temporal validity; orthogonal to check_by)'),
     scope: z.string().optional().describe('Project scope this record belongs to, e.g. "kleidia". Only readers with that active scope will see it; "universal" marks it visible from every scope. State it explicitly whenever you know which project the knowledge belongs to: this server may have been started with a working directory unrelated to that project, and scope derived from the working directory would then be wrong. Omit it to fall back to working-directory derivation (and to writing no scope at all when nothing matches).'),
@@ -371,12 +401,13 @@ server.tool(
   {
     id: z.string().describe('Memory ID to verify'),
     evidence: z.string().optional().describe('What you checked to confirm this is still true — required when the memory has no code anchors'),
+    evidence_file: z.string().optional().describe('A local file path or http(s) URL attached as committed evidence of the check (same copy path as remember; files copied under <store>/evidence/, URLs recorded as pointers). Satisfies the anchorless-witness requirement on its own.'),
     source: z.string().optional().describe('Who is verifying'),
     check_by: z.string().optional().describe('ISO 8601 timestamp or "never" — set check_by explicitly on this clean verification instead of resetting to the type default'),
   },
-  async ({ id, evidence, source, check_by }) => {
+  async ({ id, evidence, evidence_file, source, check_by }) => {
     try {
-      const result = runVerify(id, { cwd: defaultCwd, evidence, source, checkBy: check_by });
+      const result = runVerify(id, { cwd: defaultCwd, evidence, evidenceFile: evidence_file, source, checkBy: check_by });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
@@ -571,6 +602,58 @@ server.tool(
           include_superseded: include_superseded === true,
           types: types ?? ['fact', 'decision', 'procedure'],
           output: out,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_question',
+  'Create or edit a question group — a named question with competing answer records, the preferred form when two or more records answer one question (clearer than pairwise conflicts_with). Create: pass a `title` plus `answers` (existing record ids; each must be active or superseded); add `closed: true` for a closed-world question whose answers are the only candidates. Edit an existing question by passing its `id` with exactly one of: `add` (more answer ids), `close`/`open` (toggle closed-world), or `resolve` (settle it — requires exactly one answer still active, the survivor). A closed question with one surviving active answer is reported "resolved by elimination" in memspec_status; resolution is never automatic.',
+  {
+    title: z.string().optional().describe('The question text (create only). Omit when editing an existing question by id.'),
+    id: z.string().optional().describe('Existing question id to edit (with add/close/open/resolve). Omit when creating.'),
+    answers: z.array(z.string()).optional().describe('Create: competing answer record ids (each must exist and be active or superseded).'),
+    closed: z.boolean().optional().describe('Create: mark the question closed-world (its answers are the only candidates).'),
+    add: z.array(z.string()).optional().describe('Edit: answer ids to add to the question.'),
+    close: z.boolean().optional().describe('Edit: mark the question closed-world.'),
+    open: z.boolean().optional().describe('Edit: mark the question open-world.'),
+    resolve: z.boolean().optional().describe('Edit: resolve the question (requires exactly one active answer; sets state=resolved, resolved_by=survivor).'),
+    source: z.string().optional().describe('Who is asking (create only; defaults to the connected client name).'),
+    tags: z.array(z.string()).optional().describe('Tags (create only).'),
+    scope: z.string().optional().describe('Project scope for the question (create only).'),
+  },
+  async ({ title, id, answers, closed, add, close, open, resolve, source, tags, scope }) => {
+    try {
+      const isMutate = Boolean(add?.length || close || open || resolve);
+      const titleOrId = isMutate ? id : title;
+      if (!titleOrId) {
+        throw new Error(isMutate ? 'editing a question requires its id' : 'creating a question requires a title');
+      }
+      const result = runQuestion(titleOrId, {
+        cwd: defaultCwd,
+        answers,
+        closed,
+        add,
+        close,
+        open,
+        resolve,
+        source: source ?? server.server.getClientVersion()?.name,
+        tags: tags?.join(','),
+        scope,
+      });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          id: result.id,
+          action: result.action,
+          state: result.state,
+          closed: result.closed,
+          answers: result.answers,
+          survivor: result.survivor ?? null,
         },
       };
     } catch (err) {

@@ -6,6 +6,8 @@ import { MemspecStore } from '../lib/store.js';
 import { findDecayCandidates } from '../lib/decay.js';
 import { validateFrontmatter } from '../lib/schema.js';
 import { computeUsageStats, type UsageStatsEntry } from '../lib/usage-stats.js';
+import { eliminationStatus } from '../lib/questions.js';
+import { isFileBackedEvidence } from '../lib/evidence.js';
 import type { MemoryItem } from '../lib/types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -40,6 +42,22 @@ export interface UsageSurfaceEntry {
   title: string;
 }
 
+/**
+ * v0.11 — one question group's state, computed at read time against current
+ * answer states. `report` is the human-facing one-line disposition.
+ */
+export interface QuestionReportEntry {
+  id: string;
+  title: string;
+  closed: boolean;
+  state: 'open' | 'resolved';
+  candidates: number;
+  survivor?: string;
+  resolved_by?: string;
+  resolvableByElimination: boolean;
+  report: string;
+}
+
 export interface StatusReport {
   root: string;
   byType: Record<string, number>;
@@ -65,6 +83,10 @@ export interface StatusReport {
    * here is auto-promoted.
    */
   promotion_candidates: UsageSurfaceEntry[];
+  /** v0.11 — count of active records with at least one file-backed evidence attachment. */
+  evidence_backed: number;
+  /** v0.11 — question groups and their elimination disposition. */
+  questions: QuestionReportEntry[];
 }
 
 function walk(dir: string): string[] {
@@ -248,6 +270,51 @@ function findPromotionCandidates(items: MemoryItem[], stats: Map<string, UsageSt
   return result;
 }
 
+/**
+ * v0.11 — question groups with their elimination disposition. A closed question
+ * with exactly one active answer is reported "resolved by elimination"; an
+ * already-resolved one names its resolved_by; everything else is "open".
+ * Never mutates — resolution is an explicit `memspec question --resolve`.
+ */
+function buildQuestionReport(items: MemoryItem[]): QuestionReportEntry[] {
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const out: QuestionReportEntry[] = [];
+  for (const item of items) {
+    if (item.kind !== 'question') continue;
+    const status = eliminationStatus(item, byId);
+    let report: string;
+    if (status.state === 'resolved') {
+      report = `resolved — resolved_by ${item.resolved_by ?? 'unknown'}`;
+    } else if (status.resolvableByElimination) {
+      report = `resolved by elimination — survivor ${status.survivor}`;
+    } else {
+      report = `open — ${status.activeAnswers.length} candidate(s)`;
+    }
+    out.push({
+      id: item.id,
+      title: item.title,
+      closed: status.closed,
+      state: status.state,
+      candidates: status.activeAnswers.length,
+      survivor: status.survivor ?? undefined,
+      resolved_by: item.resolved_by,
+      resolvableByElimination: status.resolvableByElimination,
+      report,
+    });
+  }
+  return out;
+}
+
+/** v0.11 — active records carrying at least one file-backed evidence attachment. */
+function countEvidenceBacked(items: MemoryItem[]): number {
+  let n = 0;
+  for (const item of items) {
+    if (item.state !== 'active') continue;
+    if (item.evidence?.some(isFileBackedEvidence)) n++;
+  }
+  return n;
+}
+
 export function buildStatusReport(options: StatusOptions): { store: MemspecStore; report: StatusReport } {
   const store = new MemspecStore(options.cwd);
   const items = store.loadAll();
@@ -277,6 +344,8 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
   const usageStats = computeUsageStats(store.root);
   const cold = findCold(items, usageStats);
   const promotionCandidates = findPromotionCandidates(items, usageStats);
+  const questions = buildQuestionReport(items);
+  const evidenceBacked = countEvidenceBacked(items);
 
   return {
     store,
@@ -294,6 +363,8 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
       warnings: store.warnings.length,
       cold,
       promotion_candidates: promotionCandidates,
+      evidence_backed: evidenceBacked,
+      questions,
     },
   };
 }
@@ -383,6 +454,24 @@ export function runStatus(options: StatusOptions): string {
   }
   if (report.promotion_candidates.length > 10) {
     lines.push(`  ... and ${report.promotion_candidates.length - 10} more`);
+  }
+
+  if (report.evidence_backed > 0) {
+    lines.push('', `${report.evidence_backed} active record(s) backed by committed evidence.`);
+  }
+
+  lines.push('', '## Questions');
+  if (report.questions.length === 0) {
+    lines.push('no question groups');
+  } else {
+    lines.push(`${report.questions.length} question group(s):`);
+    for (const q of report.questions.slice(0, 10)) {
+      lines.push(`  ${q.id} [${q.closed ? 'closed' : 'open'}-world] ${q.report}`);
+      lines.push(`    ${q.title}`);
+    }
+    if (report.questions.length > 10) {
+      lines.push(`  ... and ${report.questions.length - 10} more`);
+    }
   }
 
   const recent = store

@@ -1,13 +1,17 @@
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import { checkAnchors, getCodeAnchors, projectRootForStore, type AnchorStatus } from '../lib/anchors.js';
 import { getProbe } from '../lib/probe.js';
+import { attachEvidence } from '../lib/evidence.js';
+import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { effectiveSourceKind } from '../lib/source.js';
-import { DEFAULT_DECAY_DAYS, type VerifiedWith } from '../lib/types.js';
+import { DEFAULT_DECAY_DAYS, type EvidenceEntry, type VerifiedWith } from '../lib/types.js';
 
 export interface VerifyOptions {
   cwd?: string;
   evidence?: string;
+  /** v0.11 — a local file path or http(s) URL attached as committed evidence (same copy path as remember). */
+  evidenceFile?: string;
   source?: string;
   /**
    * ISO 8601 timestamp or "never" — set check_by explicitly on this clean
@@ -29,7 +33,13 @@ export interface VerifyResult {
 }
 
 export function runVerify(id: string, options: VerifyOptions): VerifyResult {
-  const store = new MemspecStore(options.cwd);
+  // A successful verify rewrites the record (check_by/last_verified/witness), so
+  // it is a mutation and must refuse a record living in a read-only store layer,
+  // naming the layer — the same C2 guard supersede/relate/anchor apply. A
+  // non-layered store resolves to its single writable layer, so the resolved
+  // store is byte-identical to `new MemspecStore(options.cwd)`.
+  const owner = CompositeStore.forCwd(options.cwd).assertWritableLayerForId(id);
+  const store = owner ? owner.store : new MemspecStore(options.cwd);
   const item = store.findById(id);
 
   if (!item) throw new Error(`Memory not found: ${id}`);
@@ -45,11 +55,18 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   const anchors = getCodeAnchors(item);
   const probe = getProbe(item);
 
+  // v0.11 — an attached evidence file/URL is committed proof of the check, so it
+  // satisfies the anchorless-witness requirement the same way --evidence text
+  // does. Copy it now (before the refusal) so a file-backed entry counts.
+  const attachedEvidence: EvidenceEntry | undefined = options.evidenceFile
+    ? attachEvidence(store.root, options.evidenceFile)
+    : undefined;
+
   // An anchorless verify has no mechanical witness — without evidence text it
   // is the system trusting its own output. Refuse it. A stored probe does NOT
   // substitute: verify never executes probes (see below), so an unexercised
   // probe witnesses nothing.
-  if (anchors.length === 0 && !options.evidence?.trim()) {
+  if (anchors.length === 0 && !options.evidence?.trim() && !attachedEvidence) {
     throw new Error(
       `${id} has no code anchors — anchorless verification requires --evidence "what you checked". ` +
       (probe
@@ -135,6 +152,11 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   else if (options.source && effectiveSourceKind({ source: options.source }) === 'operator') verifiedWith = 'operator';
   else verifiedWith = 'evidence';
 
+  // v0.11 — append any attached evidence to the record's committed evidence list.
+  const evidence = attachedEvidence
+    ? [...(item.evidence ?? []), attachedEvidence]
+    : item.evidence;
+
   store.updateItem({
     ...item,
     check_by: checkBy,
@@ -142,6 +164,7 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     verified_with: verifiedWith,
     // A successful verify re-witnesses the claim: the stale flag is resolved.
     stale: undefined,
+    evidence,
     ext,
   });
 

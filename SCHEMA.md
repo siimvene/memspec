@@ -22,7 +22,7 @@ field/state names into this v0.3+ shape before validation.
 
 ### `kind`
 
-- **Type:** enum: `claim` \| `observation`
+- **Type:** enum: `claim` \| `observation` \| `question`
 - **Required:** no
 - **Default:** `"claim"`
 - **Description:** `claim` for fact/decision/procedure memories; `observation` for point-in-time notes that index a moment and expire rather than going stale.
@@ -31,13 +31,13 @@ field/state names into this v0.3+ shape before validation.
 
 - **Type:** enum: `fact` \| `decision` \| `procedure`
 - **Required:** no
-- **Description:** Classification for claims (`fact` | `decision` | `procedure`); required when `kind: claim`, omitted on observations.
+- **Description:** Classification for claims (`fact` | `decision` | `procedure`); required when `kind: claim`, omitted on observations and questions.
 
 ### `state`
 
-- **Type:** enum: `active` \| `superseded` \| `retired`
+- **Type:** enum: `active` \| `superseded` \| `retired` \| `open` \| `resolved`
 - **Required:** yes
-- **Description:** Lifecycle state: `active` (current), `superseded` (replaced by another record), or `retired` (no longer relevant).
+- **Description:** Lifecycle state for claims/observations: `active` (current), `superseded` (replaced), or `retired` (no longer relevant). Questions instead use `open` (answer undecided) or `resolved` (settled).
 
 ## Provenance
 
@@ -170,6 +170,48 @@ field/state names into this v0.3+ shape before validation.
 - **Required:** no
 - **Description:** Ids of notes this record presupposes — a knowledge or chronological dependency (v0.4 named link).
 
+### `derived_from`
+
+- **Type:** array of `string`
+- **Required:** no
+- **Description:** Ids of records this record was INFERRED from rather than observed directly; a record carrying any is `derived` (v0.11 named link).
+
+## Actuation
+
+### `requires_human`
+
+- **Type:** array of `string`
+- **Required:** no
+- **Description:** Procedures only: step labels or short phrases a human must perform; an unattended runner refuses these steps. Schema error on non-procedure records (v0.11 actuation boundary).
+
+## Evidence
+
+### `evidence`
+
+- **Type:** array of object { sha256, name, path, source, url, captured_at }
+- **Required:** no
+- **Description:** Committed evidence attachments (v0.11 Layer B): content-addressed local file copies under `evidence/`, or http(s) URL pointers recorded without fetching. A file-backed entry witnesses an anchorless claim as `evidence`.
+
+## Question groups
+
+### `answers`
+
+- **Type:** array of `string`
+- **Required:** no
+- **Description:** Questions only: competing answer record ids for this question (v0.11 question groups).
+
+### `closed`
+
+- **Type:** `boolean`
+- **Required:** no
+- **Description:** Questions only: `true` means the listed `answers` are the only candidates (closed-world), enabling resolution by elimination (v0.11 question groups).
+
+### `resolved_by`
+
+- **Type:** `string`
+- **Required:** no
+- **Description:** Questions only: the surviving answer id, set when the question `state` is `resolved` (v0.11 question groups).
+
 ## Extension
 
 ### `ext`
@@ -196,7 +238,7 @@ field/state names into this v0.3+ shape before validation.
 
 ### `MemoryKind`
 
-`claim` \| `observation`
+`claim` \| `observation` \| `question`
 
 ### `MemoryType`
 
@@ -205,6 +247,10 @@ field/state names into this v0.3+ shape before validation.
 ### `LifecycleState`
 
 `active` \| `superseded` \| `retired`
+
+### `QuestionState`
+
+`open` \| `resolved`
 
 ### `SourceKind`
 

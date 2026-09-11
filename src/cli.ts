@@ -20,6 +20,7 @@ import { runSearch, type SearchExpandDepth } from './commands/search.js';
 import { EDGE_TYPES, type EdgeType } from './lib/graph-walk.js';
 import { runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
+import { runQuestion } from './commands/question.js';
 import { runSweep } from './commands/sweep.js';
 import { runVerify } from './commands/verify.js';
 import { loadConfig } from './lib/config.js';
@@ -71,11 +72,15 @@ program
   .option('--supports <id...>', 'memory id this record provides evidence for (repeatable)')
   .option('--depends-on <id...>', 'memory id this record presupposes (knowledge or chronological dependency; repeatable)')
   .option('--conflicts-with <id...>', 'memory id this record explicitly contradicts (caller-asserted; marked asserted in ext.edge_sources; repeatable)')
+  .option('--derived-from <id...>', 'memory id this record was inferred FROM, not observed directly (positive edge; marks the record derived; repeatable)')
+  .option('--requires-human <text...>', 'procedures only: a step label/phrase a human must perform (an unattended runner refuses it; repeatable)')
+  .option('--evidence <path-or-url...>', 'attach committed evidence: a local file (copied into evidence/) or an http(s) URL (recorded, not fetched); repeatable')
+  .option('--answers-question <qid>', 'register this new record as a competing answer to the given question id in the same call')
   .option('--valid-from <iso>', 'ISO 8601 timestamp — world-state truth window starts at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .option('--valid-to <iso>', 'ISO 8601 timestamp — world-state truth window ends at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .action((type: string, title: string, options: {
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; anchorRoot?: string; store?: string; pin?: boolean;
-    refines?: string[]; supports?: string[]; dependsOn?: string[]; conflictsWith?: string[]; validFrom?: string; validTo?: string; scope?: string;
+    refines?: string[]; supports?: string[]; dependsOn?: string[]; conflictsWith?: string[]; derivedFrom?: string[]; requiresHuman?: string[]; evidence?: string[]; answersQuestion?: string; validFrom?: string; validTo?: string; scope?: string;
   }) => {
     const result = runRemember(type, title, {
       cwd: options.cwd,
@@ -95,6 +100,10 @@ program
       supports: options.supports,
       dependsOn: options.dependsOn,
       conflictsWith: options.conflictsWith,
+      derivedFrom: options.derivedFrom,
+      requiresHuman: options.requiresHuman,
+      evidence: options.evidence,
+      answersQuestion: options.answersQuestion,
       validFrom: options.validFrom,
       validTo: options.validTo,
       scope: options.scope,
@@ -185,6 +194,38 @@ program
   });
 
 program
+  .command('question')
+  .description('Create or edit a question group (a named question with competing answer records). Create: pass a title + --answers. Edit an existing question by id with --add / --close / --open / --resolve.')
+  .argument('<title-or-id>', 'question title when creating, or an existing question id when editing (with --add/--close/--open/--resolve)')
+  .option('--cwd <path>', 'project root')
+  .option('--answers <id...>', 'create: competing answer record ids (each must be active or superseded)')
+  .option('--closed', 'create: mark the question closed-world (its answers are the only candidates)')
+  .option('--add <id...>', 'edit: answer ids to add to the question')
+  .option('--close', 'edit: mark the question closed-world')
+  .option('--open', 'edit: mark the question open-world')
+  .option('--resolve', 'edit: resolve the question (requires exactly one active answer; sets state=resolved, resolved_by=survivor)')
+  .option('--source <source>', 'who is asking (create only; "unknown" is rejected)')
+  .option('--tags <tags>', 'comma-separated tags (create only)')
+  .option('--scope <name>', 'project scope for the question (create only)')
+  .action((titleOrId: string, options: {
+    cwd?: string; answers?: string[]; closed?: boolean; add?: string[]; close?: boolean; open?: boolean; resolve?: boolean; source?: string; tags?: string; scope?: string;
+  }) => {
+    const result = runQuestion(titleOrId, {
+      cwd: options.cwd,
+      answers: options.answers,
+      closed: options.closed,
+      add: options.add,
+      close: options.close,
+      open: options.open,
+      resolve: options.resolve,
+      source: options.source,
+      tags: options.tags,
+      scope: options.scope,
+    });
+    console.log(result.message);
+  });
+
+program
   .command('observe')
   .description('Capture a point-in-time observation with hard expiry')
   .argument('<text>', 'observation text (first line becomes the title)')
@@ -203,10 +244,11 @@ program
   .argument('<id>', 'memory ID to verify')
   .option('--cwd <path>', 'project root')
   .option('--evidence <text>', 'free-text reason/source for the verification')
+  .option('--evidence-file <path-or-url>', 'attach committed evidence of the check: a local file (copied into evidence/) or an http(s) URL (recorded, not fetched); satisfies the anchorless-witness requirement')
   .option('--source <source>', 'who is verifying')
   .option('--check-by <value>', 'ISO timestamp or "never" — set explicitly on this clean verification instead of resetting to the type default')
-  .action((id: string, options: { cwd?: string; evidence?: string; source?: string; checkBy?: string }) => {
-    const result = runVerify(id, { cwd: options.cwd, evidence: options.evidence, source: options.source, checkBy: options.checkBy });
+  .action((id: string, options: { cwd?: string; evidence?: string; evidenceFile?: string; source?: string; checkBy?: string }) => {
+    const result = runVerify(id, { cwd: options.cwd, evidence: options.evidence, evidenceFile: options.evidenceFile, source: options.source, checkBy: options.checkBy });
     console.log(result.message);
     if (result.status === 'needs_review') {
       process.exitCode = 1;

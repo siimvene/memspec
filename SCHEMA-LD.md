@@ -33,7 +33,7 @@ Every field in the 2026-07-03 inventory (18 fields, 257 records) is mapped below
 |---|---|---|---|
 | `id` | `@id` (JSON-LD keyword) | — | Standard JSON-LD identity alias. IRI minted from ULID + `@base`. |
 | `type` | `@type` (JSON-LD keyword) | — | Class of the memory. Values become `memspec:Fact`, `memspec:Decision`, `memspec:Procedure`, `memspec:Observation` (all defined in the `@graph`). |
-| `kind` | `memspec:kind` | string | Always `"claim"` in the current store. Preserved for future extensibility (retrospective, hypothesis, etc.). No standard equivalent. |
+| `kind` | `memspec:kind` | string | `claim`, `observation`, or (v0.11) `question` — a question groups competing answers rather than asserting a claim. No standard equivalent. |
 | `state` | `memspec:state` | SKOS Concept IRI | Lifecycle: `active` / `superseded` / `captured`. Defined as SKOS concepts in the `@graph` because they form a controlled vocabulary. |
 | `created` | `dcterms:created` | `xsd:dateTime` | Exact Dublin Core match. |
 | `source` | `prov:wasAttributedTo` | IRI (under `memspec:source/`) | PROV's standard predicate for attribution. String values (`therin`, `therin-2026-06-24`, `openclaw-import`, `claude-code`) coerce to IRIs relative to `memspec:source/`. |
@@ -47,6 +47,12 @@ Every field in the 2026-07-03 inventory (18 fields, 257 records) is mapped below
 | `conflicts_with` | `memspec:conflictsWith` | Set of IRIs | OWL has `owl:differentFrom` but that's for individuals, not claims. Memspec-specific. |
 | `depends_on` | `dcterms:requires` | Set of IRIs | Dublin Core's "the described resource requires the referenced resource" is a clean fit for "this claim/procedure builds on those." |
 | `supports` | `memspec:supports` | Set of IRIs | `prov:wasDerivedFrom` was considered (reverse direction) but the semantics don't match. Memspec-specific. |
+| `derived_from` | `prov:wasDerivedFrom` | Set of IRIs | v0.11. Exact PROV match — this record was inferred from those, not observed directly. A record with any `derived_from` is `derived`. |
+| `requires_human` | `memspec:requiresHuman` | Set of strings | v0.11. Procedures only: step labels a human must perform. No standard fit; the actuation boundary is memspec-specific. |
+| `evidence` | `memspec:evidence` | Set of nested objects | v0.11. Committed evidence attachments: a content-addressed file copy (`sha256`/`name`/`path`/`source`) or an http(s) `url` pointer, each with `captured_at`. |
+| `answers` | `memspec:answers` | Set of IRIs | v0.11. Questions only: the competing answer records for this question group. |
+| `closed` | `memspec:closed` | `xsd:boolean` | v0.11. Questions only: closed-world flag enabling resolution by elimination. |
+| `resolved_by` | `memspec:resolvedBy` | IRI | v0.11. Questions only: the surviving answer id, set when the question is resolved. |
 | `anchors` | `memspec:anchor` | Set of nested objects | Concrete artifacts (file + optional line/sha) the claim points at. Nested context maps `file`, `line`, `sha`, `type` sub-keys. |
 | `ext` | `memspec:ext` | Nested object | Extension bag. See §Extension bag. |
 
@@ -58,6 +64,10 @@ Every field in the 2026-07-03 inventory (18 fields, 257 records) is mapped below
 - `memspec:active` — live memory returned by default queries.
 - `memspec:superseded` — replaced by a newer record; retained for history.
 - `memspec:retired` — no longer relevant. Distinct from superseded — nothing replaces it.
+
+### Question state (`state` on `kind: question`, v0.11)
+- `memspec:open` — the answer is undecided.
+- `memspec:resolved` — one answer has been settled on (named by `resolved_by`).
 
 ### Witness (`verified_with`) — from strongest to weakest
 - `memspec:anchor` — claim points at concrete artifact (file, commit, output).

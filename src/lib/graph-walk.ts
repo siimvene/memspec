@@ -9,11 +9,22 @@ export const EDGE_TYPES = [
   'refines',
   'supports',
   'depends_on',
+  'derived_from',
   'conflicts_with',
   'supersedes',
   'superseded_by',
 ] as const;
 export type EdgeType = typeof EDGE_TYPES[number];
+
+/**
+ * v0.11 — a record is "derived" when it carries at least one `derived_from`
+ * edge: it was inferred from other records rather than observed directly.
+ * Exposed here so the search-coverage classifier (owned elsewhere) can consume
+ * it without re-deriving the rule.
+ */
+export function isDerived(record: Pick<MemoryFrontmatter, 'derived_from'>): boolean {
+  return (record.derived_from?.length ?? 0) > 0;
+}
 
 /**
  * Hard cap on traversal depth. Matches the lineage walker's
@@ -59,6 +70,8 @@ function neighboursAlong(record: MemoryFrontmatter, edgeType: EdgeType): readonl
       return record.supports ?? [];
     case 'depends_on':
       return record.depends_on ?? [];
+    case 'derived_from':
+      return record.derived_from ?? [];
     case 'conflicts_with':
       return record.conflicts_with ?? [];
     case 'supersedes':

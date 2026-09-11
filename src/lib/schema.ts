@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import {
+  ALL_STATES,
   LIFECYCLE_STATES,
   MEMORY_KINDS,
   MEMORY_TYPES,
+  QUESTION_STATES,
   SOURCE_KINDS,
   VERIFIED_WITH,
   type MemoryFrontmatter,
@@ -17,6 +19,15 @@ const codeAnchorSchema = z.object({
   file: z.string().describe('Path relative to the project root (POSIX separators).'),
   sha: z.string().describe('Git blob SHA of the file content at anchor time (as computed by `git hash-object`).'),
   repo: z.string().optional().describe('When set, `file` lives in another repo checked out next to this project (or under a configured search path).'),
+});
+
+const evidenceEntrySchema = z.object({
+  sha256: z.string().optional().describe('sha256 (hex) of the copied file content; content-addresses the entry.'),
+  name: z.string().optional().describe('Basename of the copied file as stored under `evidence/`.'),
+  path: z.string().optional().describe('Path relative to the store root (under `evidence/`) where the file lives.'),
+  source: z.string().optional().describe('Original absolute path the file was copied from.'),
+  url: z.string().optional().describe('http(s) URL, recorded as a pointer without fetching (mutually exclusive with the file fields).'),
+  captured_at: z.string().describe('ISO 8601 timestamp when the evidence was attached.'),
 });
 
 /**
@@ -34,9 +45,9 @@ export const memoryFrontmatterSchema = z.object({
   kind: z.enum(MEMORY_KINDS).default('claim')
     .describe('`claim` for fact/decision/procedure memories; `observation` for point-in-time notes that index a moment and expire rather than going stale.'),
   type: z.enum(MEMORY_TYPES).optional()
-    .describe('Classification for claims (`fact` | `decision` | `procedure`); required when `kind: claim`, omitted on observations.'),
-  state: z.enum(LIFECYCLE_STATES)
-    .describe('Lifecycle state: `active` (current), `superseded` (replaced by another record), or `retired` (no longer relevant).'),
+    .describe('Classification for claims (`fact` | `decision` | `procedure`); required when `kind: claim`, omitted on observations and questions.'),
+  state: z.enum(ALL_STATES)
+    .describe('Lifecycle state for claims/observations: `active` (current), `superseded` (replaced), or `retired` (no longer relevant). Questions instead use `open` (answer undecided) or `resolved` (settled).'),
   created: z.string().refine(
     (s) => !isNaN(Date.parse(s)),
     'Must be a valid ISO 8601 date',
@@ -82,6 +93,18 @@ export const memoryFrontmatterSchema = z.object({
     .describe('Ids of notes this record provides evidence for (v0.4 named link).'),
   depends_on: z.array(z.string()).optional()
     .describe('Ids of notes this record presupposes — a knowledge or chronological dependency (v0.4 named link).'),
+  derived_from: z.array(z.string()).optional()
+    .describe('Ids of records this record was INFERRED from rather than observed directly; a record carrying any is `derived` (v0.11 named link).'),
+  requires_human: z.array(z.string()).optional()
+    .describe('Procedures only: step labels or short phrases a human must perform; an unattended runner refuses these steps. Schema error on non-procedure records (v0.11 actuation boundary).'),
+  evidence: z.array(evidenceEntrySchema).optional()
+    .describe('Committed evidence attachments (v0.11 Layer B): content-addressed local file copies under `evidence/`, or http(s) URL pointers recorded without fetching. A file-backed entry witnesses an anchorless claim as `evidence`.'),
+  answers: z.array(z.string()).optional()
+    .describe('Questions only: competing answer record ids for this question (v0.11 question groups).'),
+  closed: z.boolean().optional()
+    .describe('Questions only: `true` means the listed `answers` are the only candidates (closed-world), enabling resolution by elimination (v0.11 question groups).'),
+  resolved_by: z.string().optional()
+    .describe('Questions only: the surviving answer id, set when the question `state` is `resolved` (v0.11 question groups).'),
   expires: z.string().refine(
     (s) => !isNaN(Date.parse(s)),
     'Must be a valid ISO 8601 date',
@@ -93,8 +116,22 @@ export const memoryFrontmatterSchema = z.object({
   ext: z.record(z.string(), z.unknown()).optional()
     .describe('Extension bag for non-schema fields (e.g. `ext.confirmations`, `ext.last_verification`, `ext.legacy_confidence`). Conventions documented in `src/lib/types.ts`.'),
 }).refine(
-  (data) => data.kind === 'observation' || data.type !== undefined,
+  (data) => data.kind === 'observation' || data.kind === 'question' || data.type !== undefined,
   { message: 'Claims (kind: claim) require a type', path: ['type'] },
+).refine(
+  (data) => data.kind !== 'question' || data.type === undefined,
+  { message: 'Questions (kind: question) do not carry a type', path: ['type'] },
+).refine(
+  (data) => data.kind === 'question'
+    ? (QUESTION_STATES as readonly string[]).includes(data.state)
+    : (LIFECYCLE_STATES as readonly string[]).includes(data.state),
+  { message: 'state must be open|resolved for questions, active|superseded|retired otherwise', path: ['state'] },
+).refine(
+  (data) => data.requires_human === undefined || data.type === 'procedure',
+  { message: 'requires_human is only allowed on type: procedure records', path: ['requires_human'] },
+).refine(
+  (data) => data.kind === 'question' || (data.answers === undefined && data.closed === undefined && data.resolved_by === undefined),
+  { message: 'answers/closed/resolved_by are only allowed on kind: question records', path: ['answers'] },
 );
 
 export type MemoryItemFrontmatter = z.infer<typeof memoryFrontmatterSchema>;

@@ -50,6 +50,24 @@ when the claims are genuinely distinct.
   memory genuinely helped, `memspec_outcome <id> useful` is optional but welcome — it
   feeds `status`'s promotion-candidate surface for young, unverified knowledge.
 
+### Structuring knowledge (v0.11)
+- **`--derived-from <ids>`**: use when a claim is a *conclusion you inferred* from other
+  records, not something you observed directly. It marks the record `derived` so a reader
+  knows to trace the basis rather than trust it as a primary source.
+- **`--requires-human "<step>"`** (procedures only): flag any step you, running unattended,
+  must not perform — a console approval, a physical action, an irreversible production
+  change. A runner refuses these instead of executing them.
+- **`--evidence <path|url>`**: attach committed proof — a benchmark file, a log excerpt, a
+  screenshot (copied into `evidence/`), or a URL to an artifact (recorded, not fetched). A
+  file-backed attachment upgrades an anchorless claim's witness from `assertion` to
+  `evidence`. Never point `--evidence` at anything secret: `evidence/` is committed. Attach
+  the same way at verify time with `verify --evidence-file`.
+- **Question groups** (`memspec_question` / `memspec question`): when two or more records
+  answer one named question, group them instead of wiring pairwise `conflicts_with`. Mark it
+  `--closed` when the listed answers are the only candidates; then as you supersede the
+  losers, `status` reports the survivor and you `--resolve` it. `remember --answers-question
+  <qid>` files a new record straight into the group.
+
 ### Boundaries
 - Don't ask permission for memory upkeep — write, supersede, verify, anchor freely.
   The bar: would a future agent starting cold benefit?

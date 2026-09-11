@@ -1,4 +1,4 @@
-export const MEMORY_KINDS = ['claim', 'observation'] as const;
+export const MEMORY_KINDS = ['claim', 'observation', 'question'] as const;
 export type MemoryKind = typeof MEMORY_KINDS[number];
 
 export const MEMORY_TYPES = ['fact', 'decision', 'procedure'] as const;
@@ -11,6 +11,18 @@ export type MemoryType = typeof MEMORY_TYPES[number];
  */
 export const LIFECYCLE_STATES = ['active', 'superseded', 'retired'] as const;
 export type LifecycleState = typeof LIFECYCLE_STATES[number];
+
+/**
+ * v0.11 question-group states. A question is `open` while its answer is
+ * undecided and `resolved` once one answer has been settled on. Distinct from
+ * the claim/observation lifecycle — a question never goes stale or retires.
+ */
+export const QUESTION_STATES = ['open', 'resolved'] as const;
+export type QuestionState = typeof QUESTION_STATES[number];
+
+/** Every state string the `state` field may carry, across all kinds. */
+export const ALL_STATES = [...LIFECYCLE_STATES, ...QUESTION_STATES] as const;
+export type RecordState = LifecycleState | QuestionState;
 
 /** States produced by pre-0.3 writers, accepted on read and mapped to LIFECYCLE_STATES. */
 export const LEGACY_LIFECYCLE_STATES = ['captured', 'corrected', 'decayed', 'archived'] as const;
@@ -34,7 +46,7 @@ export interface MemoryFrontmatter {
   id: string;
   kind: MemoryKind; // 'claim' for fact/decision/procedure; 'observation' for point-in-time notes
   type?: MemoryType; // claims only — observations have no type
-  state: LifecycleState;
+  state: RecordState;
   created: string;
   source: string;
   source_kind?: SourceKind; // trust tier inferred from source at write time
@@ -60,6 +72,25 @@ export interface MemoryFrontmatter {
   refines?: string[]; // ids this record refines/elaborates on (parent stays valid)
   supports?: string[]; // ids this record provides evidence for
   depends_on?: string[]; // ids this record presupposes (knowledge or chronological dependency)
+  derived_from?: string[]; // v0.11 — ids this record was inferred FROM, not observed directly
+  /**
+   * v0.11 — procedures only. Step labels or short phrases a HUMAN must perform;
+   * an unattended runner refuses these steps. Schema-rejected on non-procedures.
+   */
+  requires_human?: string[];
+  /**
+   * v0.11 — committed evidence layer (Layer B). Each entry is either a
+   * content-addressed local file copied under `<store>/evidence/` (carries
+   * sha256/name/path/source) or an http(s) URL recorded without fetching
+   * (carries url). A file-backed entry witnesses the claim as `evidence`.
+   */
+  evidence?: EvidenceEntry[];
+  /** v0.11 — questions only. Competing answer record ids for this question. */
+  answers?: string[];
+  /** v0.11 — questions only. True = the listed answers are the only candidates (closed world). */
+  closed?: boolean;
+  /** v0.11 — questions only. Set to the surviving answer id when state is `resolved`. */
+  resolved_by?: string;
   expires?: string; // observations only — hard expiry (ISO 8601)
   /** ISO 8601. World-state truth becomes valid at this point. Open-ended if absent. */
   valid_from?: string;
@@ -105,6 +136,24 @@ export interface CodeAnchor {
 export interface ProbeWitness {
   cmd: string;  // shell command executed from the project root
   hash: string; // sha256 (hex) of the command's stdout at baseline time
+}
+
+/**
+ * v0.11 — a committed evidence attachment (Layer B). Two shapes:
+ * - file-backed: `sha256` (hex), `name` (basename), `path` (relative to the
+ *   store root, under `evidence/`), `source` (original absolute path). Copied
+ *   into `<store>/evidence/<sha256[:12]>/<name>`, content-addressed.
+ * - url-backed: `url` (http/https), never fetched — recorded as a pointer.
+ * Both carry `captured_at` (ISO 8601). A file-backed entry witnesses a claim
+ * as `verified_with: evidence` when the record has no anchors.
+ */
+export interface EvidenceEntry {
+  sha256?: string;
+  name?: string;
+  path?: string;
+  source?: string;
+  url?: string;
+  captured_at: string;
 }
 
 export interface MemoryItem extends MemoryFrontmatter {

@@ -26,14 +26,16 @@ test('mcp server lists all memspec tools over stdio', async () => {
     }).tools ?? []);
     const toolNames = tools.map((tool) => tool.name).sort();
 
-    // v0.11 surface (13 tools): v0.10 base (12) + memspec_outcome (usage
-    // receipt outcomes). Phase 7 removed the memspec_add / memspec_correct shims.
+    // v0.11 surface (14 tools): v0.10 base (12) + memspec_outcome (usage
+    // receipt outcomes) + memspec_question (question groups). Phase 7 removed
+    // the memspec_add / memspec_correct shims.
     assert.deepEqual(toolNames, [
       'memspec_anchor',
       'memspec_export',
       'memspec_get',
       'memspec_observe',
       'memspec_outcome',
+      'memspec_question',
       'memspec_reconcile',
       'memspec_relate',
       'memspec_remember',

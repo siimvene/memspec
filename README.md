@@ -92,13 +92,53 @@ States: `active | superseded | retired`. Corrections create a new memory linked 
 
 ## Linked notes
 
-Records reference other records by id in their frontmatter — `refines`, `supports`, `depends_on`, `conflicts_with`, `supersedes`, `superseded_by`. Search can follow these links to surface neighbours alongside direct matches:
+Records reference other records by id in their frontmatter — `refines`, `supports`, `depends_on`, `derived_from`, `conflicts_with`, `supersedes`, `superseded_by`. Search can follow these links to surface neighbours alongside direct matches:
 
 ```bash
 memspec search "v0.5 plan" --expand-edges --expand-depth 1
 ```
 
 Follows the listed ids one hop out and includes the linked notes in results. Each surfaced neighbour carries `expanded_via` showing how it got there. `--include-superseded` lets expansion reach archived predecessors via supersede chains. `--as-of <iso>` filters by `valid_from` / `valid_to` for world-state queries.
+
+### Derived vs observed (`derived_from`, v0.11)
+
+`derived_from` marks a record as *inferred* from other records rather than observed directly — a conclusion, not a measurement. A record carrying any `derived_from` edge is `derived: true` in search/`get` JSON. Like the other positive edges it cannot coexist with a `conflicts_with` to the same target.
+
+```bash
+memspec remember fact "The cache layer is the bottleneck" --source claude-code \
+  --derived-from ms_01AAA… --derived-from ms_01BBB…
+```
+
+## Actuation boundary (`requires_human`, v0.11)
+
+A procedure can flag steps only a human may perform. An unattended runner reads `requires_human` and refuses those steps instead of executing them. It is a procedure-only field (a schema error elsewhere).
+
+```bash
+memspec remember procedure "Rotate the signing key" --source human:siim \
+  --requires-human "approve the rotation in the console" \
+  --requires-human "confirm the new key in the HSM"
+```
+
+## Evidence attachments (`--evidence`, v0.11)
+
+Attach committed proof to a claim. A local file is copied, content-addressed, into `<store>/evidence/<sha256>/…` (refused over 5 MB, or from the machine-local `local/` subtree); an `http(s)` URL is recorded as a pointer and never fetched. A file-backed attachment witnesses an anchorless claim as `evidence` — stronger than a bare assertion. `verify --evidence-file <path>` attaches the same way.
+
+```bash
+memspec remember fact "p99 latency is 40ms under 2k rps" --source claude-code \
+  --evidence ./bench/2026-09-11.json --evidence https://grafana.internal/d/abc
+```
+
+The `evidence/` directory is committed (not gitignored): it holds public/derived artifacts only. Secrets belong in the untracked `local/` subtree, which `--evidence` refuses to copy from.
+
+## Question groups (v0.11)
+
+When two or more records answer one named question, group them instead of wiring pairwise `conflicts_with`. A **closed** question (its listed answers are the only candidates) resolves by elimination: once every answer but one is superseded/retired, `status` reports the survivor. Resolution is never automatic — you confirm it.
+
+```bash
+memspec question "Which DB backs the ledger?" --source siim --answers ms_01AAA… ms_01BBB… --closed
+memspec remember fact "Ledger uses Postgres 16" --source siim --answers-question ms_01QQQ…
+memspec question ms_01QQQ… --resolve     # once one answer survives
+```
 
 ## Code-anchored verification
 
@@ -179,6 +219,22 @@ For manual `.mcp.json` setup:
 memspec init --cwd ~/.memspec
 ```
 
+## Store resolution
+
+Every command resolves which store to use from `--cwd` (defaulting to the process cwd) by **walking up the directory tree**: from the starting directory toward `$HOME`, the first ancestor holding a `.memspec/` directory (or a `.memspec.yaml` pointer) is the store. A session started three directories deep in a repo, or in a repo with no store of its own, resolves the nearest real store instead of a phantom empty `<cwd>/.memspec`.
+
+The walk is fenced:
+
+- **It stops at `$HOME` (inclusive).** A home-rooted `~/.memspec` is found; nothing above `$HOME` is ever consulted.
+- **A cwd outside `$HOME` does not walk at all** — only that directory is checked, matching the pre-walk behaviour.
+- **`MEMSPEC_NO_WALK=1` disables it** entirely: `<cwd>/.memspec` is used verbatim.
+- **A nearer `.memspec/` directory beats a farther `.memspec.yaml` pointer** — the closest store to cwd wins.
+- An explicit store path (one that already ends in `.memspec`, e.g. `MEMSPEC_ROOT=~/.memspec` or `--store global`) is used as-is and never walked.
+
+**Scope derives from the original cwd, not the resolved store.** When the walk climbs from `repo/service/api` up to `repo/.memspec`, the active `scope` is still computed from `repo/service/api` against the store's `scopes:` map — so a session in a subdirectory is scoped correctly rather than left unscoped.
+
+`init` warns when it would create a store nested inside an existing one (a `.memspec/` already exists up the tree); pass `--force` to create the nested store deliberately.
+
 ## Multi-store: pointer files & scope claims
 
 Different orgs lay memory out differently — store beside the code, store in a sibling team repo, one personal umbrella. Two declarations make any layout explicit and keep knowledge from leaking across store boundaries:
@@ -199,6 +255,40 @@ stores:
 ```
 
 Reads fan out across the layers. Writes must be unambiguous: with more than one writable layer in scope, `remember` refuses until you say `--store team` or `--store personal` — a silently-guessed store is how team knowledge ends up in a personal repo.
+
+**Read-only layers (`writable: false`).** A layer marked `writable: false` is included in every read but refuses every write. A write with no explicit `--store` never selects it, and an in-place edit of a record it owns — `supersede`, `relate`/`unrelate`, `verify`, `anchor` — refuses, naming the layer:
+
+```
+"ms_01K…" lives in read-only store layer 'kvart-team' (…); it cannot be modified here.
+```
+
+An explicit `--store kvart-team` write also refuses. This is how a personal store layers a shared team store it should read but never mutate.
+
+**The `layer` field.** A search hit or `memspec_get` result served from a non-primary layer carries `layer: <name>` in JSON, and the CLI/MCP text appends a `(layer: <name>)` suffix. Hits from the primary (writable) layer carry no `layer` — single-store retrieval stays byte-identical.
+
+**Recipe: a personal store layers a read-only team store.** Add a `stores:` block to the personal store's own `config.yaml`, pointing at the team store by absolute path (`~` and absolute paths both work):
+
+```yaml
+# ~/.memspec/config.yaml
+stores:
+  - name: personal
+    path: ~/.memspec          # writable primary
+    priority: 0
+    writable: true
+  - name: kvart-team
+    path: /Users/siim/git/kvart-team-context/.memspec   # read-only team layer
+    priority: 10
+    writable: false
+```
+
+```console
+$ memspec search "meter reading" --limit 3
+[decision] Meter reading estimation from historical data … (assertion) (layer: kvart-team)
+  ms_01KQ5S73FHC7582BZEBFBVYMXJ | 2026-04-26 | siim
+…
+```
+
+Team records surface with `(layer: kvart-team)`; `remember` without `--store` lands in `personal`; any edit of a team record refuses.
 
 **Scope claims.** A store's `config.yaml` declares the working directories whose knowledge it owns:
 
@@ -233,12 +323,14 @@ Records written before scoping existed (or written since without a scope) can be
   memory/
     facts/  decisions/  procedures/        # active, agent-tier
     operator/{facts,decisions,procedures}/ # operator-tier (separate path)
+    questions/                             # question groups (v0.11)
   observations/                            # raw, unclassified
+  evidence/                                # committed evidence attachments (v0.11)
   archive/                                 # superseded + retired
   config.yaml                              # decay, profiles, scopes, stores
 ```
 
-Frontmatter fields per record: `id`, `kind`, `type`, `state`, `source`, `source_kind`, `verified_with` (`anchor | operator | evidence | assertion`), `tags`, `check_by`, `anchors`, `supersedes`, `superseded_by`, `conflicts_with`, `refines`, `supports`, `depends_on`, optional `valid_from` / `valid_to`. Human-readable, git-diffable, greppable.
+Frontmatter fields per record: `id`, `kind` (`claim | observation | question`), `type`, `state`, `source`, `source_kind`, `verified_with` (`anchor | operator | evidence | assertion`), `tags`, `check_by`, `anchors`, `supersedes`, `superseded_by`, `conflicts_with`, `refines`, `supports`, `depends_on`, `derived_from`, optional `requires_human` (procedures), `evidence`, `answers` / `closed` / `resolved_by` (questions), `valid_from` / `valid_to`. Human-readable, git-diffable, greppable.
 
 ## CLI reference
 
@@ -250,7 +342,8 @@ Frontmatter fields per record: `id`, `kind`, `type`, `state`, `source`, `source_
 | `memspec search <query> [--expand-edges] [--include-superseded] [--as-of <iso>]` | Search; optionally follow linked notes |
 | `memspec context [--query] [--limit]` | Token-budgeted memory dump for session-start hooks |
 | `memspec supersede <id> --reason "..." [--body] [--merge-from <ids>]` | Replace, retract, or merge records |
-| `memspec relate --from <id> --to <id> --type <kind>` | Wire a link between records after the fact |
+| `memspec relate --from <id> --to <id> --type <kind>` | Wire a link between records after the fact (`refines\|supports\|depends_on\|derived_from\|conflicts_with`) |
+| `memspec question <title\|id> [--answers <ids>] [--closed] [--add\|--close\|--open\|--resolve]` | Create or edit a question group (competing answers; closed questions resolve by elimination) |
 | `memspec verify <id> [--evidence "..."] [--check-by <iso\|never>]` | Mark a memory still true; checks anchors; `--check-by` pins the next review date explicitly instead of resetting to the type default |
 | `memspec outcome <id> <useful\|dead_end\|corrected> [--note] [--source]` | Record what happened after a retrieved memory was acted on (append-only; never mutates the record) |
 | `memspec anchor <id> <files...>` | Link a memory to file SHAs |

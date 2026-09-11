@@ -26,6 +26,8 @@ export interface Lineage {
   supports_chain: RelationChainEntry[];
   /** v0.4: outward walk of `depends_on` up to RELATION_CHAIN_DEPTH. */
   depends_on_chain: RelationChainEntry[];
+  /** v0.11: outward walk of `derived_from` up to RELATION_CHAIN_DEPTH. */
+  derived_from_chain: RelationChainEntry[];
 }
 
 /**
@@ -54,7 +56,7 @@ function toEntry(item: MemoryItem): LineageEntry {
 function walkRelation(
   seed: MemoryItem,
   byId: Map<string, MemoryItem>,
-  field: 'refines' | 'supports' | 'depends_on',
+  field: 'refines' | 'supports' | 'depends_on' | 'derived_from',
   depth: number = RELATION_CHAIN_DEPTH,
 ): RelationChainEntry[] {
   const out: RelationChainEntry[] = [];
@@ -130,5 +132,6 @@ export function buildLineage(item: MemoryItem, allItems: MemoryItem[]): Lineage 
     refines_chain: walkRelation(item, byId, 'refines'),
     supports_chain: walkRelation(item, byId, 'supports'),
     depends_on_chain: walkRelation(item, byId, 'depends_on'),
+    derived_from_chain: walkRelation(item, byId, 'derived_from'),
   };
 }

@@ -1,0 +1,287 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { validateFrontmatter } from '../src/lib/schema.js';
+import { parseMemoryFile, serializeMemoryFile } from '../src/lib/frontmatter.js';
+import { EDGE_TYPES, expandGraph, isDerived } from '../src/lib/graph-walk.js';
+import { buildLineage } from '../src/lib/lineage.js';
+import { attachEvidence, isFileBackedEvidence, MAX_EVIDENCE_BYTES } from '../src/lib/evidence.js';
+import { createQuestion, addAnswers, eliminationStatus, resolveQuestion, setClosed, assertAnswerCandidate, QUESTIONS_SUBDIR } from '../src/lib/questions.js';
+import { MemspecStore } from '../src/lib/store.js';
+import type { MemoryFrontmatter, MemoryItem } from '../src/lib/types.js';
+
+const ID = 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VB';
+const OTHER = 'ms_01HXK7Y3P5QZJKM8N4R2T6ABC0';
+
+function base(extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: ID,
+    kind: 'claim',
+    type: 'fact',
+    state: 'active',
+    created: '2026-04-04T10:30:00Z',
+    source: 'test',
+    tags: [],
+    check_by: 'never',
+    ...extra,
+  };
+}
+
+async function freshStore(): Promise<{ store: MemspecStore; root: string }> {
+  const target = await mkdtemp(join(tmpdir(), 'memspec-v11-'));
+  const store = new MemspecStore(target);
+  store.init();
+  return { store, root: store.root };
+}
+
+function addClaim(store: MemspecStore, title: string, type: 'fact' | 'decision' | 'procedure' = 'fact'): MemoryItem {
+  const id = `ms_${title.replace(/[^A-Z0-9]/gi, '').toUpperCase().padEnd(26, '0').slice(0, 26)}`;
+  const record: MemoryFrontmatter & { title: string; body: string } = {
+    id,
+    kind: 'claim',
+    type,
+    state: 'active',
+    created: new Date().toISOString(),
+    source: 'test',
+    tags: [],
+    check_by: 'never',
+    title,
+    body: `# ${title}`,
+  };
+  store.writeItem(record);
+  return store.findById(id)!;
+}
+
+// --- S1: requires_human actuation boundary ---
+
+test('S1: requires_human is accepted on a procedure and round-trips', () => {
+  const result = validateFrontmatter(base({ type: 'procedure', requires_human: ['approve in console', 'rotate key'] }));
+  assert.equal(result.success, true);
+
+  const serialized = serializeMemoryFile({
+    ...base({ type: 'procedure', requires_human: ['approve in console'] }) as unknown as MemoryFrontmatter,
+    title: 'Deploy',
+    body: 'Body',
+  });
+  const parsed = parseMemoryFile(serialized, '/dev/null');
+  assert.deepEqual(parsed.requires_human, ['approve in console']);
+});
+
+test('S1: requires_human is rejected on fact and decision', () => {
+  for (const type of ['fact', 'decision'] as const) {
+    const result = validateFrontmatter(base({ type, requires_human: ['nope'] }));
+    assert.equal(result.success, false, `${type} must reject requires_human`);
+  }
+});
+
+test('S1: a record without requires_human still validates (backward compatible)', () => {
+  assert.equal(validateFrontmatter(base({ type: 'procedure' })).success, true);
+});
+
+// --- S2: derived_from edge ---
+
+test('S2: derived_from is accepted, round-trips, and drives isDerived', () => {
+  const result = validateFrontmatter(base({ derived_from: [OTHER] }));
+  assert.equal(result.success, true);
+
+  const serialized = serializeMemoryFile({
+    ...base({ derived_from: [OTHER] }) as unknown as MemoryFrontmatter,
+    title: 'Derived',
+    body: 'Body',
+  });
+  const parsed = parseMemoryFile(serialized, '/dev/null');
+  assert.deepEqual(parsed.derived_from, [OTHER]);
+  assert.equal(isDerived(parsed), true);
+  assert.equal(isDerived({ derived_from: [] }), false);
+  assert.equal(isDerived({}), false);
+});
+
+test('S2: derived_from rejects non-array and non-string elements', () => {
+  assert.equal(validateFrontmatter(base({ derived_from: OTHER })).success, false);
+  assert.equal(validateFrontmatter(base({ derived_from: [123] })).success, false);
+});
+
+test('S2: empty derived_from is omitted by the writer', () => {
+  const serialized = serializeMemoryFile({
+    ...base({ derived_from: [] }) as unknown as MemoryFrontmatter,
+    title: 'X',
+    body: 'B',
+  });
+  assert.equal(/^derived_from:/m.test(serialized), false);
+});
+
+test('S2: derived_from is a walkable edge type and expandGraph follows it', () => {
+  assert.ok((EDGE_TYPES as readonly string[]).includes('derived_from'));
+  const records = new Map<string, MemoryFrontmatter>([
+    [ID, base({ derived_from: [OTHER] }) as unknown as MemoryFrontmatter],
+    [OTHER, base({ id: OTHER }) as unknown as MemoryFrontmatter],
+  ]);
+  const hits = expandGraph([ID], records, { edgeTypes: ['derived_from'], maxDepth: 1 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].id, OTHER);
+  assert.equal(hits[0].edge_type, 'derived_from');
+});
+
+test('S2: lineage exposes derived_from_chain', async () => {
+  const { store } = await freshStore();
+  const a = addClaim(store, 'AncestorD');
+  const bRec: MemoryFrontmatter & { title: string; body: string } = {
+    id: 'ms_0DERIVEDCHILD0000000000000',
+    kind: 'claim', type: 'fact', state: 'active', created: new Date().toISOString(),
+    source: 'test', tags: [], check_by: 'never', derived_from: [a.id], title: 'ChildD', body: '# ChildD',
+  };
+  store.writeItem(bRec);
+  const all = store.loadAll();
+  const seed = all.find((i) => i.id === bRec.id)!;
+  const lineage = buildLineage(seed, all);
+  assert.deepEqual(lineage.derived_from_chain.map((e) => e.id), [a.id]);
+});
+
+// --- S3: evidence attachments ---
+
+test('S3: attachEvidence copies a local file content-addressed and returns a file-backed entry', async () => {
+  const { store, root } = await freshStore();
+  const src = join(await mkdtemp(join(tmpdir(), 'memspec-ev-')), 'proof.txt');
+  await writeFile(src, 'evidence body');
+  const entry = attachEvidence(root, src);
+  assert.ok(entry.sha256 && entry.sha256.length === 64);
+  assert.equal(entry.name, 'proof.txt');
+  assert.equal(entry.path, `evidence/${entry.sha256!.slice(0, 12)}/proof.txt`);
+  assert.equal(entry.source, src);
+  assert.ok(entry.captured_at);
+  assert.ok(existsSync(join(root, entry.path!)));
+  assert.equal(isFileBackedEvidence(entry), true);
+  // Idempotent: same content reuses the same dir.
+  const again = attachEvidence(root, src);
+  assert.equal(again.path, entry.path);
+});
+
+test('S3: an http(s) URL is recorded as a pointer, never fetched', async () => {
+  const { root } = await freshStore();
+  const entry = attachEvidence(root, 'https://example.com/report.pdf');
+  assert.equal(entry.url, 'https://example.com/report.pdf');
+  assert.equal(entry.sha256, undefined);
+  assert.equal(isFileBackedEvidence(entry), false);
+  assert.ok(!existsSync(join(root, 'evidence')));
+});
+
+test('S3: a file over the 5 MB limit is refused', async () => {
+  const { root } = await freshStore();
+  const src = join(await mkdtemp(join(tmpdir(), 'memspec-big-')), 'big.bin');
+  await writeFile(src, Buffer.alloc(MAX_EVIDENCE_BYTES + 1));
+  assert.throws(() => attachEvidence(root, src), /too large/);
+});
+
+test('S3: a source under the store local/ subtree is refused', async () => {
+  const { root } = await freshStore();
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(join(root, 'local'), { recursive: true });
+  const localFile = join(root, 'local', 'secret.txt');
+  await writeFile(localFile, 'secret');
+  assert.throws(() => attachEvidence(root, localFile), /local\//);
+});
+
+test('S3: a file-backed evidence entry validates in frontmatter and round-trips', () => {
+  const entry = { sha256: 'a'.repeat(64), name: 'x.txt', path: 'evidence/aaaaaaaaaaaa/x.txt', source: '/tmp/x.txt', captured_at: '2026-04-04T10:30:00Z' };
+  const result = validateFrontmatter(base({ evidence: [entry] }));
+  assert.equal(result.success, true);
+  const serialized = serializeMemoryFile({
+    ...base({ evidence: [entry, { url: 'https://e.com', captured_at: '2026-04-04T10:30:00Z' }] }) as unknown as MemoryFrontmatter,
+    title: 'E', body: 'B',
+  });
+  const parsed = parseMemoryFile(serialized, '/dev/null');
+  assert.equal(parsed.evidence?.length, 2);
+  assert.equal(parsed.evidence?.[0].sha256, 'a'.repeat(64));
+  assert.equal(parsed.evidence?.[1].url, 'https://e.com');
+});
+
+// --- S4: question groups ---
+
+test('S4: a question validates with open/resolved states and rejects a type', () => {
+  assert.equal(validateFrontmatter({ id: ID, kind: 'question', state: 'open', created: '2026-04-04T10:30:00Z', source: 'test', tags: [], check_by: 'never', answers: [OTHER], closed: true }).success, true);
+  assert.equal(validateFrontmatter({ id: ID, kind: 'question', state: 'resolved', created: '2026-04-04T10:30:00Z', source: 'test', tags: [], check_by: 'never', answers: [OTHER], resolved_by: OTHER }).success, true);
+  // question must not carry a type
+  assert.equal(validateFrontmatter({ id: ID, kind: 'question', type: 'fact', state: 'open', created: '2026-04-04T10:30:00Z', source: 'test', tags: [], check_by: 'never' }).success, false);
+  // question must use an open/resolved state
+  assert.equal(validateFrontmatter({ id: ID, kind: 'question', state: 'active', created: '2026-04-04T10:30:00Z', source: 'test', tags: [], check_by: 'never' }).success, false);
+});
+
+test('S4: claims reject open/resolved states and question-only fields', () => {
+  assert.equal(validateFrontmatter(base({ state: 'open' })).success, false);
+  assert.equal(validateFrontmatter(base({ answers: [OTHER] })).success, false);
+  assert.equal(validateFrontmatter(base({ closed: true })).success, false);
+  assert.equal(validateFrontmatter(base({ resolved_by: OTHER })).success, false);
+});
+
+test('S4: createQuestion writes under memory/questions and validates answers', async () => {
+  const { store, root } = await freshStore();
+  const a = addClaim(store, 'AnsA');
+  const b = addClaim(store, 'AnsB');
+  const { id, filePath } = createQuestion(store, { title: 'Which db?', answers: [a.id, b.id], closed: true, source: 'test' });
+  assert.ok(filePath.includes(join(QUESTIONS_SUBDIR)));
+  assert.ok(existsSync(join(root, QUESTIONS_SUBDIR, `${id}.md`)));
+  const q = store.findById(id)!;
+  assert.equal(q.kind, 'question');
+  assert.equal(q.state, 'open');
+  assert.equal(q.closed, true);
+  assert.deepEqual(q.answers, [a.id, b.id]);
+
+  // A non-existent answer is rejected.
+  assert.throws(() => createQuestion(store, { title: 'Bad', answers: ['ms_00000000000000000000000000'], closed: false, source: 'test' }), /answer not found/);
+});
+
+test('S4: elimination — closed question resolves by elimination, open never does', async () => {
+  const { store } = await freshStore();
+  const a = addClaim(store, 'ElimA');
+  const b = addClaim(store, 'ElimB');
+  const { id } = createQuestion(store, { title: 'Q closed?', answers: [a.id, b.id], closed: true, source: 'test' });
+  const byId0 = new Map(store.loadAll().map((i) => [i.id, i]));
+  assert.equal(eliminationStatus(store.findById(id)!, byId0).resolvableByElimination, false, 'two active answers → not resolvable');
+
+  // Retire B by superseding it (move to archive -> superseded).
+  store.moveToArchive({ ...b }, 'superseded');
+  const byId1 = new Map(store.loadAll().map((i) => [i.id, i]));
+  const closedStatus = eliminationStatus(store.findById(id)!, byId1);
+  assert.equal(closedStatus.resolvableByElimination, true);
+  assert.equal(closedStatus.survivor, a.id);
+
+  // An OPEN-world question with one active answer never resolves by elimination.
+  const openQ = createQuestion(store, { title: 'Q open?', answers: [a.id, b.id], closed: false, source: 'test' });
+  assert.equal(eliminationStatus(store.findById(openQ.id)!, byId1).resolvableByElimination, false);
+});
+
+test('S4: addAnswers, setClosed, and resolveQuestion lifecycle', async () => {
+  const { store } = await freshStore();
+  const a = addClaim(store, 'LcA');
+  const b = addClaim(store, 'LcB');
+  const c = addClaim(store, 'LcC');
+  const { id } = createQuestion(store, { title: 'Lifecycle?', answers: [a.id], closed: false, source: 'test' });
+
+  addAnswers(store, id, [b.id, c.id]);
+  assert.deepEqual(store.findById(id)!.answers, [a.id, b.id, c.id]);
+
+  setClosed(store, id, true);
+  assert.equal(store.findById(id)!.closed, true);
+
+  // Cannot resolve with three active answers.
+  assert.throws(() => resolveQuestion(store, id), /still active/);
+
+  // Supersede b and c → a is the lone survivor.
+  store.moveToArchive({ ...b }, 'superseded');
+  store.moveToArchive({ ...c }, 'superseded');
+  const { survivor } = resolveQuestion(store, id);
+  assert.equal(survivor, a.id);
+  const resolved = store.findById(id)!;
+  assert.equal(resolved.state, 'resolved');
+  assert.equal(resolved.resolved_by, a.id);
+});
+
+test('S4: assertAnswerCandidate rejects a retired answer', async () => {
+  const { store } = await freshStore();
+  const a = addClaim(store, 'RetA');
+  store.moveToArchive({ ...a }, 'retired');
+  assert.throws(() => assertAnswerCandidate(store, a.id), /must be active or superseded/);
+});

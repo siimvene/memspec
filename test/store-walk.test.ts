@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemspecStore } from '../src/lib/store.js';
+import { CompositeStore } from '../src/lib/composite-store.js';
 import { loadConfig } from '../src/lib/config.js';
 import { resolveScopeForCwd } from '../src/lib/scope.js';
 
@@ -121,5 +122,30 @@ test('C1: store resolves from the walk, scope from the ORIGINAL cwd', () => {
     // repo/service/api is scoped `alpha`, not left unscoped.
     const scope = resolveScopeForCwd(loadConfig(store.root).scopes, sub);
     assert.equal(scope, 'alpha');
+  });
+});
+
+test('C1: a nearer .memspec/ dir beats a farther .memspec.yaml pointer', () => {
+  withFakeHome((home) => {
+    const proj = join(home, 'proj');
+    const sub = join(proj, 'service');
+    const deep = join(sub, 'src');
+    mkdirSync(deep, { recursive: true });
+
+    // Farther up: a pointer file that would route resolution elsewhere.
+    const elsewhere = join(home, 'elsewhere', '.memspec');
+    mkdirSync(elsewhere, { recursive: true });
+    writeFileSync(
+      join(proj, '.memspec.yaml'),
+      `stores:\n  - name: elsewhere\n    path: ${elsewhere}\n    priority: 0\n    writable: true\n`,
+    );
+    // Nearer: a real store directory between cwd and the pointer.
+    mkdirSync(join(sub, '.memspec'), { recursive: true });
+
+    // forCwd (the pointer-aware entry point) must resolve the nearer store dir
+    // and never consult the ancestor pointer.
+    const composite = CompositeStore.forCwd(deep);
+    assert.equal(composite.root, join(sub, '.memspec'));
+    assert.equal(composite.layers.length, 1, 'nearer store is a single unlayered store, not the pointer layers');
   });
 });

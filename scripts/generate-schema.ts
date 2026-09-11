@@ -22,6 +22,7 @@ import {
   LIFECYCLE_STATES,
   MEMORY_KINDS,
   MEMORY_TYPES,
+  QUESTION_STATES,
   SOURCE_KINDS,
   VERIFIED_WITH,
 } from '../src/lib/types.js';
@@ -61,7 +62,20 @@ const FIELD_GROUPS: Array<{ title: string; fields: string[] }> = [
       'refines',
       'supports',
       'depends_on',
+      'derived_from',
     ],
+  },
+  {
+    title: 'Actuation',
+    fields: ['requires_human'],
+  },
+  {
+    title: 'Evidence',
+    fields: ['evidence'],
+  },
+  {
+    title: 'Question groups',
+    fields: ['answers', 'closed', 'resolved_by'],
   },
   {
     title: 'Extension',
@@ -235,6 +249,8 @@ function generate(): string {
   out.push(renderEnum('MemoryType', MEMORY_TYPES));
   out.push('');
   out.push(renderEnum('LifecycleState', LIFECYCLE_STATES));
+  out.push('');
+  out.push(renderEnum('QuestionState', QUESTION_STATES));
   out.push('');
   out.push(renderEnum('SourceKind', SOURCE_KINDS));
   out.push('');

@@ -6,7 +6,7 @@ import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
 import { type SearchRelevanceMeta, type StoreSearchOptions } from '../lib/store.js';
 import { type DriftStatus } from '../lib/drift.js';
-import { MEMORY_TYPES, type LifecycleState, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
+import { MEMORY_TYPES, type MemoryItem, type MemoryType, type RecordState, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits, type UsageSurface } from '../lib/usage.js';
 import { computeUsageStats } from '../lib/usage-stats.js';
 
@@ -95,9 +95,10 @@ export interface SearchResult {
    * v0.6 Phase 1 — lifecycle state of the surfaced record. Seeds are always
    * `active`; expansion hits may be `superseded` when `includeSuperseded`
    * is set. Surfaced on every row so callers can distinguish current claims
-   * from archive context without a second lookup.
+   * from archive context without a second lookup. Widened to `RecordState`
+   * so it stays assignable from `MemoryItem.state` as the schema grows.
    */
-  state: LifecycleState;
+  state: RecordState;
   verified_with: VerifiedWith;
   created: string;
   last_verified: string;
@@ -131,6 +132,14 @@ export interface SearchResult {
   last_referenced?: string;
   /** v0.11 — distinct session count that retrieved this id, when known. */
   sessions?: number;
+  /**
+   * v0.11 — the store layer this hit came from, when the store is layered and
+   * the hit is served from a NON-primary layer (e.g. a read-only team store).
+   * Absent on hits from the primary/writable layer and on every single-store
+   * read, so single-store retrieval stays byte-identical. Propagated straight
+   * from `MemoryItem.layer`, which `CompositeStore.stampLayer` sets.
+   */
+  layer?: string;
 }
 
 /**
@@ -285,6 +294,12 @@ function buildResultRow(
     depends_on: item.depends_on ?? [],
     preview: previewFromBody(item.body),
   };
+
+  // Read-time only: present when the composite served this record from a
+  // non-primary layer. Never serialized back to frontmatter.
+  if (item.layer !== undefined) {
+    result.layer = item.layer;
+  }
 
   if (full) {
     const cost = estimateTokens(item.body);
@@ -623,6 +638,7 @@ export function runSearch(query: string, options: SearchOptions): string {
       ...(r.drift !== undefined ? { drift: r.drift } : {}),
       ...(r.last_referenced !== undefined ? { last_referenced: r.last_referenced } : {}),
       ...(r.sessions !== undefined ? { sessions: r.sessions } : {}),
+      ...(r.layer !== undefined ? { layer: r.layer } : {}),
       conflicts_with: r.conflicts_with,
       refines: r.refines,
       supports: r.supports,
@@ -644,7 +660,11 @@ export function runSearch(query: string, options: SearchOptions): string {
       ? ` [via ${item.expanded_via.edge_type} from ${item.expanded_via.from_id} @ hop ${item.expanded_via.hops}]`
       : '';
     const driftTag = item.drifted ? ' [DRIFTED — anchored code changed; verify or supersede]' : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}`);
+    // `layer` is stamped only on hits from a non-primary layer, which only
+    // exist when the store is layered — so the suffix appears exactly when
+    // more than one layer is configured.
+    const layerTag = item.layer ? ` (layer: ${item.layer})` : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}${layerTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) {
       lines.push(`  tags: ${item.tags.join(', ')}`);

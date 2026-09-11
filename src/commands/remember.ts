@@ -11,7 +11,9 @@ import { effectiveSourceKind, inferSourceKind } from '../lib/source.js';
 import { findPointer, POINTER_FILENAME, resolveLayerPath } from '../lib/registry.js';
 import { assertKnownScope, assertScopeRequired, resolveScopeForCwd } from '../lib/scope.js';
 import { MemspecStore } from '../lib/store.js';
-import { MEMORY_TYPES, type CodeAnchor, type MemoryType, type VerifiedWith } from '../lib/types.js';
+import { attachEvidence, isFileBackedEvidence } from '../lib/evidence.js';
+import { addAnswers } from '../lib/questions.js';
+import { MEMORY_TYPES, type CodeAnchor, type EvidenceEntry, type MemoryType, type VerifiedWith } from '../lib/types.js';
 
 export interface RememberOptions {
   cwd?: string;
@@ -42,6 +44,14 @@ export interface RememberOptions {
   refines?: string[];
   supports?: string[];
   dependsOn?: string[];
+  /** v0.11 — ids this record was inferred FROM (positive edge; a record with any is `derived`). */
+  derivedFrom?: string[];
+  /** v0.11 — procedures only: step labels/phrases a human must perform. Rejected on non-procedures. */
+  requiresHuman?: string[];
+  /** v0.11 — evidence attachments: local file paths (copied under evidence/) or http(s) URLs (recorded, not fetched). */
+  evidence?: string[];
+  /** v0.11 — add the freshly-written record as an answer to this question id in the same call. */
+  answersQuestion?: string;
   /**
    * v0.10 — ids this record explicitly CONFLICTS WITH. Caller-asserted, unlike
    * the removed mid-band auto-attach: each target is validated to exist and
@@ -94,6 +104,14 @@ export interface RememberResult {
   suggestedConflicts?: SuggestedConflict[];
   /** Scope stamped on the record; absent when nothing matched and nothing was passed. */
   scope?: string;
+  /** v0.11 — evidence entries attached to the record (file copies + URL pointers). */
+  evidence?: EvidenceEntry[];
+  /** v0.11 — true when the record carries a derived_from edge. */
+  derived?: boolean;
+  /** v0.11 — step labels a human must perform (procedures only). */
+  requiresHuman?: string[];
+  /** v0.11 — the question id this record was added to as an answer, when requested. */
+  answeredQuestion?: string;
 }
 
 /**
@@ -183,6 +201,13 @@ function resolveAnchors(
 export function runRemember(typeInput: string, title: string, options: RememberOptions): RememberResult {
   const type = assertMemoryType(typeInput);
 
+  // S1 — actuation boundary. requires_human is a procedure-only field; refuse
+  // it early with a friendly message rather than letting the schema reject the
+  // written frontmatter after the fact.
+  if (options.requiresHuman && options.requiresHuman.length > 0 && type !== 'procedure') {
+    throw new Error(`--requires-human is only valid on a procedure (got ${type})`);
+  }
+
   const source = options.source?.trim();
   if (!source || source.toLowerCase() === 'unknown') {
     throw new Error(
@@ -262,7 +287,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // Caller-asserted conflicts_with targets count as declared too (M2): they
     // are excluded from suggestions below, so widen the window by their count
     // as well or a genuine different conflict could be pushed out of it.
-    const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0) + (options.conflictsWith?.length ?? 0);
+    const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0) + (options.derivedFrom?.length ?? 0) + (options.conflictsWith?.length ?? 0);
     const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
 
     // High band — exact-title refusal. The v0.3 dedup-refusal promise lives
@@ -289,6 +314,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       ...(options.refines ?? []),
       ...(options.supports ?? []),
       ...(options.dependsOn ?? []),
+      ...(options.derivedFrom ?? []),
       // A target the caller is asserting a conflict with is already classified;
       // re-suggesting it as a conflict is noise (M2).
       ...(options.conflictsWith ?? []),
@@ -353,12 +379,25 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       })
     : { anchors: [] as CodeAnchor[], warnings: [] as string[] };
 
-  // Witness: anchors present and resolved → anchor; operator source → operator; else assertion.
+  // S3 — evidence attachments. Local files are copied under <store>/evidence/;
+  // http(s) URLs are recorded as pointers, never fetched. Done before witness
+  // resolution so a file-backed entry can promote an anchorless assertion.
+  const evidenceEntries: EvidenceEntry[] = [];
+  for (const item of options.evidence ?? []) {
+    evidenceEntries.push(attachEvidence(store.root, item));
+  }
+  const hasFileEvidence = evidenceEntries.some(isFileBackedEvidence);
+
+  // Witness (descending strength anchor > operator > evidence > assertion):
+  // anchors resolved → anchor; operator source → operator; file-backed evidence
+  // → evidence; else assertion.
   let verifiedWith: VerifiedWith = 'assertion';
   if (anchorResolution.anchors.length > 0) {
     verifiedWith = 'anchor';
   } else if (incomingSourceKind === 'operator') {
     verifiedWith = 'operator';
+  } else if (hasFileEvidence) {
+    verifiedWith = 'evidence';
   }
 
   const created = new Date().toISOString();
@@ -413,6 +452,15 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   if (supports) itemData.supports = supports;
   const dependsOn = dedupe(options.dependsOn);
   if (dependsOn) itemData.depends_on = dependsOn;
+  const derivedFrom = dedupe(options.derivedFrom);
+  if (derivedFrom) itemData.derived_from = derivedFrom;
+
+  // v0.11 — procedure-only human-actuation steps (validated above).
+  const requiresHuman = dedupe(options.requiresHuman);
+  if (requiresHuman) itemData.requires_human = requiresHuman;
+
+  // v0.11 — evidence attachments (files already copied above).
+  if (evidenceEntries.length > 0) itemData.evidence = evidenceEntries;
 
   // v0.5 Phase 2 — temporal validity. Validate early so callers see a
   // friendly error instead of a Zod schema dump from the writer.
@@ -442,6 +490,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       ...(options.refines ?? []),
       ...(options.supports ?? []),
       ...(options.dependsOn ?? []),
+      ...(options.derivedFrom ?? []),
     ]);
     for (const targetId of assertedConflicts) {
       if (positiveTargets.has(targetId)) {
@@ -461,9 +510,31 @@ export function runRemember(typeInput: string, title: string, options: RememberO
 
   const filePath = store.writeItem(itemData);
 
+  // v0.11 — register the fresh record as an answer to a question in one call.
+  let answeredQuestion: string | undefined;
+  if (options.answersQuestion) {
+    addAnswers(store, options.answersQuestion, [id]);
+    answeredQuestion = options.answersQuestion;
+  }
+
   const lines = [`Created ${type} memory ${id} at ${filePath}`];
   if (scope) {
     lines.push(`Scope: ${scope}`);
+  }
+  if (requiresHuman) {
+    lines.push(`Requires human: ${requiresHuman.join('; ')}`);
+  }
+  if (derivedFrom) {
+    lines.push(`Derived from: ${derivedFrom.join(', ')}`);
+  }
+  if (evidenceEntries.length > 0) {
+    lines.push(`Evidence (${evidenceEntries.length}):`);
+    for (const e of evidenceEntries) {
+      lines.push(e.url ? `  url ${e.url}` : `  ${e.path} (sha256 ${e.sha256?.substring(0, 12)})`);
+    }
+  }
+  if (answeredQuestion) {
+    lines.push(`Answered question: ${answeredQuestion}`);
   }
   if (anchorResolution.anchors.length > 0) {
     lines.push(`Anchored to ${anchorResolution.anchors.length} file(s):`);
@@ -496,5 +567,9 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     duplicates: duplicates && duplicates.length > 0 ? duplicates : undefined,
     suggestedConflicts: suggestedConflicts && suggestedConflicts.length > 0 ? suggestedConflicts : undefined,
     scope,
+    evidence: evidenceEntries.length > 0 ? evidenceEntries : undefined,
+    derived: derivedFrom ? true : undefined,
+    requiresHuman: requiresHuman ?? undefined,
+    answeredQuestion,
   };
 }

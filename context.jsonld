@@ -78,6 +78,38 @@
             "@type": "@id"
         },
 
+        "derived_from": {
+            "@id": "prov:wasDerivedFrom",
+            "@container": "@set",
+            "@type": "@id"
+        },
+
+        "requires_human": {
+            "@id": "memspec:requiresHuman",
+            "@container": "@set"
+        },
+
+        "evidence": {
+            "@id": "memspec:evidence",
+            "@container": "@set",
+            "@context": {
+                "sha256": "memspec:evidenceSha256",
+                "name": "memspec:evidenceName",
+                "path": "memspec:evidencePath",
+                "source": "memspec:evidenceSource",
+                "url": { "@id": "memspec:evidenceUrl", "@type": "@id" },
+                "captured_at": { "@id": "memspec:evidenceCapturedAt", "@type": "xsd:dateTime" }
+            }
+        },
+
+        "answers": {
+            "@id": "memspec:answers",
+            "@container": "@set",
+            "@type": "@id"
+        },
+        "closed": { "@id": "memspec:closed", "@type": "xsd:boolean" },
+        "resolved_by": { "@id": "memspec:resolvedBy", "@type": "@id" },
+
         "anchors": {
             "@id": "memspec:anchor",
             "@container": "@set",
@@ -127,6 +159,12 @@
             "rdfs:label": "Observation",
             "rdfs:comment": "Short-lived session observation. Decays fast (7d default)."
         },
+        {
+            "@id": "memspec:question",
+            "@type": "rdfs:Class",
+            "rdfs:label": "Question",
+            "rdfs:comment": "A named question grouping competing answer records; closed-world questions resolve by elimination (v0.11)."
+        },
 
         {
             "@id": "memspec:active",
@@ -145,6 +183,18 @@
             "@type": "skos:Concept",
             "skos:prefLabel": "retired",
             "skos:definition": "No longer relevant. Distinct from superseded — nothing replaces it."
+        },
+        {
+            "@id": "memspec:open",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "open",
+            "skos:definition": "Question state: the answer is undecided (v0.11)."
+        },
+        {
+            "@id": "memspec:resolved",
+            "@type": "skos:Concept",
+            "skos:prefLabel": "resolved",
+            "skos:definition": "Question state: one answer has been settled on, named by resolved_by (v0.11)."
         },
 
         {

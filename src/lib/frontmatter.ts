@@ -48,6 +48,12 @@ export function parseMemoryFile(content: string, filePath: string): MemoryItem {
     refines: data.refines,
     supports: data.supports,
     depends_on: data.depends_on,
+    derived_from: data.derived_from,
+    requires_human: data.requires_human,
+    evidence: data.evidence,
+    answers: data.answers,
+    closed: data.closed,
+    resolved_by: data.resolved_by,
     expires: data.expires,
     valid_from: data.valid_from,
     valid_to: data.valid_to,
@@ -86,6 +92,12 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   if (item.refines && item.refines.length > 0) frontmatter.refines = item.refines;
   if (item.supports && item.supports.length > 0) frontmatter.supports = item.supports;
   if (item.depends_on && item.depends_on.length > 0) frontmatter.depends_on = item.depends_on;
+  if (item.derived_from && item.derived_from.length > 0) frontmatter.derived_from = item.derived_from;
+  if (item.requires_human && item.requires_human.length > 0) frontmatter.requires_human = item.requires_human;
+  if (item.evidence && item.evidence.length > 0) frontmatter.evidence = item.evidence;
+  if (item.answers && item.answers.length > 0) frontmatter.answers = item.answers;
+  if (typeof item.closed === 'boolean') frontmatter.closed = item.closed;
+  if (item.resolved_by) frontmatter.resolved_by = item.resolved_by;
   if (item.expires) frontmatter.expires = item.expires;
   if (item.valid_from) frontmatter.valid_from = item.valid_from;
   if (item.valid_to) frontmatter.valid_to = item.valid_to;

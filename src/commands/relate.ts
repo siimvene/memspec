@@ -20,7 +20,7 @@ function writableStoreFor(cwd: string | undefined, id: string): MemspecStore {
  * v0.4: typed edge kinds writable via `memspec_relate`. Mirrors the
  * MemoryFrontmatter relation fields exactly; keep in sync.
  */
-export const RELATION_TYPES = ['refines', 'supports', 'depends_on', 'conflicts_with'] as const;
+export const RELATION_TYPES = ['refines', 'supports', 'depends_on', 'derived_from', 'conflicts_with'] as const;
 export type RelationType = typeof RELATION_TYPES[number];
 
 export const relationTypeSchema = z.enum(RELATION_TYPES);
@@ -99,7 +99,7 @@ export function runRelate(options: RelateOptions): RelateResult {
   // A record must not both conflict with and positively relate to the same
   // target (S2a): that contradiction is exactly what let overlap-repair strand
   // a deliberately-asserted conflict. Refuse before writing, both directions.
-  const POSITIVE_TYPES: RelationType[] = ['refines', 'supports', 'depends_on'];
+  const POSITIVE_TYPES: RelationType[] = ['refines', 'supports', 'depends_on', 'derived_from'];
   if (type === 'conflicts_with') {
     const positiveHit = POSITIVE_TYPES.find((t) => readEdges(from, t).includes(options.to));
     if (positiveHit) {
@@ -148,6 +148,7 @@ function readEdges(item: MemoryItem, type: RelationType): string[] {
     case 'refines': return item.refines ?? [];
     case 'supports': return item.supports ?? [];
     case 'depends_on': return item.depends_on ?? [];
+    case 'derived_from': return item.derived_from ?? [];
     case 'conflicts_with': return item.conflicts_with ?? [];
   }
 }
@@ -157,6 +158,7 @@ function writeEdges(item: MemoryItem, type: RelationType, edges: string[]): Memo
     case 'refines': return { ...item, refines: edges };
     case 'supports': return { ...item, supports: edges };
     case 'depends_on': return { ...item, depends_on: edges };
+    case 'derived_from': return { ...item, derived_from: edges };
     case 'conflicts_with': return { ...item, conflicts_with: edges };
   }
 }

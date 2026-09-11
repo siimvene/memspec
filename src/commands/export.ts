@@ -10,6 +10,7 @@
  *   decision  → diamond, orange
  *   procedure → ellipse, green
  *   file      → octagon, gray (synthetic; one per unique anchor path)
+ *   question  → note, purple (v0.11; filled when resolved)
  *   stale     → dashed border (overlays the type colour)
  *   superseded → filled gray (only present with --include-superseded)
  *
@@ -19,6 +20,8 @@
  *   refines         → blue
  *   supports        → green
  *   depends_on      → purple
+ *   derived_from    → brown, dashed (v0.11; inferred-from, not observed)
+ *   answers         → purple, dotted (v0.11; question → answer record)
  *   anchors_to      → gray, thin    (memory → file synthetic node)
  *
  * Observations are excluded by default — they are point-in-time records, not
@@ -60,13 +63,22 @@ interface FileNode {
   path: string;
 }
 
-type GraphNode = MemoryNode | FileNode;
+interface QuestionNode {
+  kind: 'node';
+  node_type: 'question';
+  id: string;
+  title: string;
+  closed: boolean;
+  state: 'open' | 'resolved';
+}
+
+type GraphNode = MemoryNode | FileNode | QuestionNode;
 
 interface GraphEdge {
   kind: 'edge';
   from: string;
   to: string;
-  type: 'supersedes' | 'conflicts_with' | 'refines' | 'supports' | 'depends_on' | 'anchors_to';
+  type: 'supersedes' | 'conflicts_with' | 'refines' | 'supports' | 'depends_on' | 'derived_from' | 'anchors_to' | 'answers';
 }
 
 interface GraphProjection {
@@ -147,6 +159,9 @@ function project(items: MemoryItem[], includeSuperseded: boolean, typesFilter: M
     for (const target of item.depends_on ?? []) {
       if (includedById.has(target)) addEdge({ kind: 'edge', from: item.id, to: target, type: 'depends_on' });
     }
+    for (const target of item.derived_from ?? []) {
+      if (includedById.has(target)) addEdge({ kind: 'edge', from: item.id, to: target, type: 'derived_from' });
+    }
     for (const target of item.conflicts_with ?? []) {
       if (includedById.has(target)) addEdge({ kind: 'edge', from: item.id, to: target, type: 'conflicts_with' });
     }
@@ -164,6 +179,24 @@ function project(items: MemoryItem[], includeSuperseded: boolean, typesFilter: M
     for (const anchor of item.anchors ?? []) {
       const fileId = addFileNode(anchor.file);
       addEdge({ kind: 'edge', from: item.id, to: fileId, type: 'anchors_to' });
+    }
+  }
+
+  // v0.11 — question groups. Included regardless of the type/state filters
+  // (they organise claims, not classify them); `answers` edges point at the
+  // projected answer records that survived the filter.
+  for (const item of items) {
+    if (item.kind !== 'question') continue;
+    nodes.push({
+      kind: 'node',
+      node_type: 'question',
+      id: item.id,
+      title: item.title,
+      closed: item.closed === true,
+      state: item.state === 'resolved' ? 'resolved' : 'open',
+    });
+    for (const answer of item.answers ?? []) {
+      if (includedById.has(answer)) addEdge({ kind: 'edge', from: item.id, to: answer, type: 'answers' });
     }
   }
 
@@ -197,6 +230,15 @@ function renderJsonl(graph: GraphProjection): string {
         title: node.title,
         type: node.type,
         verified_with: node.verified_with,
+      }));
+    } else if (node.node_type === 'question') {
+      lines.push(JSON.stringify({
+        closed: node.closed,
+        id: node.id,
+        kind: 'node',
+        node_type: 'question',
+        state: node.state,
+        title: node.title,
       }));
     } else {
       lines.push(JSON.stringify({
@@ -247,6 +289,7 @@ function renderGraphml(graph: GraphProjection): string {
   lines.push('  <key id="verified_with" for="node" attr.name="verified_with" attr.type="string"/>');
   lines.push('  <key id="stale" for="node" attr.name="stale" attr.type="boolean"/>');
   lines.push('  <key id="state" for="node" attr.name="state" attr.type="string"/>');
+  lines.push('  <key id="closed" for="node" attr.name="closed" attr.type="boolean"/>');
   lines.push('  <key id="path" for="node" attr.name="path" attr.type="string"/>');
 
   // Edge attribute declarations.
@@ -264,6 +307,11 @@ function renderGraphml(graph: GraphProjection): string {
       lines.push(`      <data key="verified_with">${escapeXml(node.verified_with)}</data>`);
       lines.push(`      <data key="stale">${node.stale ? 'true' : 'false'}</data>`);
       lines.push(`      <data key="state">${escapeXml(node.state)}</data>`);
+    } else if (node.node_type === 'question') {
+      lines.push(`      <data key="node_type">question</data>`);
+      lines.push(`      <data key="title">${escapeXml(node.title)}</data>`);
+      lines.push(`      <data key="state">${escapeXml(node.state)}</data>`);
+      lines.push(`      <data key="closed">${node.closed ? 'true' : 'false'}</data>`);
     } else {
       lines.push(`      <data key="node_type">file</data>`);
       lines.push(`      <data key="path">${escapeXml(node.path)}</data>`);
@@ -303,6 +351,10 @@ function dotNodeStyle(node: GraphNode): DotNodeStyle {
   if (node.node_type === 'file') {
     return { shape: 'octagon', color: 'gray' };
   }
+  if (node.node_type === 'question') {
+    const style = node.state === 'resolved' ? 'rounded,filled' : 'rounded';
+    return { shape: 'note', color: 'purple', style, fillcolor: node.state === 'resolved' ? 'lavender' : undefined };
+  }
 
   let base: DotNodeStyle;
   switch (node.type) {
@@ -334,6 +386,8 @@ function dotEdgeStyle(type: GraphEdge['type']): DotEdgeStyle {
     case 'refines': return { color: 'blue' };
     case 'supports': return { color: 'green' };
     case 'depends_on': return { color: 'purple' };
+    case 'derived_from': return { color: 'brown', style: 'dashed' };
+    case 'answers': return { color: 'purple', style: 'dotted' };
     case 'anchors_to': return { color: 'gray', penwidth: '0.5' };
   }
 }
@@ -355,7 +409,7 @@ function renderDot(graph: GraphProjection): string {
 
   for (const node of graph.nodes) {
     const style = dotNodeStyle(node);
-    const label = node.node_type === 'memory' ? node.title : node.path;
+    const label = node.node_type === 'file' ? node.path : node.title;
     const attrs = renderDotAttrs({
       label,
       shape: style.shape,
