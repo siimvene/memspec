@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { ulid } from 'ulid';
 import { loadConfig } from '../lib/config.js';
-import { assertKnownScope, resolveScopeForCwd } from '../lib/scope.js';
+import { assertKnownScope, assertScopeRequired, resolveScopeForCwd } from '../lib/scope.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_OBSERVATION_TTL_DAYS } from '../lib/types.js';
 
@@ -91,6 +91,9 @@ export function runObserve(options: ObserveOptions): ObserveResult {
   const scope = options.scope !== undefined
     ? assertKnownScope(config.scopes, options.scope)
     : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
+
+  // F2 — scope enforcement, same rule as `remember`.
+  assertScopeRequired(config.scopes_require, scope, config.scopes, () => store.scopesInUse());
 
   const ttlDays = parseTtlDays(options.ttl);
   const created = new Date();

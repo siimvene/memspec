@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { defaultConfigYaml } from './config.js';
+import { findStoreDirUpward } from './registry.js';
 import { FtsIndex } from './fts.js';
 import { parseMemoryFile, serializeMemoryFile } from './frontmatter.js';
 import { validateFrontmatter } from './schema.js';
@@ -80,7 +81,14 @@ export class MemspecStore {
   readonly root: string;
   readonly warnings: LoadWarning[] = [];
 
-  constructor(root?: string) {
+  /**
+   * @param root  A store directory (`…/.memspec`) used as-is, or a working
+   *   directory that resolves to a store. Undefined resolves from cwd.
+   * @param opts.walk  When false, disables the C1 upward walk: `root` is treated
+   *   strictly as `<root>/.memspec` (append-only, the pre-C1 behaviour). Used by
+   *   `CompositeStore` for explicit layer paths, which must never climb.
+   */
+  constructor(root?: string, opts?: { walk?: boolean }) {
     if (!root) {
       this.root = this.findRoot();
       return;
@@ -91,17 +99,24 @@ export class MemspecStore {
     // global` → homedir) and the MCP server (MEMSPEC_ROOT → store dir) in sync
     // instead of doubling to `~/.memspec/.memspec`.
     const resolved = resolve(root);
-    this.root = basename(resolved) === '.memspec' ? resolved : join(resolved, '.memspec');
+    if (basename(resolved) === '.memspec') {
+      this.root = resolved; // explicit store dir — used as-is, never walked
+      return;
+    }
+    if (opts?.walk === false) {
+      this.root = join(resolved, '.memspec');
+      return;
+    }
+    // C1: an explicit working directory still walks up (bounded to $HOME,
+    // opt-out via MEMSPEC_NO_WALK) so a session in a subdirectory — or in a
+    // repo with no store of its own — resolves the nearest real store instead
+    // of a phantom empty `<cwd>/.memspec`. Falls back to the classic append
+    // when nothing is found within bounds.
+    this.root = findStoreDirUpward(resolved) ?? join(resolved, '.memspec');
   }
 
   private findRoot(): string {
-    let dir = process.cwd();
-    while (dir !== '/') {
-      const candidate = join(dir, '.memspec');
-      if (existsSync(candidate)) return candidate;
-      dir = resolve(dir, '..');
-    }
-    return join(process.cwd(), '.memspec');
+    return findStoreDirUpward(process.cwd()) ?? join(process.cwd(), '.memspec');
   }
 
   get exists(): boolean {

@@ -5,7 +5,14 @@ import { projectRootForStore } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
 import { findDecayCandidates } from '../lib/decay.js';
 import { validateFrontmatter } from '../lib/schema.js';
+import { computeUsageStats, type UsageStatsEntry } from '../lib/usage-stats.js';
 import type { MemoryItem } from '../lib/types.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const COLD_MIN_AGE_DAYS = 30;
+const COLD_UNREFERENCED_DAYS = 60;
+const PROMOTION_MAX_AGE_DAYS = 14;
+const PROMOTION_MIN_SESSIONS = 2;
 
 export interface StatusOptions {
   cwd?: string;
@@ -28,6 +35,11 @@ export interface SweepCandidate {
   reason: string;
 }
 
+export interface UsageSurfaceEntry {
+  id: string;
+  title: string;
+}
+
 export interface StatusReport {
   root: string;
   byType: Record<string, number>;
@@ -40,6 +52,19 @@ export interface StatusReport {
   sweepCandidates: SweepCandidate[];
   total: number;
   warnings: number;
+  /**
+   * v0.11 — active records created > 30 days ago that have either never been
+   * retrieved, or not been retrieved in 60+ days. Named `cold` (not
+   * `coldRecords`) so the MCP JSON surface matches exactly.
+   */
+  cold: UsageSurfaceEntry[];
+  /**
+   * v0.11 — active observations, and facts witnessed only by assertion and
+   * created within the last 14 days, that have been retrieved in >= 2
+   * distinct sessions with zero dead_end outcomes. Candidates only — nothing
+   * here is auto-promoted.
+   */
+  promotion_candidates: UsageSurfaceEntry[];
 }
 
 function walk(dir: string): string[] {
@@ -172,6 +197,57 @@ function findSweepCandidates(items: MemoryItem[]): SweepCandidate[] {
   return result;
 }
 
+/**
+ * Cold: active records created more than 30 days ago that either have no
+ * retrieval history at all, or whose most recent retrieval was more than 60
+ * days ago. Read-side only — never written to frontmatter.
+ */
+function findCold(items: MemoryItem[], stats: Map<string, UsageStatsEntry>): UsageSurfaceEntry[] {
+  const result: UsageSurfaceEntry[] = [];
+  const now = Date.now();
+  for (const item of items) {
+    if (item.state !== 'active') continue;
+    const createdAt = Date.parse(item.created);
+    if (Number.isNaN(createdAt) || now - createdAt <= COLD_MIN_AGE_DAYS * DAY_MS) continue;
+
+    const stat = stats.get(item.id);
+    const neverRetrieved = !stat || !stat.last_referenced;
+    const staleRetrieval = stat?.last_referenced !== undefined
+      && now - Date.parse(stat.last_referenced) > COLD_UNREFERENCED_DAYS * DAY_MS;
+    if (neverRetrieved || staleRetrieval) {
+      result.push({ id: item.id, title: item.title });
+    }
+  }
+  return result;
+}
+
+/**
+ * Promotion candidates: active observations, and facts witnessed only by
+ * assertion and created in the last 14 days, retrieved in >= 2 distinct
+ * sessions with zero dead_end outcomes. "Candidates only, nothing
+ * auto-promoted" — surfacing is the whole feature.
+ */
+function findPromotionCandidates(items: MemoryItem[], stats: Map<string, UsageStatsEntry>): UsageSurfaceEntry[] {
+  const result: UsageSurfaceEntry[] = [];
+  const now = Date.now();
+  for (const item of items) {
+    if (item.state !== 'active') continue;
+
+    const isObservation = item.kind === 'observation';
+    const createdAt = Date.parse(item.created);
+    const isYoungAssertionFact = item.kind === 'claim' && item.type === 'fact'
+      && (item.verified_with ?? 'assertion') === 'assertion'
+      && !Number.isNaN(createdAt) && now - createdAt < PROMOTION_MAX_AGE_DAYS * DAY_MS;
+    if (!isObservation && !isYoungAssertionFact) continue;
+
+    const stat = stats.get(item.id);
+    if (!stat || stat.sessions < PROMOTION_MIN_SESSIONS || stat.dead_end > 0) continue;
+
+    result.push({ id: item.id, title: item.title });
+  }
+  return result;
+}
+
 export function buildStatusReport(options: StatusOptions): { store: MemspecStore; report: StatusReport } {
   const store = new MemspecStore(options.cwd);
   const items = store.loadAll();
@@ -198,6 +274,10 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
   const schemaViolations = scanSchemaViolations(store.root);
   const sweepCandidates = findSweepCandidates(items);
 
+  const usageStats = computeUsageStats(store.root);
+  const cold = findCold(items, usageStats);
+  const promotionCandidates = findPromotionCandidates(items, usageStats);
+
   return {
     store,
     report: {
@@ -212,6 +292,8 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
       sweepCandidates,
       total: items.length,
       warnings: store.warnings.length,
+      cold,
+      promotion_candidates: promotionCandidates,
     },
   };
 }
@@ -283,6 +365,24 @@ export function runStatus(options: StatusOptions): string {
     if (report.schemaViolations.length > 5) {
       lines.push(`  ... and ${report.schemaViolations.length - 5} more`);
     }
+  }
+
+  lines.push('', '## Cold');
+  lines.push(`${report.cold.length} cold record(s) — active, created > 30d ago, never retrieved or not retrieved in 60+ days:`);
+  for (const c of report.cold.slice(0, 10)) {
+    lines.push(`  ${c.id} — ${c.title}`);
+  }
+  if (report.cold.length > 10) {
+    lines.push(`  ... and ${report.cold.length - 10} more`);
+  }
+
+  lines.push('', '## Promotion candidates', 'candidates only, nothing auto-promoted');
+  lines.push(`${report.promotion_candidates.length} candidate(s):`);
+  for (const c of report.promotion_candidates.slice(0, 10)) {
+    lines.push(`  ${c.id} — ${c.title}`);
+  }
+  if (report.promotion_candidates.length > 10) {
+    lines.push(`  ... and ${report.promotion_candidates.length - 10} more`);
   }
 
   const recent = store

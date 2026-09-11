@@ -9,6 +9,14 @@ export interface VerifyOptions {
   cwd?: string;
   evidence?: string;
   source?: string;
+  /**
+   * ISO 8601 timestamp or "never" — set check_by explicitly on this clean
+   * verification instead of resetting it to the type default. "never" is how
+   * an operator pins an identity/event-shaped fact so it never comes up for
+   * review again. Ignored when the verify returns needs_review (nothing is
+   * mutated on that path).
+   */
+  checkBy?: string;
 }
 
 export interface VerifyResult {
@@ -27,6 +35,10 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   if (!item) throw new Error(`Memory not found: ${id}`);
   if (item.state !== 'active') {
     throw new Error(`Cannot verify memory in state: ${item.state} (only active memories can be verified)`);
+  }
+
+  if (options.checkBy !== undefined && options.checkBy !== 'never' && Number.isNaN(Date.parse(options.checkBy))) {
+    throw new Error(`--check-by must be "never" or a valid ISO 8601 timestamp (got "${options.checkBy}")`);
   }
 
   const projectRoot = projectRootForStore(store.root);
@@ -92,13 +104,21 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
 
   const now = new Date().toISOString();
 
-  // Verification resets the check_by clock: TTL counts from now, not from creation.
-  let checkBy = item.check_by;
-  if (checkBy !== 'never') {
-    const expires = new Date();
-    const days = item.type ? getDecayDays(config, item.type) : DEFAULT_DECAY_DAYS.fact;
-    expires.setUTCDate(expires.getUTCDate() + days);
-    checkBy = expires.toISOString();
+  // Verification resets the check_by clock: TTL counts from now, not from
+  // creation — unless the caller explicitly named a check_by (F4), which
+  // overrides the type-default reset entirely. This is how an operator pins
+  // an identity/event-shaped fact to "never" on a clean verification.
+  let checkBy: string;
+  if (options.checkBy !== undefined) {
+    checkBy = options.checkBy;
+  } else {
+    checkBy = item.check_by;
+    if (checkBy !== 'never') {
+      const expires = new Date();
+      const days = item.type ? getDecayDays(config, item.type) : DEFAULT_DECAY_DAYS.fact;
+      expires.setUTCDate(expires.getUTCDate() + days);
+      checkBy = expires.toISOString();
+    }
   }
 
   const ext = { ...(item.ext ?? {}) } as Record<string, unknown>;

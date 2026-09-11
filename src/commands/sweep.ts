@@ -1,9 +1,28 @@
 import { createInterface } from 'node:readline/promises';
+import { readFile } from 'node:fs/promises';
 import { MemspecStore } from '../lib/store.js';
 
 export interface SweepOptions {
   cwd?: string;
   dryRun?: boolean;
+  /**
+   * Path to a file with one `<id>\t<y|n>` line per stale candidate — a
+   * non-interactive alternative to the stdin prompt loop. Ids missing from
+   * the file default to 'n' (kept). Ignored when `dryRun` is set.
+   */
+  answers?: string;
+}
+
+/** Parse `<id>\t<y|n>` lines into an id → answer map. Blank lines skipped. */
+function parseAnswers(raw: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const [id, answer] = trimmed.split('\t');
+    if (id) map.set(id.trim(), (answer ?? '').trim().toLowerCase());
+  }
+  return map;
 }
 
 /**
@@ -25,6 +44,24 @@ export async function runSweep(options: SweepOptions): Promise<string> {
       lines.push(`  ${item.id} | source: ${item.source} | check_by: ${item.check_by}`);
     }
     lines.push('', 'Dry run - no changes made.');
+    return lines.join('\n');
+  }
+
+  if (options.answers) {
+    const raw = await readFile(options.answers, 'utf8');
+    const answers = parseAnswers(raw);
+    const lines: string[] = [];
+    let retired = 0;
+    for (const item of candidates) {
+      lines.push(`\n[${item.type ?? 'observation'}] ${item.title}`);
+      lines.push(`  ${item.id} | source: ${item.source} | check_by: ${item.check_by}`);
+      const answer = answers.get(item.id) ?? 'n';
+      if (answer === 'y' || answer === 'yes') {
+        store.moveToArchive(item, 'retired');
+        retired++;
+      }
+    }
+    lines.push(`\nRetired ${retired} of ${candidates.length} stale item(s) (${candidates.length} reviewed).`);
     return lines.join('\n');
   }
 

@@ -182,7 +182,7 @@ State transitions out of `active` are explicit acts: a supersede (with a durable
 
 Implementations MAY override these defaults via configuration. A TTL of `0` or `never` means the item does not decay automatically.
 
-Passing the TTL flags the item `stale: true` (see §3.2); it does not archive it. Physical retirement is `memspec sweep` — interactive, one prompt per candidate, CLI-only by design (removal is an operator act, not an agent surface).
+Passing the TTL flags the item `stale: true` (see §3.2); it does not archive it. Physical retirement is `memspec sweep` — interactive, one prompt per candidate, CLI-only by design (removal is an operator act, not an agent surface). `--answers {file}` (v0.11) is the non-interactive alternative: one `{id}\t{y|n}` line per candidate, ids absent from the file default to `n`. `--dry-run` still lists candidates without prompting or reading answers.
 
 ### 3.4 Witness Class (`verified_with`)
 
@@ -272,7 +272,7 @@ The response as a whole MUST also include (v0.11+):
 
 ### 5.3 Ranking
 
-Query results are ranked by **relevance** (keyword/BM25 similarity, normalized per result set) combined with **witness recency** (how recently the claim was last verified). Confidence is gone in v0.3 — trust is communicated through the witness class, not folded into the rank. Result hits are appended to a local usage log (`usage.jsonl`), which feeds the boot-context usage boost (§5.5).
+Query results are ranked by **relevance** (keyword/BM25 similarity, normalized per result set) combined with **witness recency** (how recently the claim was last verified). Confidence is gone in v0.3 — trust is communicated through the witness class, not folded into the rank. Result hits are appended to a local usage log (`usage.jsonl`), which feeds the boot-context usage boost (§5.5). v0.11 extends each row with the query, a session id, rank, and issuing surface, and pairs it with an append-only outcome log (`outcomes.jsonl`, written by `memspec_outcome` and automatically by `memspec_supersede`) — together these derive `last_referenced`/`sessions` on search hits and `memspec_get`, and the `status` Cold / Promotion-candidates surfaces. Neither log is ever written back to a memory's frontmatter.
 
 ### 5.4 Retrieval Profiles
 
@@ -426,7 +426,7 @@ Agent reads and writes markdown files in `.memspec/`. No server, no dependencies
 
 ### 8.2 MCP Server
 
-Optional MCP server. Eleven tools (stable since v0.4):
+Optional MCP server. Thirteen tools (eleven stable since v0.4; `memspec_unrelate` added v0.10; `memspec_outcome` added v0.11):
 
 - `memspec_search` — ranked retrieval with optional type filter and profile;
   result objects carry `verified_with`, `stale`, `conflicts_with`, and the
@@ -446,12 +446,20 @@ Optional MCP server. Eleven tools (stable since v0.4):
   fact: `refines`, `supports`, `depends_on`, or `conflicts_with`
 - `memspec_observe` — point-in-time observation with hard expiry (default 7d)
 - `memspec_verify` — re-witness a claim; anchorless verification requires
-  evidence
+  evidence. `check_by` (v0.11) optionally pins the next review date explicitly
+  instead of resetting to the type default — `"never"` pins an
+  identity/event-shaped fact permanently
+- `memspec_unrelate` — remove a named edge from a memory (v0.10); the inverse
+  of `memspec_relate`, logged durably into the record
+- `memspec_outcome` (v0.11) — record what happened after a retrieved memory
+  was acted on: `useful`, `dead_end`, or `corrected` (the latter written
+  automatically by `memspec_supersede`). Append-only; never mutates the
+  memory itself
 - `memspec_anchor` — link a claim to source files (records git blob SHAs)
 - `memspec_reconcile` — list anchored claims whose files have drifted
 - `memspec_status` — store health: counts by type/state/witness, stale,
   drifted anchors, declared and inferred conflicts, schema violations,
-  sweep candidates
+  sweep candidates, cold records and promotion candidates (v0.11)
 - `memspec_export` — dump records and their named links as JSONL,
   GraphML, or DOT for visualization in Gephi, Cytoscape, or graphviz
 
@@ -471,7 +479,8 @@ Optional command-line interface (primary commands):
 - `memspec remember {type} "{title}" --source {who} [--anchor {files...}] [--pin] [--check-by {ts|never}]`
 - `memspec observe "{text}" [--ttl {dur}]` — point-in-time observation with hard expiry
 - `memspec supersede {id} --reason "{reason}" [--body "{new content}"] [--title] [--merge-from {ids}] [--override-operator]`
-- `memspec verify {id} [--evidence "{what you checked}"]`
+- `memspec verify {id} [--evidence "{what you checked}"] [--check-by {iso|never}]` (v0.11: `--check-by`)
+- `memspec outcome {id} {useful|dead_end|corrected} [--note "{text}"] [--source {who}]` (v0.11)
 - `memspec anchor {id} {files...}` / `memspec reconcile [--since {ref}]`
 - `memspec relate --from {id} --to {id} --type {refines|supports|depends_on|conflicts_with}` (v0.4+)
 - `memspec search "{query}" [--expand-edges] [--include-superseded] [--as-of {iso}]` / `memspec context [--query] [--budget]`

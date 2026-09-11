@@ -7,7 +7,8 @@ import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib
 import { type SearchRelevanceMeta, type StoreSearchOptions } from '../lib/store.js';
 import { type DriftStatus } from '../lib/drift.js';
 import { MEMORY_TYPES, type LifecycleState, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
-import { recordSearchHits } from '../lib/usage.js';
+import { recordSearchHits, type UsageSurface } from '../lib/usage.js';
+import { computeUsageStats } from '../lib/usage-stats.js';
 
 export type SearchExpandDepth = 1 | 2 | 3;
 
@@ -59,6 +60,8 @@ export interface SearchOptions {
    * happens at all.
    */
   scope?: string;
+  /** v0.11 — which surface issued this search, stamped onto the usage log rows. Defaults to 'cli'. */
+  surface?: UsageSurface;
 }
 
 /**
@@ -124,6 +127,10 @@ export interface SearchResult {
   drifted?: boolean;
   anchor_unchecked?: boolean;
   drift?: Array<{ file: string; status: DriftStatus }>;
+  /** v0.11 — most recent retrieval timestamp for this id, when it has ever been retrieved before. */
+  last_referenced?: string;
+  /** v0.11 — distinct session count that retrieved this id, when known. */
+  sessions?: number;
 }
 
 /**
@@ -443,8 +450,18 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     if (drift.drift.length > 0) row.drift = drift.drift;
   }
 
+  // v0.11 — surface last_referenced/sessions when this id has prior usage-log
+  // history. Never written back to frontmatter; purely a read-side join.
+  const usageStats = computeUsageStats(store.root);
+  for (const row of results) {
+    const stat = usageStats.get(row.id);
+    if (!stat || !stat.last_referenced) continue;
+    row.last_referenced = stat.last_referenced;
+    row.sessions = stat.sessions;
+  }
+
   if (results.length > 0) {
-    recordSearchHits(store.root, results.map((r) => r.id));
+    recordSearchHits(store.root, results.map((r) => r.id), { query, surface: options.surface ?? 'cli' });
   }
 
   // DEFECT C — coverage disclosure, judged on the SEED matches (direct query
@@ -604,6 +621,8 @@ export function runSearch(query: string, options: SearchOptions): string {
       ...(r.drifted !== undefined ? { drifted: r.drifted } : {}),
       ...(r.anchor_unchecked !== undefined ? { anchor_unchecked: r.anchor_unchecked } : {}),
       ...(r.drift !== undefined ? { drift: r.drift } : {}),
+      ...(r.last_referenced !== undefined ? { last_referenced: r.last_referenced } : {}),
+      ...(r.sessions !== undefined ? { sessions: r.sessions } : {}),
       conflicts_with: r.conflicts_with,
       refines: r.refines,
       supports: r.supports,

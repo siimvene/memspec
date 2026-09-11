@@ -1,7 +1,9 @@
 import { ulid } from 'ulid';
 import { getDecayDays, loadConfig } from '../lib/config.js';
+import { appendOutcome } from '../lib/outcomes.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import { assertKnownScope } from '../lib/scope.js';
+import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_DECAY_DAYS, type MemoryItem, type MemoryType } from '../lib/types.js';
 
@@ -97,7 +99,13 @@ function inheritedScope(contributors: MemoryItem[]): string | undefined {
  *   When `body` is empty, the survivor is `id`; `mergeFrom` ids collapse into it.
  */
 export function runSupersede(targetId: string, options: SupersedeOptions): SupersedeResult {
-  const store = new MemspecStore(options.cwd);
+  // Resolve the layer owning the target so a supersede of a record in a
+  // read-only store layer refuses (naming the layer) instead of silently
+  // writing. A non-layered store resolves to its single writable layer, so the
+  // owning store is byte-identical to `new MemspecStore(options.cwd)`.
+  const composite = CompositeStore.forCwd(options.cwd);
+  const owner = composite.assertWritableLayerForId(targetId);
+  const store = owner ? owner.store : new MemspecStore(options.cwd);
 
   const target = store.findById(targetId);
   if (!target) {
@@ -175,6 +183,10 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       store.moveToArchive(item, 'superseded');
     }
 
+    for (const collapsedId of collapsedIds) {
+      appendOutcome(store.root, collapsedId, 'corrected', { source, note: baseReason });
+    }
+
     const mergedNote = mergeItems.length > 0 ? ` (merged ${mergeItems.length + 1} → 1)` : '';
     return {
       survivor_id: newId,
@@ -219,6 +231,10 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       supersede_reason: baseReason,
     });
 
+    for (const collapsedId of collapsedIds) {
+      appendOutcome(store.root, collapsedId, 'corrected', { source, note: baseReason });
+    }
+
     return {
       survivor_id: target.id,
       superseded_ids: collapsedIds,
@@ -232,6 +248,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   target.state = 'superseded';
   target.supersede_reason = targetReason;
   store.moveToArchive(target, 'superseded');
+  appendOutcome(store.root, target.id, 'corrected', { source, note: targetReason });
 
   return {
     survivor_id: target.id,

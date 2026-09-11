@@ -1,7 +1,20 @@
 import { z } from 'zod';
 import { effectiveSourceKind } from '../lib/source.js';
+import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import type { MemoryItem } from '../lib/types.js';
+
+/**
+ * Resolve the store to mutate `id` in, refusing a record that lives in a
+ * read-only layer (C2). Shared by relate/unrelate: both write to the `from`
+ * record. Falls back to a plain store when no layer owns the id, so the
+ * caller's own not-found error still fires with its original message.
+ */
+function writableStoreFor(cwd: string | undefined, id: string): MemspecStore {
+  const composite = CompositeStore.forCwd(cwd);
+  const owner = composite.assertWritableLayerForId(id);
+  return owner ? owner.store : new MemspecStore(cwd);
+}
 
 /**
  * v0.4: typed edge kinds writable via `memspec_relate`. Mirrors the
@@ -75,7 +88,7 @@ export function runRelate(options: RelateOptions): RelateResult {
     throw new Error(`relate refuses self-edges (${options.from} → ${options.to})`);
   }
 
-  const store = new MemspecStore(options.cwd);
+  const store = writableStoreFor(options.cwd, options.from);
 
   const from = store.findById(options.from);
   if (!from) throw new Error(`Memory not found: ${options.from}`);
@@ -193,7 +206,7 @@ export function runUnrelate(options: UnrelateOptions): UnrelateResult {
     throw new Error('unrelate requires --reason (the removal is logged durably into the record)');
   }
 
-  const store = new MemspecStore(options.cwd);
+  const store = writableStoreFor(options.cwd, options.from);
 
   const from = store.findById(options.from);
   if (!from) throw new Error(`Memory not found: ${options.from}`);

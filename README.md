@@ -122,6 +122,17 @@ Every result set carries a **coverage** verdict so an agent can tell "the store 
 
 Anchored results are drift-checked on the read path: a record whose anchored file has changed since it was last anchored prints a `[DRIFTED]` marker (JSON/MCP: `drifted`, with `anchor_unchecked` when the anchor's repo is not checked out here). No `reconcile` run needed to see it.
 
+## Usage receipts & outcomes
+
+Every search hit is logged to a local, gitignored `usage.jsonl` — one row per result, carrying the query (truncated to 200 chars), a session id (`MEMSPEC_SESSION_ID` > `CLAUDE_SESSION_ID` > a per-process id), the hit's rank, and which surface issued the search (`cli` | `mcp`). Search hits and `memspec_get` results carry `last_referenced` / `sessions` back to the caller when known — read-only derivations, never written to frontmatter.
+
+Retrieval alone doesn't say whether a memory actually helped. `memspec outcome <id> <useful|dead_end|corrected> [--note] [--source]` (CLI + `memspec_outcome` MCP tool) appends a durable, append-only receipt to `outcomes.jsonl` without ever mutating the record. `supersede` records a `corrected` outcome automatically for every id it collapses — you don't have to call it yourself when you already know a claim was wrong. Record `dead_end` whenever a retrieved memory turned out wrong or useless for the task at hand; it feeds `status`'s two usage-derived surfaces:
+
+- **Cold** — active records created more than 30 days ago that have never been retrieved, or weren't retrieved in the last 60 days. Candidates for `memspec supersede` or a closer look, not automatic removal.
+- **Promotion candidates** — active observations, and facts witnessed only by `assertion` and created in the last 14 days, that have been retrieved in 2+ distinct sessions with zero `dead_end` outcomes. Candidates only — nothing is auto-promoted.
+
+Both sections print in `memspec status` text output and surface as `cold` / `promotion_candidates` arrays in the MCP `memspec_status` JSON.
+
 ## Trust profiles
 
 Memspec doesn't enforce a write policy; the agent's instruction file does (see [AGENTS-ADDON.md](AGENTS-ADDON.md)). Two reference profiles:
@@ -148,7 +159,7 @@ memspec-mcp --cwd /path/to/project   # pin a root
 
 `memspec init` auto-creates `.mcp.json` for host tool discovery (Claude Code, Cursor, etc).
 
-Eleven MCP tools: `memspec_search`, `memspec_get`, `memspec_remember`, `memspec_supersede`, `memspec_relate`, `memspec_observe`, `memspec_verify`, `memspec_anchor`, `memspec_reconcile`, `memspec_status`, `memspec_export`. The CLI exposes a superset (`init`, `migrate`, `sweep`, `context` are CLI-only — store creation, schema migration, physical removal, and session-start context are operator acts, not an agent surface).
+Thirteen MCP tools: `memspec_search`, `memspec_get`, `memspec_remember`, `memspec_supersede`, `memspec_relate`, `memspec_unrelate`, `memspec_observe`, `memspec_verify`, `memspec_outcome`, `memspec_anchor`, `memspec_reconcile`, `memspec_status`, `memspec_export`. The CLI exposes a superset (`init`, `migrate`, `sweep`, `context` are CLI-only — store creation, schema migration, physical removal, and session-start context are operator acts, not an agent surface).
 
 For manual `.mcp.json` setup:
 
@@ -199,6 +210,22 @@ claims:
 
 Ingestion (`memspec reduce`) routes each session's digest to the claiming store. Sessions nobody claims are **held local** — they never cross a sync boundary, and route automatically the day a claim appears. No claims configured anywhere = classic single-store behaviour.
 
+## Record scoping
+
+A store shared across several projects (a home-rooted personal store, or one shared repo store) can partition records by working directory so a query issued while working on one project doesn't surface another's noise:
+
+```yaml
+scopes:
+  kleidia: [~/git/kleidia, ~/git/kleidia-docs]
+  plg: ['~/piletilevi/**']
+```
+
+A record's `scope` is absent (visible from every scope — the default), `universal` (explicitly visible everywhere), or a name from the map above (visible only when that scope is active). `remember`/`observe`/`search` all accept `--scope`, or derive it from `cwd` against the patterns above.
+
+Set `scopes_require: true` in `config.yaml` to make this mandatory: `remember`/`observe` then refuse a write that resolves no scope at all (no `--scope` passed, cwd matched no pattern) rather than letting it land unscoped. Pass `--scope universal` for a record that genuinely belongs everywhere — that's the explicit opt-out, not a workaround.
+
+Records written before scoping existed (or written since without a scope) can be backfilled from their tags: `node bin/repair-scope-backfill.mjs --store <root> --map tag:scope,tag:scope,...` (dry-run by default; `--apply` writes, with an undo journal). Records whose tags match two different scopes are left untouched and reported ambiguous; records matching nothing are left untouched and counted; operator-sourced records are skipped unless `--include-operator`.
+
 ## Store layout
 
 ```
@@ -224,14 +251,15 @@ Frontmatter fields per record: `id`, `kind`, `type`, `state`, `source`, `source_
 | `memspec context [--query] [--limit]` | Token-budgeted memory dump for session-start hooks |
 | `memspec supersede <id> --reason "..." [--body] [--merge-from <ids>]` | Replace, retract, or merge records |
 | `memspec relate --from <id> --to <id> --type <kind>` | Wire a link between records after the fact |
-| `memspec verify <id> [--evidence "..."]` | Mark a memory still true; checks anchors |
+| `memspec verify <id> [--evidence "..."] [--check-by <iso\|never>]` | Mark a memory still true; checks anchors; `--check-by` pins the next review date explicitly instead of resetting to the type default |
+| `memspec outcome <id> <useful\|dead_end\|corrected> [--note] [--source]` | Record what happened after a retrieved memory was acted on (append-only; never mutates the record) |
 | `memspec anchor <id> <files...>` | Link a memory to file SHAs |
 | `memspec reconcile` | Find anchored memories with drifted code |
 | `memspec normalize [--source <harness>]` | Session logs → local trajectory records (deterministic, local-only) |
 | `memspec distill [--limit <n>]` | Trajectories → per-session digests via a cheap LLM |
 | `memspec reduce [--force]` | Per-session digests → committed experience digest, routed by claims |
-| `memspec status` | Health readout (counts, witness, stale, drift, conflicts) |
-| `memspec sweep` | Interactively retire stale items (operator-only removal path) |
+| `memspec status` | Health readout (counts, witness, stale, drift, conflicts, cold records, promotion candidates) |
+| `memspec sweep [--dry-run] [--answers <file>]` | Interactively retire stale items (operator-only removal path); `--answers` reads `<id>\t<y\|n>` lines non-interactively instead of prompting |
 | `memspec export --format <jsonl\|graphml\|dot>` | Export records and links to stdout |
 | `memspec migrate` | v0.2/v0.3 → v0.4+ store migration (idempotent, dry-run by default) |
 

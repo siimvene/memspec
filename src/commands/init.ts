@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemspecStore } from '../lib/store.js';
+import { findStoreDirUpward } from '../lib/registry.js';
 import { detectBrownfieldSources, importBrownfield } from '../lib/brownfield.js';
 import { patchAgentInstructions } from '../lib/agent-addon.js';
 
@@ -13,6 +14,12 @@ export interface InitOptions {
   skipImport?: boolean;
   skipPatch?: boolean;
   installHooks?: boolean;
+  /**
+   * C1: create a store here even though a parent directory already has one.
+   * Without it, `init` in a subdirectory of a repo that already owns a store
+   * refuses rather than fragmenting memory into a nested store.
+   */
+  force?: boolean;
 }
 
 interface HookEntry {
@@ -159,8 +166,25 @@ function installClaudeCodeHooks(): { messages: string[] } {
 }
 
 export async function runInit(options: InitOptions): Promise<string> {
-  const store = new MemspecStore(options.cwd);
   const projectRoot = resolve(options.cwd ?? process.cwd());
+
+  // C1: don't silently nest a store under a repo that already has one. If this
+  // directory has no store of its own but a parent (up to $HOME) does, refuse
+  // unless --force — a nested store fragments memory and hides the parent's.
+  const ownStore = join(projectRoot, '.memspec');
+  if (!existsSync(ownStore) && !options.force) {
+    const parentStore = findStoreDirUpward(dirname(projectRoot));
+    if (parentStore) {
+      throw new Error(
+        `A memspec store already exists at ${parentStore}, a parent of ${projectRoot}. ` +
+          'Running memspec from here already uses it. Creating a nested store fragments memory — ' +
+          're-run with --force if you really want a separate store in this subdirectory.',
+      );
+    }
+  }
+
+  // Init must target THIS directory's store, never a walked-up one.
+  const store = new MemspecStore(projectRoot, { walk: false });
 
   store.init();
 

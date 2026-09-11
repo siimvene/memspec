@@ -91,6 +91,37 @@ export function assertKnownScope(
 }
 
 /**
+ * v0.11 — F2 scope enforcement. When a store declares `scopes_require: true`,
+ * a `remember`/`observe` write whose scope resolved to nothing (no explicit
+ * `--scope`, and cwd matched no `scopes:` pattern) is refused rather than
+ * silently landing unscoped. `--scope universal` is the explicit opt-out —
+ * it resolves to a defined value (`'universal'`), so it never trips this.
+ *
+ * Mirrors the shape of the existing "ambiguous write target" refusal in
+ * `remember.ts`: a loud error naming the known scopes and the flag to pass,
+ * rather than a silent write into "visible from nowhere in particular".
+ */
+export function assertScopeRequired(
+  scopesRequire: boolean | undefined,
+  scope: string | undefined,
+  scopes: ScopesConfig | undefined,
+  scopesInUse: readonly string[] | (() => readonly string[]) = [],
+): void {
+  if (!scopesRequire) return;
+  if (scope !== undefined) return;
+
+  const declared = new Set<string>(Object.keys(scopes ?? {}));
+  const inUse = typeof scopesInUse === 'function' ? scopesInUse() : scopesInUse;
+  const known = [...new Set<string>([...declared, ...inUse])].sort();
+
+  throw new Error(
+    'scope required: this store has `scopes_require: true` configured and no scope resolved for this write ' +
+    `(cwd matched no \`scopes:\` pattern) — pass --scope <name>${known.length > 0 ? ` (known scopes: ${known.join(', ')})` : ''}, ` +
+    `or --scope ${SCOPE_UNIVERSAL} to opt out explicitly.`,
+  );
+}
+
+/**
  * Visibility predicate. Mirrors the SQL in `FtsIndex.runFtsQuery`; kept here so
  * non-FTS consumers and tests can assert the same rule.
  */

@@ -55,7 +55,10 @@ export class CompositeStore {
           : resolvedPath;
         return {
           name: cfg.name,
-          store: new MemspecStore(storePath),
+          // Explicit layer path: never walk upward (C1). The path was computed
+          // deliberately from config/pointer; climbing could silently rebind a
+          // team layer to the personal store when its `.memspec` is missing.
+          store: new MemspecStore(storePath, { walk: false }),
           priority: cfg.priority,
           writable: cfg.writable,
         };
@@ -130,12 +133,24 @@ export class CompositeStore {
     return this.layers.flatMap((l) => l.store.warnings);
   }
 
+  /**
+   * Stamp `layer: <name>` on a record served from a NON-primary layer so a
+   * caller can see which store a hit came from. Records from the primary
+   * (writable) layer are returned untouched, keeping single-store retrieval
+   * byte-identical. The annotation is read-time only — `serializeMemoryFile`
+   * never persists it — so callers that read-modify-write a record must fetch
+   * it from the owning layer's own store, not from this stamped view.
+   */
+  private stampLayer(item: MemoryItem, layer: StoreLayer): MemoryItem {
+    return layer.store === this.primary ? item : { ...item, layer: layer.name };
+  }
+
   /** Load all items from all layers */
   loadAll(): MemoryItem[] {
     const allItems: MemoryItem[] = [];
     for (const layer of this.layers) {
       if (layer.store.exists) {
-        allItems.push(...layer.store.loadAll());
+        allItems.push(...layer.store.loadAll().map((item) => this.stampLayer(item, layer)));
       }
     }
     return allItems;
@@ -155,7 +170,7 @@ export class CompositeStore {
       for (const item of layer.store.loadSuperseded()) {
         if (!seen.has(item.id)) {
           seen.add(item.id);
-          items.push(item);
+          items.push(this.stampLayer(item, layer));
         }
       }
     }
@@ -173,7 +188,7 @@ export class CompositeStore {
       for (const item of layer.store.loadActive()) {
         if (!seen.has(item.id)) {
           seen.add(item.id);
-          items.push(item);
+          items.push(this.stampLayer(item, layer));
         }
       }
     }
@@ -225,7 +240,9 @@ export class CompositeStore {
     // The BM25 meta is only meaningful for a single corpus, so it is forwarded
     // here and left null across a rank-fused multi-layer query (coverage then
     // falls back to the body-match signal).
-    if (active.length === 1) return active[0].store.search(query, options, meta);
+    if (active.length === 1) {
+      return active[0].store.search(query, options, meta).map((item) => this.stampLayer(item, active[0]));
+    }
 
     // Over-fetch so fusion has material below the caller's cut.
     const perLayerLimit = Math.max(limit * 2, 20);
@@ -264,7 +281,7 @@ export class CompositeStore {
           existing.bestRank = Math.min(existing.bestRank, rank);
         } else {
           fused.set(item.id, {
-            item,
+            item: this.stampLayer(item, layer),
             priority: layer.priority,
             bestRank: rank,
             score: contribution,
@@ -343,14 +360,47 @@ export class CompositeStore {
     return out;
   }
 
-  /** Find by ID across all layers (highest priority first) */
+  /** Find by ID across all layers (highest priority first), layer-stamped. */
   findById(id: string): MemoryItem | null {
     for (const layer of this.layers) {
       if (!layer.store.exists) continue;
       const item = layer.store.findById(id);
-      if (item) return item;
+      if (item) return this.stampLayer(item, layer);
     }
     return null;
+  }
+
+  /**
+   * The layer that owns `id` (highest priority first), or null when no layer
+   * holds it. Unlike `findById`, this returns the layer itself so mutation
+   * commands can check its `writable` flag before writing.
+   */
+  layerForId(id: string): StoreLayer | null {
+    for (const layer of this.layers) {
+      if (!layer.store.exists) continue;
+      if (layer.store.findById(id)) return layer;
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the layer a mutation of `id` must target, enforcing read-only
+   * layers. Returns null when no layer holds the record (the caller then
+   * surfaces its own not-found error). Throws — naming the layer — when the
+   * record lives in a `writable: false` layer: an in-place edit (supersede,
+   * relate, unrelate, verify, anchor) to a read-only store is refused the same
+   * way `writeItem` refuses a read-only write target.
+   */
+  assertWritableLayerForId(id: string): StoreLayer | null {
+    const layer = this.layerForId(id);
+    if (!layer) return null;
+    if (!layer.writable) {
+      throw new Error(
+        `"${id}" lives in read-only store layer '${layer.name}' (${layer.store.root}); ` +
+          'it cannot be modified here. Read-only layers refuse remember/observe/supersede/relate/unrelate/verify/anchor.',
+      );
+    }
+    return layer;
   }
 
   /** Write to a specific layer by name, or primary by default */

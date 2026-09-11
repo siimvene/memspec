@@ -111,6 +111,15 @@ export interface MemoryItem extends MemoryFrontmatter {
   title: string;
   body: string;
   filePath: string;
+  /**
+   * Read-time annotation stamped by `CompositeStore` when a record is served
+   * from a NON-primary store layer, naming that layer (e.g. a read-only team
+   * store). Absent on records from the primary/writable layer and on every
+   * single-store (non-layered) read, so retrieval stays byte-identical there.
+   * Never persisted: `serializeMemoryFile` whitelists frontmatter fields and
+   * does not include this one.
+   */
+  layer?: string;
 }
 
 export const DEFAULT_DECAY_DAYS: Record<MemoryType, number> = {

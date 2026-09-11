@@ -1,5 +1,6 @@
 import { getCodeAnchors, projectRootForStore, resolveAnchorForWrite } from '../lib/anchors.js';
 import { loadConfig } from '../lib/config.js';
+import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import type { CodeAnchor } from '../lib/types.js';
 
@@ -19,7 +20,11 @@ export interface AnchorResult {
 }
 
 export function runAnchor(id: string, files: string[], options: AnchorOptions): AnchorResult {
-  const store = new MemspecStore(options.cwd);
+  // Refuse anchoring a record that lives in a read-only store layer (C2),
+  // naming the layer. Non-layered stores resolve to their single writable
+  // layer, keeping the resolved store identical to `new MemspecStore(cwd)`.
+  const owner = CompositeStore.forCwd(options.cwd).assertWritableLayerForId(id);
+  const store = owner ? owner.store : new MemspecStore(options.cwd);
   const item = store.findById(id);
 
   if (!item) throw new Error(`Memory not found: ${id}`);

@@ -7,6 +7,8 @@ import { z } from 'zod';
 import { runAnchor } from './commands/anchor.js';
 import { EXPORT_FORMATS, runExport, type ExportFormat } from './commands/export.js';
 import { runObserve } from './commands/observe.js';
+import { runOutcome } from './commands/outcome.js';
+import { OUTCOMES } from './lib/outcomes.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runRelate, runUnrelate, relationTypeSchema } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
@@ -18,6 +20,7 @@ import { runVerify } from './commands/verify.js';
 import { homedir } from 'node:os';
 import { CompositeStore } from './lib/composite-store.js';
 import { buildLineage } from './lib/lineage.js';
+import { computeUsageStats } from './lib/usage-stats.js';
 
 const { values } = parseArgs({
   options: { cwd: { type: 'string' } },
@@ -89,6 +92,7 @@ server.tool(
         asOf: as_of,
         includeSuperseded: include_superseded,
         scope,
+        surface: 'mcp',
       });
 
       return {
@@ -130,6 +134,8 @@ server.tool(
       // DEFECT B — read-path drift for the single record, resolved against its
       // own layer. Absent fields (undefined) for an unanchored record.
       const drift = store.annotateDrift([item]).get(item.id);
+      // v0.11 — last_referenced/sessions when this id has usage-log history.
+      const usageStat = computeUsageStats(store.root).get(item.id);
       const payload = {
         id: item.id,
         kind: item.kind,
@@ -157,6 +163,8 @@ server.tool(
         depends_on: item.depends_on ?? [],
         valid_from: item.valid_from,
         valid_to: item.valid_to,
+        last_referenced: usageStat?.last_referenced,
+        sessions: usageStat?.sessions,
         lineage,
         ext: item.ext,
         body: item.body,
@@ -359,15 +367,16 @@ server.tool(
 
 server.tool(
   'memspec_verify',
-  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock.',
+  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock to the type default — or to check_by if you pass one explicitly (pass "never" to pin an identity/event-shaped fact so it never comes up for review again).',
   {
     id: z.string().describe('Memory ID to verify'),
     evidence: z.string().optional().describe('What you checked to confirm this is still true — required when the memory has no code anchors'),
     source: z.string().optional().describe('Who is verifying'),
+    check_by: z.string().optional().describe('ISO 8601 timestamp or "never" — set check_by explicitly on this clean verification instead of resetting to the type default'),
   },
-  async ({ id, evidence, source }) => {
+  async ({ id, evidence, source, check_by }) => {
     try {
-      const result = runVerify(id, { cwd: defaultCwd, evidence, source });
+      const result = runVerify(id, { cwd: defaultCwd, evidence, source, checkBy: check_by });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
@@ -376,6 +385,31 @@ server.tool(
           last_verified: result.last_verified,
           verified_with: result.verified_with,
           anchors: result.anchors,
+        },
+      };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: String(err) }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'memspec_outcome',
+  'Record what happened after a retrieved memory was acted on: "useful" (it helped), "dead_end" (it was retrieved but did not help — wrong, irrelevant, or misleading for this task), or "corrected" (the record turned out wrong; usually you want memspec_supersede instead, which appends this automatically). Never mutates the memory itself — this is a separate append-only signal that feeds status\'s Cold / Promotion candidates surfaces. Record dead_end whenever a retrieved memory turned out wrong or useless so future retrieval can learn from it.',
+  {
+    id: z.string().describe('Memory id the outcome applies to'),
+    outcome: z.enum(OUTCOMES).describe('useful | dead_end | corrected'),
+    note: z.string().optional().describe('Free-text context for the outcome'),
+    source: z.string().optional().describe('Who is recording the outcome'),
+  },
+  async ({ id, outcome, note, source }) => {
+    try {
+      const result = runOutcome(id, outcome, { cwd: defaultCwd, note, source });
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+        structuredContent: {
+          id: result.id,
+          outcome: result.outcome,
         },
       };
     } catch (err) {

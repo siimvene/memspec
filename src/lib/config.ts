@@ -52,6 +52,14 @@ export interface MemspecConfig {
   /** Read-side routing: which records are visible from which working directories. */
   scopes?: ScopesConfig;
   /**
+   * v0.11 — when true, `remember`/`observe` refuse to write a record whose
+   * scope resolves to nothing (no `--scope` passed, and cwd matches no
+   * `scopes:` pattern). Pass `--scope universal` to opt out explicitly for a
+   * record that genuinely belongs everywhere. Default false — a store with no
+   * `scopes_require` behaves exactly as before scoping existed.
+   */
+  scopes_require?: boolean;
+  /**
    * Write-side routing for `memspec reduce`: working directories whose
    * experience digests this store owns. Typed here so typos surface; the
    * runtime consumer is still `claimsOf()` in registry.ts.
@@ -86,6 +94,7 @@ const DEFAULT_CONFIG: MemspecConfig = {
     min_confirmations: 2,
     auto_promote_confidence: 0.9,
   },
+  scopes_require: false,
 };
 
 /**
@@ -208,6 +217,7 @@ export function loadConfig(root: string): MemspecConfig {
 
     const scopes = parseScopesConfig(data.scopes, configPath);
     const claims = parseClaimsConfig(data.claims, configPath);
+    const scopesRequire = typeof data.scopes_require === 'boolean' ? data.scopes_require : DEFAULT_CONFIG.scopes_require;
 
     return {
       decay: { ...DEFAULT_CONFIG.decay, ...(data.decay as Record<string, string> ?? {}) },
@@ -216,6 +226,7 @@ export function loadConfig(root: string): MemspecConfig {
       stores,
       anchors,
       scopes,
+      scopes_require: scopesRequire,
       claims,
     };
   } catch (err) {
@@ -300,6 +311,11 @@ profiles:
 # scopes:
 #   kleidia: [~/git/kleidia, ~/git/kleidia-docs]
 #   plg: ['~/piletilevi/**']
+#
+# When true, remember/observe refuse to write a record whose scope resolves to
+# nothing (no --scope passed, cwd matches no pattern above). Pass
+# --scope universal for a record that genuinely belongs everywhere.
+# scopes_require: true
 `;
 
   yaml += `

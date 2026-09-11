@@ -43,6 +43,12 @@ when the claims are genuinely distinct.
 - A result marked **conflicting**: do not silently pick a side. Resolve it — supersede
   the wrong one (or merge with `merge_from`), verify the right one — then proceed.
 - After committing code changes, run `memspec_reconcile` and resolve its candidates.
+- A retrieved memory that turned out wrong, irrelevant, or misleading for the task at
+  hand: record `memspec_outcome <id> dead_end` (with a `note` on what went wrong). This
+  is separate from fixing the record itself — if the claim is actually wrong, also
+  `memspec_supersede` it (which records its own `corrected` outcome automatically). If a
+  memory genuinely helped, `memspec_outcome <id> useful` is optional but welcome — it
+  feeds `status`'s promotion-candidate surface for young, unverified knowledge.
 
 ### Boundaries
 - Don't ask permission for memory upkeep — write, supersede, verify, anchor freely.

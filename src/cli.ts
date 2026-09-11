@@ -5,6 +5,7 @@ import { Command } from 'commander';
 import { runAnchor } from './commands/anchor.js';
 import { runContext } from './commands/context.js';
 import { runObserve } from './commands/observe.js';
+import { runOutcome } from './commands/outcome.js';
 import { runProbe } from './commands/probe.js';
 import { EXPORT_FORMATS, parseTypesArg, runExport, type ExportFormat } from './commands/export.js';
 import { runReconcile } from './commands/reconcile.js';
@@ -203,12 +204,26 @@ program
   .option('--cwd <path>', 'project root')
   .option('--evidence <text>', 'free-text reason/source for the verification')
   .option('--source <source>', 'who is verifying')
-  .action((id: string, options: { cwd?: string; evidence?: string; source?: string }) => {
-    const result = runVerify(id, options);
+  .option('--check-by <value>', 'ISO timestamp or "never" — set explicitly on this clean verification instead of resetting to the type default')
+  .action((id: string, options: { cwd?: string; evidence?: string; source?: string; checkBy?: string }) => {
+    const result = runVerify(id, { cwd: options.cwd, evidence: options.evidence, source: options.source, checkBy: options.checkBy });
     console.log(result.message);
     if (result.status === 'needs_review') {
       process.exitCode = 1;
     }
+  });
+
+program
+  .command('outcome')
+  .description('Record what happened after a retrieved memory was acted on (useful | dead_end | corrected). Never mutates the memory itself.')
+  .argument('<id>', 'memory ID the outcome applies to')
+  .argument('<outcome>', 'useful | dead_end | corrected')
+  .option('--cwd <path>', 'project root')
+  .option('--note <text>', 'free-text context for the outcome')
+  .option('--source <source>', 'who is recording the outcome')
+  .action((id: string, outcome: string, options: { cwd?: string; note?: string; source?: string }) => {
+    const result = runOutcome(id, outcome, options);
+    console.log(result.message);
   });
 
 program
@@ -322,7 +337,8 @@ program
   .description('Interactively retire stale-flagged items (operator-run; the only path that removes memories)')
   .option('--cwd <path>', 'project root')
   .option('--dry-run', 'list candidates without prompting')
-  .action(async (options: { cwd?: string; dryRun?: boolean }) => {
+  .option('--answers <file>', 'non-interactive: read <id>\\t<y|n> lines from this file instead of prompting stdin (ids missing from the file default to n)')
+  .action(async (options: { cwd?: string; dryRun?: boolean; answers?: string }) => {
     console.log(await runSweep(options));
   });
 

@@ -9,7 +9,7 @@ import {
 } from '../lib/inference.js';
 import { effectiveSourceKind, inferSourceKind } from '../lib/source.js';
 import { findPointer, POINTER_FILENAME, resolveLayerPath } from '../lib/registry.js';
-import { assertKnownScope, resolveScopeForCwd } from '../lib/scope.js';
+import { assertKnownScope, assertScopeRequired, resolveScopeForCwd } from '../lib/scope.js';
 import { MemspecStore } from '../lib/store.js';
 import { MEMORY_TYPES, type CodeAnchor, type MemoryType, type VerifiedWith } from '../lib/types.js';
 
@@ -241,6 +241,11 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const scope = options.scope !== undefined
     ? assertKnownScope(config.scopes, options.scope)
     : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
+
+  // F2 — scope enforcement. A store opted into `scopes_require: true` refuses
+  // an unscoped write outright rather than letting it land visible from
+  // nowhere in particular. `--scope universal` is the explicit opt-out.
+  assertScopeRequired(config.scopes_require, scope, config.scopes, () => store.scopesInUse());
 
   // Phase 5 — neighbour walk over same-type active records.
   // `store.search` is BM25-ranked and unbounded; we use it as a candidate

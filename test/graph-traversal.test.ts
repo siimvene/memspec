@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { runRemember } from '../src/commands/remember.js';
 import { runRelate } from '../src/commands/relate.js';
 import { runSupersede } from '../src/commands/supersede.js';
-import { searchPayload } from '../src/commands/search.js';
+import { searchPayload, type SearchPayload } from '../src/commands/search.js';
 import {
   EDGE_TYPES,
   expandGraph,
@@ -273,7 +273,15 @@ test('searchPayload: expandEdges defaults off — results identical to v0.4 sear
   const explicitlyOff = searchPayload('JWT', { cwd: target, expandEdges: false });
 
   // Deep equality of full payload — the regression guard the spec calls out.
-  assert.deepEqual(noExpand, explicitlyOff);
+  // v0.11: last_referenced/sessions are a legitimate usage-log side effect of
+  // each search call (the first call's hit is on record by the time the
+  // second call reads the log), not a symptom of expandEdges — strip them
+  // before comparing so this guard still isolates the thing it tests.
+  const stripUsage = (payload: SearchPayload): SearchPayload => ({
+    ...payload,
+    results: payload.results.map(({ last_referenced, sessions, ...rest }) => rest),
+  });
+  assert.deepEqual(stripUsage(noExpand), stripUsage(explicitlyOff));
 
   // None of the v0.4 results should carry an expanded_via field.
   for (const hit of noExpand.results) {
