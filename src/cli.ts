@@ -316,7 +316,7 @@ program
   .description('Search active memories')
   .argument('<query>', 'search terms')
   .option('--cwd <path>', 'project root')
-  .option('--type <type>', 'filter by type')
+  .option('--type <type>', 'filter by type (fact | decision | procedure | question — question lists question groups, otherwise invisible to search, open first then resolved)')
   .option('--profile <name>', 'retrieval profile', 'default')
   .option('--limit <n>', 'max results', '10')
   .option('--json', 'output as JSON')

@@ -1,12 +1,12 @@
 import { resolve } from 'node:path';
 import { CompositeStore } from '../lib/composite-store.js';
 import { getProfile, loadConfig } from '../lib/config.js';
-import { EDGE_TYPES, expandGraph, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
+import { EDGE_TYPES, expandGraph, isDerived, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
 import { type SearchRelevanceMeta, type StoreSearchOptions } from '../lib/store.js';
 import { type DriftStatus } from '../lib/drift.js';
-import { MEMORY_TYPES, type MemoryItem, type MemoryType, type RecordState, type VerifiedWith } from '../lib/types.js';
+import { MEMORY_TYPES, VERIFIED_WITH, type MemoryItem, type MemoryType, type RecordState, type VerifiedWith } from '../lib/types.js';
 import { recordSearchHits, type UsageSurface } from '../lib/usage.js';
 import { computeUsageStats } from '../lib/usage-stats.js';
 
@@ -89,7 +89,7 @@ export function isValidAsOf(item: MemoryItem, asOf: Date): boolean {
  */
 export interface SearchResult {
   id: string;
-  type: MemoryType | 'observation';
+  type: MemoryType | 'observation' | 'question';
   title: string;
   /**
    * v0.6 Phase 1 — lifecycle state of the surfaced record. Seeds are always
@@ -140,6 +140,24 @@ export interface SearchResult {
    * from `MemoryItem.layer`, which `CompositeStore.stampLayer` sets.
    */
   layer?: string;
+  /**
+   * v0.11 — procedures only, present only when non-empty. Step labels a
+   * human must perform; mirrors the `requires_human` frontmatter field.
+   */
+  requires_human?: string[];
+  /**
+   * v0.11 — true when the record carries at least one `derived_from` edge
+   * (computed via the shared `isDerived()` helper). Absent (not `false`) on
+   * records that aren't derived, matching the rest of the optional-field
+   * convention on this row.
+   */
+  derived?: boolean;
+  /** v0.11 — questions only. True = the listed answers are the only candidates (closed world). */
+  closed?: boolean;
+  /** v0.11 — questions only. Competing answer record ids. */
+  answers?: string[];
+  /** v0.11 — questions only. Set to the surviving answer id once resolved. */
+  resolved_by?: string;
 }
 
 /**
@@ -301,6 +319,13 @@ function buildResultRow(
     result.layer = item.layer;
   }
 
+  if (item.requires_human && item.requires_human.length > 0) {
+    result.requires_human = item.requires_human;
+  }
+  if (isDerived(item)) {
+    result.derived = true;
+  }
+
   if (full) {
     const cost = estimateTokens(item.body);
     if (budget.used + cost <= budget.limit) {
@@ -310,6 +335,115 @@ function buildResultRow(
   }
 
   return result;
+}
+
+/**
+ * v0.11 — build a `SearchResult` row for a question record. Distinct from
+ * `buildResultRow` because a question has no meaningful lexical body (it's
+ * always `# <title>`) and no conflicts/refines/supports/depends_on edges —
+ * its only relations are its `answers`.
+ */
+function buildQuestionResultRow(
+  item: MemoryItem,
+  full: boolean,
+  budget: { used: number; limit: number },
+): SearchResult {
+  const result: SearchResult = {
+    id: item.id,
+    type: 'question',
+    title: item.title,
+    state: item.state,
+    verified_with: witnessOf(item),
+    created: item.created,
+    last_verified: item.last_verified ?? item.created,
+    source: item.source,
+    tags: item.tags,
+    stale: item.stale ?? false,
+    conflicts_with: [],
+    refines: [],
+    supports: [],
+    depends_on: [],
+    preview: previewFromBody(item.body),
+    closed: item.closed === true,
+    answers: item.answers ?? [],
+    resolved_by: item.resolved_by,
+  };
+
+  if (item.layer !== undefined) {
+    result.layer = item.layer;
+  }
+
+  if (full) {
+    const cost = estimateTokens(item.body);
+    if (budget.used + cost <= budget.limit) {
+      result.body = item.body;
+      budget.used += cost;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * v0.11 — `--type question` search path. Bypasses `store.search()` (which is
+ * built on the active-only FTS pool, and a question never carries `state:
+ * active`) and lists question records directly: open first, then resolved,
+ * each group newest-created-first. A non-empty query filters by a
+ * case-insensitive substring match against the title — the only free text a
+ * question carries worth matching against.
+ */
+function questionSearchPayload(
+  query: string,
+  options: SearchOptions,
+  store: CompositeStore,
+  profileName: string,
+  activeScope: string | undefined,
+  limit: number,
+): SearchPayload {
+  const seen = new Set<string>();
+  const questions: MemoryItem[] = [];
+  for (const item of store.loadAll()) {
+    if (item.kind !== 'question') continue;
+    if (seen.has(item.id)) continue; // higher-priority layer already claimed this id
+    if (!isVisibleFromScope(item.scope, activeScope)) continue;
+    seen.add(item.id);
+    questions.push(item);
+  }
+
+  const needle = query.trim().toLowerCase();
+  const matched = needle.length === 0
+    ? questions
+    : questions.filter((item) => item.title.toLowerCase().includes(needle));
+
+  matched.sort((a, b) => {
+    if (a.state !== b.state) return a.state === 'open' ? -1 : 1; // open before resolved
+    return Date.parse(b.created) - Date.parse(a.created); // newest first within a group
+  });
+
+  const full = options.full === true;
+  const budget = { used: 0, limit: FULL_BODY_TOKEN_BUDGET };
+  const results = matched.slice(0, limit).map((item) => buildQuestionResultRow(item, full, budget));
+
+  if (results.length > 0) {
+    recordSearchHits(store.root, results.map((r) => r.id), { query, surface: options.surface ?? 'cli' });
+  }
+
+  const scopeLabel = activeScope ?? 'any';
+  const coverage: Coverage = results.length > 0 ? 'ok' : 'none';
+  const coverage_note = results.length > 0
+    ? `${results.length} question group(s) matched`
+    : `no question group matches this query in scope ${scopeLabel}`;
+
+  return {
+    query,
+    profile: profileName,
+    count: results.length,
+    full,
+    results,
+    coverage,
+    coverage_note,
+    coverage_witness: strongestWitness(results),
+  };
 }
 
 /**
@@ -330,15 +464,25 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     throw new Error(`Invalid limit: ${options.limit}`);
   }
 
-  const explicitType = options.type ? assertMemoryType(options.type) : undefined;
-  const types = explicitType ? [explicitType] : parseProfileTypes(profile.types);
-
   // Active scope: stated by the caller, or derived from cwd via `scopes:`.
   // Undefined (no config, or a cwd nothing claims) means no filtering — a
   // store without scoping behaves exactly as it did before scopes existed.
   const activeScope = options.scope !== undefined
     ? assertKnownScope(config.scopes, options.scope, () => store.scopesInUse())
     : resolveScopeForCwd(config.scopes, resolve(options.cwd ?? process.cwd()));
+
+  // v0.11 — `--type question` bypasses the FTS/BM25 pipeline entirely: a
+  // question record never carries `state: active` (it lives in `open` /
+  // `resolved`), so the normal path — built on `store.search()`'s
+  // active-only candidate pool — can never surface it no matter how `types`
+  // is filtered. This is the only path that returns question records; a
+  // default (untyped) search keeps excluding them.
+  if (options.type === 'question') {
+    return questionSearchPayload(query, options, store, profileName, activeScope, limit);
+  }
+
+  const explicitType = options.type ? assertMemoryType(options.type) : undefined;
+  const types = explicitType ? [explicitType] : parseProfileTypes(profile.types);
 
   const storeOptions: StoreSearchOptions = {
     limit,
@@ -497,12 +641,28 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   };
 }
 
+/**
+ * v0.11 — a derived record (any `derived_from` edge) counts one witness tier
+ * WEAKER than its stated `verified_with` for `coverage_witness` purposes: the
+ * record's own witness only attests to how the inference step was checked,
+ * not to the ground truth its premises rest on, so treating it at face value
+ * would overstate the result set's evidentiary strength. Ladder is the
+ * existing `VERIFIED_WITH` order (anchor > probe > operator > evidence >
+ * assertion); `assertion` is already the floor and stays `assertion`.
+ */
+function coverageWitnessTier(r: SearchResult): VerifiedWith {
+  if (!r.derived) return r.verified_with;
+  const idx = VERIFIED_WITH.indexOf(r.verified_with);
+  return VERIFIED_WITH[Math.min(idx + 1, VERIFIED_WITH.length - 1)];
+}
+
 /** Strongest witness tier among the returned rows (null when there are none). */
 function strongestWitness(results: SearchResult[]): VerifiedWith | null {
   let best: VerifiedWith | null = null;
   for (const r of results) {
-    if (best === null || WITNESS_STRENGTH[r.verified_with] < WITNESS_STRENGTH[best]) {
-      best = r.verified_with;
+    const tier = coverageWitnessTier(r);
+    if (best === null || WITNESS_STRENGTH[tier] < WITNESS_STRENGTH[best]) {
+      best = tier;
     }
   }
   return best;
@@ -639,10 +799,15 @@ export function runSearch(query: string, options: SearchOptions): string {
       ...(r.last_referenced !== undefined ? { last_referenced: r.last_referenced } : {}),
       ...(r.sessions !== undefined ? { sessions: r.sessions } : {}),
       ...(r.layer !== undefined ? { layer: r.layer } : {}),
+      ...(r.requires_human !== undefined ? { requires_human: r.requires_human } : {}),
+      ...(r.derived !== undefined ? { derived: r.derived } : {}),
       conflicts_with: r.conflicts_with,
       refines: r.refines,
       supports: r.supports,
       depends_on: r.depends_on,
+      ...(r.closed !== undefined ? { closed: r.closed } : {}),
+      ...(r.answers !== undefined ? { answers: r.answers } : {}),
+      ...(r.resolved_by !== undefined ? { resolved_by: r.resolved_by } : {}),
       ...(r.body !== undefined ? { body: r.body } : {}),
       ...(r.expanded_via !== undefined ? { expanded_via: r.expanded_via } : {}),
     })), null, 2);
@@ -664,10 +829,18 @@ export function runSearch(query: string, options: SearchOptions): string {
     // exist when the store is layered — so the suffix appears exactly when
     // more than one layer is configured.
     const layerTag = item.layer ? ` (layer: ${item.layer})` : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}${layerTag}`);
+    const derivedTag = item.derived ? ' (derived)' : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${derivedTag}${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}${layerTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) {
       lines.push(`  tags: ${item.tags.join(', ')}`);
+    }
+    if (item.requires_human && item.requires_human.length > 0) {
+      lines.push(`  requires human: ${item.requires_human.join('; ')}`);
+    }
+    if (item.type === 'question') {
+      const resolvedTag = item.resolved_by ? `resolved — resolved_by ${item.resolved_by}` : 'open';
+      lines.push(`  ${item.closed ? 'closed' : 'open'}-world | ${resolvedTag} | answers: ${(item.answers ?? []).join(', ') || '(none)'}`);
     }
     if (item.body !== undefined) {
       lines.push(`  ${item.body.split('\n').filter((l) => !l.startsWith('#')).join(' ').trim()}`);

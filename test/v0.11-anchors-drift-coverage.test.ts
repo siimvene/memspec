@@ -249,3 +249,124 @@ test('coverage_witness reports the strongest witness among hits (anchor beats as
   // Both records match; the anchored one outranks assertion for coverage_witness.
   assert.match(res.stdout, /best witness: anchor/);
 });
+
+// --- requires_human / derived echo on search hits ---
+
+test('search JSON and CLI text echo requires_human on a procedure hit', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await runCli([
+    'remember', 'procedure', 'Rotate signing key search test', '--cwd', project,
+    '--body', 'rotate the signing key', '--source', 'test',
+    '--requires-human', 'approve console', 'confirm HSM',
+  ]);
+
+  const jsonRes = await runCli(['search', 'signing key', '--cwd', project, '--json']);
+  const [hit] = JSON.parse(jsonRes.stdout);
+  assert.deepEqual(hit.requires_human, ['approve console', 'confirm HSM']);
+
+  const textRes = await runCli(['search', 'signing key', '--cwd', project]);
+  assert.match(textRes.stdout, /requires human: approve console; confirm HSM/);
+});
+
+test('search JSON and CLI text omit requires_human when absent', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await runCli([
+    'remember', 'fact', 'Plain fact no human steps', '--cwd', project,
+    '--body', 'nothing special', '--source', 'test',
+  ]);
+
+  const jsonRes = await runCli(['search', 'no human steps', '--cwd', project, '--json']);
+  const [hit] = JSON.parse(jsonRes.stdout);
+  assert.equal('requires_human' in hit, false);
+
+  const textRes = await runCli(['search', 'no human steps', '--cwd', project]);
+  assert.doesNotMatch(textRes.stdout, /requires human:/);
+});
+
+test('search JSON and CLI text mark a derived record (derived: true, "(derived)" tag)', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  const basisRes = await runCli([
+    'remember', 'fact', 'Derived-echo basis', '--cwd', project,
+    '--body', 'basis body', '--source', 'test',
+  ]);
+  const basisId = basisRes.stdout.match(/ms_[0-9A-Z]+/)?.[0];
+  assert.ok(basisId, `expected a memory id in remember output, got: ${basisRes.stdout}`);
+  await runCli([
+    'remember', 'fact', 'Derived echo conclusion', '--cwd', project,
+    '--body', 'inferred conclusion', '--source', 'test', '--derived-from', basisId!,
+  ]);
+
+  const jsonRes = await runCli(['search', 'Derived echo conclusion', '--cwd', project, '--json']);
+  const [hit] = JSON.parse(jsonRes.stdout);
+  assert.equal(hit.derived, true);
+
+  const textRes = await runCli(['search', 'Derived echo conclusion', '--cwd', project]);
+  assert.match(textRes.stdout, /Derived echo conclusion \(assertion\) \(derived\)/);
+});
+
+test('search JSON and CLI text omit derived when the record carries no derived_from edge', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  await runCli([
+    'remember', 'fact', 'Not derived at all', '--cwd', project,
+    '--body', 'observed directly', '--source', 'test',
+  ]);
+
+  const jsonRes = await runCli(['search', 'Not derived at all', '--cwd', project, '--json']);
+  const [hit] = JSON.parse(jsonRes.stdout);
+  assert.equal('derived' in hit, false);
+
+  const textRes = await runCli(['search', 'Not derived at all', '--cwd', project]);
+  assert.doesNotMatch(textRes.stdout, /\(derived\)/);
+});
+
+// --- coverage_witness tier-down for derived records ---
+
+test('coverage_witness counts a derived record one tier weaker (evidence -> assertion)', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  const basisRes = await runCli([
+    'remember', 'fact', 'Tier-down basis', '--cwd', project,
+    '--body', 'basis body', '--source', 'test',
+  ]);
+  const basisId = basisRes.stdout.match(/ms_[0-9A-Z]+/)?.[0];
+  assert.ok(basisId);
+
+  const proof = join(project, 'tier-down-proof.txt');
+  await writeFile(proof, 'evidence for tier-down test');
+  await runCli([
+    'remember', 'fact', 'Tier-down derived evidence fact', '--cwd', project,
+    '--body', 'inferred conclusion, evidence-backed', '--source', 'test',
+    '--derived-from', basisId!, '--evidence', proof,
+  ]);
+
+  const res = await runCli(['search', 'Tier-down derived evidence', '--cwd', project, '--json']);
+  const [hit] = JSON.parse(res.stdout);
+  assert.equal(hit.derived, true);
+  assert.equal(hit.verified_with, 'evidence'); // the record's own witness is unaffected
+
+  const textRes = await runCli(['search', 'Tier-down derived evidence', '--cwd', project]);
+  // coverage_witness is tiered down one step from evidence -> assertion
+  assert.match(textRes.stdout, /best witness: assertion/);
+});
+
+test('coverage_witness leaves a derived, assertion-witnessed record at assertion (already the floor)', async () => {
+  const project = await makeTempProject();
+  await runCli(['init', '--cwd', project]);
+  const basisRes = await runCli([
+    'remember', 'fact', 'Tier-floor basis', '--cwd', project,
+    '--body', 'basis body', '--source', 'test',
+  ]);
+  const basisId = basisRes.stdout.match(/ms_[0-9A-Z]+/)?.[0];
+  assert.ok(basisId);
+  await runCli([
+    'remember', 'fact', 'Tier-floor derived assertion fact', '--cwd', project,
+    '--body', 'inferred conclusion, unwitnessed', '--source', 'test', '--derived-from', basisId!,
+  ]);
+
+  const textRes = await runCli(['search', 'Tier-floor derived assertion', '--cwd', project]);
+  assert.match(textRes.stdout, /best witness: assertion/);
+});

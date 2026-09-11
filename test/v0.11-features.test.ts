@@ -29,6 +29,13 @@ async function frontmatter(target: string, subdir: string, id: string): Promise<
   return matter(await readText(path)).data as Record<string, unknown>;
 }
 
+// title lives in the markdown body's leading heading, not in frontmatter.
+async function titleOf(target: string, subdir: string, id: string): Promise<string> {
+  const path = join(target, '.memspec', subdir, `${id}.md`);
+  const body = matter(await readText(path)).content;
+  return body.match(/^#\s+(.+)$/m)?.[1].trim() ?? '';
+}
+
 async function initSession(session: McpSession): Promise<void> {
   await session.request('initialize', {
     protocolVersion: '2024-11-05',
@@ -191,6 +198,114 @@ test('remember --answers-question registers the new record on the question (CLI)
   const newId = (await factIds(target)).find((id) => id !== a)!;
   const fm = await frontmatter(target, 'memory/questions', qid);
   assert.deepEqual(fm.answers, [a, newId]);
+});
+
+test('search --type question lists question groups, open before resolved, with closed/answers/state/resolved_by (CLI)', async () => {
+  const target = await initProject();
+  const a = await addFact(target, 'Search-question answer alpha A');
+  const b = await addFact(target, 'Search-question answer alpha B');
+  const c = await addFact(target, 'Search-question answer alpha C');
+
+  await runCli(['question', 'Zq-alpha open question', '--cwd', target, '--source', 'test', '--answers', a]);
+  await runCli(['question', 'Zq-alpha resolvable question', '--cwd', target, '--source', 'test', '--answers', b, c, '--closed']);
+  const qids = (await readdir(join(target, '.memspec', 'memory', 'questions'))).map((f) => f.replace(/\.md$/, ''));
+  // Resolve the second question by elimination: supersede c, leaving b as sole survivor.
+  await runCli(['supersede', c, '--cwd', target, '--reason', 'chose b']);
+  const resolvableQid = (await Promise.all(qids.map(async (id) => {
+    const title = await titleOf(target, 'memory/questions', id);
+    return { id, title };
+  }))).find((q) => q.title === 'Zq-alpha resolvable question')!.id;
+  await runCli(['question', resolvableQid, '--cwd', target, '--resolve']);
+
+  const res = await runCli(['search', 'Zq-alpha', '--cwd', target, '--type', 'question', '--json']);
+  const hits = JSON.parse(res.stdout) as Array<Record<string, unknown>>;
+  assert.equal(hits.length, 2);
+  assert.equal(hits.every((h) => h.type === 'question'), true);
+
+  const open = hits.find((h) => h.title === 'Zq-alpha open question')!;
+  assert.equal(open.state, 'open');
+  assert.equal(open.closed, false);
+  assert.deepEqual(open.answers, [a]);
+  assert.equal('resolved_by' in open, false);
+
+  const resolved = hits.find((h) => h.title === 'Zq-alpha resolvable question')!;
+  assert.equal(resolved.state, 'resolved');
+  assert.equal(resolved.closed, true);
+  assert.equal(resolved.resolved_by, b);
+
+  // Open sorts before resolved regardless of creation order.
+  assert.equal(hits[0].title, 'Zq-alpha open question');
+  assert.equal(hits[1].title, 'Zq-alpha resolvable question');
+});
+
+test('default search excludes question groups; --type question is the only path that returns them (CLI)', async () => {
+  const target = await initProject();
+  const a = await addFact(target, 'Default-search-exclusion answer');
+  await runCli(['question', 'Zq-marker-unique-search-term', '--cwd', target, '--source', 'test', '--answers', a]);
+
+  const defaultRes = await runCli(['search', 'Zq-marker-unique-search-term', '--cwd', target, '--json']);
+  assert.deepEqual(JSON.parse(defaultRes.stdout), []);
+
+  const typedRes = await runCli(['search', 'Zq-marker-unique-search-term', '--cwd', target, '--type', 'question', '--json']);
+  const hits = JSON.parse(typedRes.stdout) as Array<Record<string, unknown>>;
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].type, 'question');
+  assert.equal(hits[0].title, 'Zq-marker-unique-search-term');
+});
+
+test('MCP memspec_search type=question returns question groups; default search excludes them', async () => {
+  const target = await initProject();
+  const a = await addFact(target, 'Unrelated helper answer record alpha');
+
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target]);
+  try {
+    await initSession(session);
+    await session.request('tools/call', {
+      name: 'memspec_question',
+      arguments: { title: 'Mcp-zq-marker question', answers: [a], source: 'mcp-test' },
+    });
+
+    const defaultRes = await session.request('tools/call', {
+      name: 'memspec_search',
+      arguments: { query: 'Mcp-zq-marker question' },
+    });
+    const defaultPayload = (defaultRes.result as { structuredContent: { results: unknown[] } }).structuredContent;
+    assert.equal(defaultPayload.results.length, 0);
+
+    const typedRes = await session.request('tools/call', {
+      name: 'memspec_search',
+      arguments: { query: 'Mcp-zq-marker question', type: 'question' },
+    });
+    const typedPayload = (typedRes.result as { structuredContent: { results: Array<Record<string, unknown>> } }).structuredContent;
+    assert.equal(typedPayload.results.length, 1);
+    assert.equal(typedPayload.results[0].type, 'question');
+    assert.equal(typedPayload.results[0].closed, false);
+    assert.deepEqual(typedPayload.results[0].answers, [a]);
+  } finally {
+    await session.close();
+  }
+});
+
+test('MCP memspec_status structuredContent carries a questions array (parity with CLI ## Questions)', async () => {
+  const target = await initProject();
+  const a = await addFact(target, 'MCP-status-question answer');
+
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target]);
+  try {
+    await initSession(session);
+    await session.request('tools/call', {
+      name: 'memspec_question',
+      arguments: { title: 'Mcp-status-question group', answers: [a], source: 'mcp-test' },
+    });
+    const statusRes = await session.request('tools/call', { name: 'memspec_status', arguments: {} });
+    const structured = (statusRes.result as { structuredContent: { questions: Array<Record<string, unknown>> } }).structuredContent;
+    assert.ok(Array.isArray(structured.questions));
+    assert.equal(structured.questions.length, 1);
+    assert.equal(structured.questions[0].title, 'Mcp-status-question group');
+    assert.equal(structured.questions[0].state, 'open');
+  } finally {
+    await session.close();
+  }
 });
 
 test('export includes question nodes, answers edges, and derived_from edges (CLI jsonl)', async () => {

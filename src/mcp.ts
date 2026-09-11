@@ -13,7 +13,7 @@ import { runReconcile } from './commands/reconcile.js';
 import { runRelate, runUnrelate, relationTypeSchema } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
 import { formatCoverageLine, searchPayload, type SearchExpandDepth, type SearchPayload, type SearchResult } from './commands/search.js';
-import { EDGE_TYPES } from './lib/graph-walk.js';
+import { EDGE_TYPES, isDerived } from './lib/graph-walk.js';
 import { buildStatusReport, runStatus } from './commands/status.js';
 import { runSupersede } from './commands/supersede.js';
 import { runVerify } from './commands/verify.js';
@@ -48,9 +48,17 @@ function renderSearchText(payload: SearchPayload): string {
       : '';
     const driftTag = item.drifted ? ' [DRIFTED — anchored code changed; verify or supersede]' : '';
     const layerTag = item.layer ? ` (layer: ${item.layer})` : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}${layerTag}`);
+    const derivedTag = item.derived ? ' (derived)' : '';
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${derivedTag}${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}${layerTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) lines.push(`  tags: ${item.tags.join(', ')}`);
+    if (item.requires_human && item.requires_human.length > 0) {
+      lines.push(`  requires human: ${item.requires_human.join('; ')}`);
+    }
+    if (item.type === 'question') {
+      const resolvedTag = item.resolved_by ? `resolved — resolved_by ${item.resolved_by}` : 'open';
+      lines.push(`  ${item.closed ? 'closed' : 'open'}-world | ${resolvedTag} | answers: ${(item.answers ?? []).join(', ') || '(none)'}`);
+    }
     if (item.body !== undefined) {
       lines.push(`  ${item.body.split('\n').filter((l) => !l.startsWith('#')).join(' ').trim()}`);
     } else if (item.preview) {
@@ -66,10 +74,10 @@ function renderSearchText(payload: SearchPayload): string {
 
 server.tool(
   'memspec_search',
-  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Trust the top-level `coverage` field over rank when deciding whether the store actually knows something: `coverage: "none"` means no active record matches — treat it as "nothing here", do not infer an answer from an empty or low-rank result; `coverage: "weak"` means the matches are low-relevance (fewer than half the query terms occur in the top hit — the coverage_note names the unmatched ones — or a title/tag-only match, or barely above the BM25 floor) — do not read meaning into rank order. `coverage_witness` names the strongest witness backing the hits (anchor > operator > evidence > assertion): coverage "ok" with witness "assertion" is "the store claims this but nothing has verified it". A result carrying `drifted: true` is anchored to code that has since changed — verify or supersede it before relying on it; `anchor_unchecked: true` means its repo is not checked out here so drift could not be checked. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface linked-note matches — records reached by following the named links on each search match (refines / supports / depends_on / conflicts_with / supersedes / superseded_by); linked-note hits carry an `expanded_via` field naming the match and link that surfaced them. Pass as_of to filter by world-state validity at a specific point in time.',
+  'Search project memory before answering questions or starting work. Call this at the start of every task to load relevant context. Returns ranked memories (facts, decisions, procedures) matching the query. Trust the top-level `coverage` field over rank when deciding whether the store actually knows something: `coverage: "none"` means no active record matches — treat it as "nothing here", do not infer an answer from an empty or low-rank result; `coverage: "weak"` means the matches are low-relevance (fewer than half the query terms occur in the top hit — the coverage_note names the unmatched ones — or a title/tag-only match, or barely above the BM25 floor) — do not read meaning into rank order. `coverage_witness` names the strongest witness backing the hits (anchor > operator > evidence > assertion): coverage "ok" with witness "assertion" is "the store claims this but nothing has verified it". A result carrying `drifted: true` is anchored to code that has since changed — verify or supersede it before relying on it; `anchor_unchecked: true` means its repo is not checked out here so drift could not be checked. Pass full=true to receive full bodies inline (capped at a 2000-token budget across the result set). v0.5: pass expand_edges=true to also surface linked-note matches — records reached by following the named links on each search match (refines / supports / depends_on / conflicts_with / supersedes / superseded_by); linked-note hits carry an `expanded_via` field naming the match and link that surfaced them. Pass as_of to filter by world-state validity at a specific point in time. A hit carries `derived: true` when it was inferred rather than observed (any derived_from edge) — its coverage_witness counts one tier weaker for exactly that reason — and `requires_human` when it is a procedure with steps only a human may perform. Pass type=question to list question groups instead (they are otherwise invisible to this tool): each hit carries `closed`, `answers`, and `resolved_by`.',
   {
     query: z.string().describe('Search terms'),
-    type: z.enum(['fact', 'decision', 'procedure']).optional().describe('Filter by memory type'),
+    type: z.enum(['fact', 'decision', 'procedure', 'question']).optional().describe('Filter by memory type. "question" is a distinct retrieval path: question groups never carry state active, so they are otherwise invisible to search — this is the only way to list them (open groups first, then resolved; filtered by a case-insensitive title substring match when a query is given).'),
     limit: z.number().min(1).max(50).optional().describe('Max results (default 10)'),
     profile: z.string().optional().describe('Retrieval profile name from config'),
     full: z.boolean().optional().describe('Include each result body inline (token-budgeted). Defaults to previews only.'),
@@ -165,7 +173,7 @@ server.tool(
         depends_on: item.depends_on ?? [],
         derived_from: item.derived_from ?? [],
         // v0.11 — computed: a record with any derived_from edge was inferred.
-        derived: (item.derived_from?.length ?? 0) > 0,
+        derived: isDerived(item),
         requires_human: item.requires_human,
         evidence: item.evidence,
         answers: item.answers,

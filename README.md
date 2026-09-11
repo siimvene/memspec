@@ -102,7 +102,7 @@ Follows the listed ids one hop out and includes the linked notes in results. Eac
 
 ### Derived vs observed (`derived_from`, v0.11)
 
-`derived_from` marks a record as *inferred* from other records rather than observed directly — a conclusion, not a measurement. A record carrying any `derived_from` edge is `derived: true` in search/`get` JSON. Like the other positive edges it cannot coexist with a `conflicts_with` to the same target.
+`derived_from` marks a record as *inferred* from other records rather than observed directly — a conclusion, not a measurement. A record carrying any `derived_from` edge is `derived: true` in search/`get` JSON, and its search hit's header carries a `(derived)` marker in CLI/MCP text. Like the other positive edges it cannot coexist with a `conflicts_with` to the same target. See [Search](#search) for how `derived` affects `coverage_witness`.
 
 ```bash
 memspec remember fact "The cache layer is the bottleneck" --source claude-code \
@@ -111,7 +111,7 @@ memspec remember fact "The cache layer is the bottleneck" --source claude-code \
 
 ## Actuation boundary (`requires_human`, v0.11)
 
-A procedure can flag steps only a human may perform. An unattended runner reads `requires_human` and refuses those steps instead of executing them. It is a procedure-only field (a schema error elsewhere).
+A procedure can flag steps only a human may perform. An unattended runner reads `requires_human` and refuses those steps instead of executing them. It is a procedure-only field (a schema error elsewhere). A non-empty `requires_human` also carries through to search hits (JSON `requires_human`; CLI/MCP text prints a `requires human: …` line under the hit) and `memspec_get`, so a runner sees the constraint without a separate lookup.
 
 ```bash
 memspec remember procedure "Rotate the signing key" --source human:siim \
@@ -140,6 +140,12 @@ memspec remember fact "Ledger uses Postgres 16" --source siim --answers-question
 memspec question ms_01QQQ… --resolve     # once one answer survives
 ```
 
+Question records never carry `state: active`, so they're invisible to a plain `memspec search` — the normal query pipeline is built on the active-only FTS pool. `--type question` (MCP `type: "question"`) is the dedicated path: it lists question records directly instead of ranking them, open groups first, then resolved (each group newest-first); a query filters by a case-insensitive substring match against the title. Hits carry `closed`, `answers`, `state`, and `resolved_by` alongside the usual fields.
+
+```bash
+memspec search "ledger" --type question         # or: memspec search "" --type question for all of them
+```
+
 ## Code-anchored verification
 
 Calendar TTL is the wrong signal for facts about code. Memspec ties claims to file SHAs:
@@ -158,7 +164,7 @@ SQLite FTS5 full-text + BM25, recency-weighted per profile. Zero setup beyond `b
 
 Index rebuilds on demand from the markdown files. Lose the index, lose speed — not data.
 
-Every result set carries a **coverage** verdict so an agent can tell "the store knows nothing here" from a low-ranked hit: `none` (no active record matches), `weak` (fewer than half of the distinct query terms occur in the top hit, or a title/tag-only match, or barely above the BM25 floor — don't infer from rank; the note names which terms matched nothing), or `ok`. A `coverage_witness` names the strongest witness behind the hits (`anchor > operator > evidence > assertion`), so coverage `ok` with witness `assertion` reads as "claimed, but unverified". The CLI prints a final `Coverage:` line; JSON/MCP expose `coverage`, `coverage_note`, and `coverage_witness`.
+Every result set carries a **coverage** verdict so an agent can tell "the store knows nothing here" from a low-ranked hit: `none` (no active record matches), `weak` (fewer than half of the distinct query terms occur in the top hit, or a title/tag-only match, or barely above the BM25 floor — don't infer from rank; the note names which terms matched nothing), or `ok`. A `coverage_witness` names the strongest witness behind the hits (`anchor > operator > evidence > assertion`), so coverage `ok` with witness `assertion` reads as "claimed, but unverified". A **derived** hit (any `derived_from` edge — see "Derived vs observed" above) counts one tier weaker than its own `verified_with` when `coverage_witness` is computed — e.g. `evidence` reads as `assertion` — because the record's own witness only attests to how the inference step was checked, not to the ground truth its premises rest on; `assertion` is already the floor and stays `assertion`. The CLI prints a final `Coverage:` line; JSON/MCP expose `coverage`, `coverage_note`, and `coverage_witness`.
 
 Anchored results are drift-checked on the read path: a record whose anchored file has changed since it was last anchored prints a `[DRIFTED]` marker (JSON/MCP: `drifted`, with `anchor_unchecked` when the anchor's repo is not checked out here). No `reconcile` run needed to see it.
 
@@ -199,7 +205,7 @@ memspec-mcp --cwd /path/to/project   # pin a root
 
 `memspec init` auto-creates `.mcp.json` for host tool discovery (Claude Code, Cursor, etc).
 
-Thirteen MCP tools: `memspec_search`, `memspec_get`, `memspec_remember`, `memspec_supersede`, `memspec_relate`, `memspec_unrelate`, `memspec_observe`, `memspec_verify`, `memspec_outcome`, `memspec_anchor`, `memspec_reconcile`, `memspec_status`, `memspec_export`. The CLI exposes a superset (`init`, `migrate`, `sweep`, `context` are CLI-only — store creation, schema migration, physical removal, and session-start context are operator acts, not an agent surface).
+Fourteen MCP tools: `memspec_search`, `memspec_get`, `memspec_remember`, `memspec_supersede`, `memspec_relate`, `memspec_unrelate`, `memspec_observe`, `memspec_verify`, `memspec_outcome`, `memspec_question`, `memspec_anchor`, `memspec_reconcile`, `memspec_status`, `memspec_export`. The CLI exposes a superset (`init`, `migrate`, `sweep`, `context` are CLI-only — store creation, schema migration, physical removal, and session-start context are operator acts, not an agent surface).
 
 For manual `.mcp.json` setup:
 
