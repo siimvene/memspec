@@ -40,7 +40,7 @@ setProcessSessionLabel(`mcp:${process.pid}`);
 
 const server = new McpServer({
   name: 'memspec',
-  version: '0.10.0',
+  version: '0.11.0',
 });
 
 function renderSearchText(payload: SearchPayload): string {
