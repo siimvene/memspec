@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import { projectRootForStore } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
+import { CompositeStore } from '../lib/composite-store.js';
 import { findDecayCandidates } from '../lib/decay.js';
 import { validateFrontmatter } from '../lib/schema.js';
 import { computeUsageStats, type UsageStatsEntry } from '../lib/usage-stats.js';
@@ -70,6 +71,8 @@ export interface StatusReport {
   sweepCandidates: SweepCandidate[];
   total: number;
   warnings: number;
+  /** Configured store layers absent on this machine (their records are missing from every layered view). */
+  layers_unavailable: Array<{ name: string; path: string; writable: boolean }>;
   /**
    * v0.11 — active records created > 30 days ago that have either never been
    * retrieved, or not been retrieved in 60+ days. Named `cold` (not
@@ -315,6 +318,15 @@ function countEvidenceBacked(items: MemoryItem[]): number {
   return n;
 }
 
+/** Layers the cwd's layered view declares but cannot reach; never throws (status must not fail on a bad stores: block). */
+function unavailableLayersFor(cwd: string | undefined): Array<{ name: string; path: string; writable: boolean }> {
+  try {
+    return CompositeStore.forCwd(cwd).unavailableLayers();
+  } catch {
+    return [];
+  }
+}
+
 export function buildStatusReport(options: StatusOptions): { store: MemspecStore; report: StatusReport } {
   const store = new MemspecStore(options.cwd);
   const items = store.loadAll();
@@ -361,6 +373,7 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
       sweepCandidates,
       total: items.length,
       warnings: store.warnings.length,
+      layers_unavailable: unavailableLayersFor(options.cwd),
       cold,
       promotion_candidates: promotionCandidates,
       evidence_backed: evidenceBacked,
@@ -489,6 +502,13 @@ export function runStatus(options: StatusOptions): string {
     lines.push('', 'Recent:');
     for (const item of recent) {
       lines.push(`  ${item.created.substring(0, 10)} [${item.type ?? 'observation'}] ${item.title}`);
+    }
+  }
+
+  if (report.layers_unavailable.length > 0) {
+    lines.push('', '## Layers unavailable');
+    for (const l of report.layers_unavailable) {
+      lines.push(`- '${l.name}'${l.writable ? '' : ' (read-only)'} not available at ${l.path} — its records are missing from every layered view here`);
     }
   }
 

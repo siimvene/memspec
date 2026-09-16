@@ -192,22 +192,36 @@ function resolveScope(memspecRoot, cwd) {
     const expand = (x) => path.resolve(x.startsWith('~') ? x.replace('~', home) : x);
     const target = expand(cwd);
     const lines = fs.readFileSync(path.join(memspecRoot, 'config.yaml'), 'utf8').split('\n');
+    // Minimal YAML: `name:` + dash list, or inline `name: [a, b]`; entries may be
+    // quoted ('~/x', "~/x"). Both forms are documented in the README.
+    const unquote = (x) => x.trim().replace(/^(['"])(.*)\1$/, '$2').trim();
+    const matches = (name, raw) => {
+      const value = unquote(raw);
+      if (!value) return false;
+      const pattern = expand(value);
+      if (!/[*?]/.test(pattern)) {
+        return target === pattern || target.startsWith(pattern + '/');
+      }
+      const re = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]').replace(/\u0000/g, '.*') + '(/.*)?$');
+      return re.test(target);
+    };
     let inScopes = false, name = null;
     for (const line of lines) {
       if (/^scopes:\s*$/.test(line)) { inScopes = true; continue; }
       if (!inScopes) continue;
       if (/^\S/.test(line)) break; // next top-level key
-      const nm = line.match(/^  ([A-Za-z0-9_-]+):\s*$/);
-      if (nm) { name = nm[1]; continue; }
-      const it = line.match(/^\s+-\s+(\S+)\s*$/);
-      if (!it || !name) continue;
-      const pattern = expand(it[1]);
-      if (!/[*?]/.test(pattern)) {
-        if (target === pattern || target.startsWith(pattern + '/')) return name;
+      if (/^\s*#/.test(line) || /^\s*$/.test(line)) continue;
+      const inline = line.match(/^  ([A-Za-z0-9_-]+):\s*\[(.*)\]\s*$/);
+      if (inline) {
+        name = null; // inline form is complete on this line
+        for (const raw of inline[2].split(',')) if (matches(inline[1], raw)) return inline[1];
         continue;
       }
-      const re = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]').replace(/\u0000/g, '.*') + '(/.*)?$');
-      if (re.test(target)) return name;
+      const nm = line.match(/^  ([A-Za-z0-9_-]+):\s*$/);
+      if (nm) { name = nm[1]; continue; }
+      const it = line.match(/^\s+-\s+(.+?)\s*$/);
+      if (!it || !name) continue;
+      if (matches(name, it[1])) return name;
     }
   } catch {
     /* no config or unreadable: unscoped */

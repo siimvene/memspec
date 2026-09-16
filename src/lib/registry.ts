@@ -106,7 +106,9 @@ export function findStoreDirUpward(startDir: string): string | null {
  * are), the file itself has to be trusted. Refuse a pointer that
  *
  *   - lives in a world-writable directory (`/tmp`, `/private/tmp`, a shared
- *     scratch dir): anyone on the machine could have planted it; or
+ *     scratch dir): anyone on the machine could have planted it;
+ *   - lives in a directory writable by a group other than the caller's own
+ *     (a shared project group could plant it just as well); or
  *   - is owned by a different user than the one running memspec.
  *
  * POSIX only — on platforms without `process.getuid` every pointer is trusted.
@@ -122,6 +124,10 @@ function pointerIsTrusted(file: string, dir: string): boolean {
     const fileStat = statSync(file);
     const reasons: string[] = [];
     if ((dirStat.mode & 0o002) !== 0) reasons.push('its directory is world-writable');
+    const getgid = process.getgid;
+    if ((dirStat.mode & 0o020) !== 0 && typeof getgid === 'function' && dirStat.gid !== getgid()) {
+      reasons.push(`its directory is writable by group ${dirStat.gid}, not the caller's group`);
+    }
     if (fileStat.uid !== uid) reasons.push(`it is owned by uid ${fileStat.uid}, not ${uid}`);
     if (dirStat.uid !== uid) reasons.push(`its directory is owned by uid ${dirStat.uid}, not ${uid}`);
     if (reasons.length === 0) return true;

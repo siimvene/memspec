@@ -373,7 +373,11 @@ export function resolveAnchorForWrite(
 
   const rootsTried: string[] = [projectRoot];
 
-  // 1. Under the project root (today's behaviour).
+  // 1. Under the project root (today's behaviour). Kept project-relative even
+  //    when the file sits in a git repo nested under a non-repo project root:
+  //    the read side (reconcile rename detection, drift) resolves these against
+  //    the project root and runs git inside the nested repo — see
+  //    test/reconcile.test.ts "nested repo when the store root is not a git repo".
   const relInProject = relative(projectRoot, resolve(projectRoot, input));
   if (!relInProject.startsWith('..') && anchorWithinBase(projectRoot, input)) {
     const sha = blobSha(resolve(projectRoot, input));

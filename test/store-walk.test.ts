@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { MemspecStore } from '../src/lib/store.js';
@@ -215,5 +215,32 @@ test('C1: a nearer .memspec/ dir beats a farther .memspec.yaml pointer', () => {
     const composite = CompositeStore.forCwd(deep);
     assert.equal(composite.root, join(sub, '.memspec'));
     assert.equal(composite.layers.length, 1, 'nearer store is a single unlayered store, not the pointer layers');
+  });
+});
+
+test('SEC-2: a pointer in a directory writable by a foreign group is refused; group-writable by the caller\'s own group is trusted', () => {
+  if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function' || typeof process.getgroups !== 'function') return;
+  withFakeHome(() => {
+    const base = mkdtempSync(join(tmpdir(), 'memspec-ptr-grp-'));
+    const target = join(base, 'target', '.memspec');
+    mkdirSync(target, { recursive: true });
+    const decl = `stores:\n  - name: t\n    path: ${target}\n    priority: 10\n    writable: true\n`;
+
+    // Own group, g+w: still trusted (private-group umask 002 setups).
+    const own = join(base, 'own');
+    mkdirSync(join(own, 'deep'), { recursive: true });
+    writeFileSync(join(own, '.memspec.yaml'), decl);
+    chmodSync(own, 0o775);
+    assert.equal(findPointer(join(own, 'deep'))?.dir, own);
+
+    // Foreign group, g+w: refused. Needs a second group the caller belongs to.
+    const other = process.getgroups().find((g) => g !== process.getgid());
+    if (other === undefined) return;
+    const shared = join(base, 'shared');
+    mkdirSync(join(shared, 'deep'), { recursive: true });
+    writeFileSync(join(shared, '.memspec.yaml'), decl);
+    chownSync(shared, process.getuid(), other);
+    chmodSync(shared, 0o775);
+    assert.equal(findPointer(join(shared, 'deep')), null, 'a pointer another group member could have planted never redirects');
   });
 });

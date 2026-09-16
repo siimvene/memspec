@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { MemspecStore, type StoreSearchOptions, type LoadWarning, type SearchRelevanceMeta } from './store.js';
 import { loadConfig, type StoreLayerConfig } from './config.js';
@@ -241,6 +241,40 @@ export class CompositeStore {
   }
 
   /** #45 — convenience over `resolveWritable`: the store a write from `cwd` targets. */
+  /**
+   * `resolveWritable` plus the two defaults every plain write command shares
+   * (`remember`, `observe`, and anything else that takes `--store`):
+   *
+   * - `legacyGlobal`: the caller already pointed `cwd` at the home store for
+   *   `--store global`; when that store declares no layer literally named
+   *   `global`, the name is dropped and the home store's own writable layer
+   *   receives the write.
+   * - No name, several writable layers, and the layer set came from the
+   *   walked-up store's OWN config.yaml `stores:` block (the documented default
+   *   declares `project` + `global`, both writable): default to the layer that
+   *   IS the declaring store — where every pre-0.11 write landed, and a layer
+   *   of the read view for this cwd. A pointer-file repo keeps the strict rule.
+   *
+   * One resolver for every write so `observe` cannot drift from `remember`
+   * again (0.11 gate finding: observe still built `new MemspecStore(cwd)`).
+   */
+  static resolveWritableWithDefaults(cwd?: string, storeName?: string, legacyGlobal = false): WritableResolution {
+    const layered = CompositeStore.forCwd(cwd);
+    let name = storeName;
+    if (name === 'global' && legacyGlobal && !layered.getLayer('global')) {
+      name = undefined;
+    }
+    if (!name && layered.declaredIn && basename(layered.declaredIn) === 'config.yaml') {
+      const writableLayers = layered.layers.filter((l) => l.writable);
+      if (writableLayers.length > 1) {
+        const declaringRoot = resolve(dirname(layered.declaredIn));
+        const own = writableLayers.find((l) => resolve(l.store.root) === declaringRoot);
+        if (own) name = own.name;
+      }
+    }
+    return CompositeStore.resolveWritable(cwd, name);
+  }
+
   static writableFor(cwd?: string, storeName?: string): MemspecStore {
     return CompositeStore.resolveWritable(cwd, storeName).layer.store;
   }

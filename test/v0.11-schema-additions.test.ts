@@ -370,3 +370,57 @@ test('#24: adding a new active answer to a resolved question reopens it (state o
   assert.deepEqual(reloaded.answers, [a.id, b.id, c.id]);
   assert.equal(eliminationStatus(reloaded, new Map(store.loadAll().map((i) => [i.id, i]))).state, 'open');
 });
+
+// --- Release-gate security side-pass (2026-09-16): evidence default-deny -----
+
+test('SEC-1: evidence refuses hidden path components outside the store, secret-shaped names, and secret-bearing content; nothing is copied', async () => {
+  const { root } = await freshStore();
+  const dir = await mkdtemp(join(tmpdir(), 'memspec-ev-sec-'));
+  const prevAllow = process.env.MEMSPEC_EVIDENCE_ALLOW_HIDDEN;
+  delete process.env.MEMSPEC_EVIDENCE_ALLOW_HIDDEN;
+  try {
+    // ~/.ssh/id_rsa shape: hidden dir AND key name AND key content — the first check fires.
+    await mkdir(join(dir, '.ssh'), { recursive: true });
+    await writeFile(join(dir, '.ssh', 'id_rsa'), '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n');
+    assert.throws(() => validateEvidenceSource(root, join(dir, '.ssh', 'id_rsa')), /refusing evidence from a hidden path .*"\.ssh"/);
+    // A hidden dir with an innocent file is still refused (~/.aws/config, ~/.config/...).
+    await mkdir(join(dir, '.aws'), { recursive: true });
+    await writeFile(join(dir, '.aws', 'config'), '[default]\nregion=eu-north-1\n');
+    assert.throws(() => validateEvidenceSource(root, join(dir, '.aws', 'config')), /hidden path/);
+    // A dot-file in a visible dir (.env) is refused by both rules; hidden fires first.
+    await writeFile(join(dir, '.env'), 'X=1\n');
+    assert.throws(() => validateEvidenceSource(root, join(dir, '.env')), /hidden path/);
+    // Secret-by-name in a visible location.
+    await writeFile(join(dir, 'server.pem'), 'not really a key\n');
+    assert.throws(() => validateEvidenceSource(root, join(dir, 'server.pem')), /looks like a secret by name \(server\.pem\)/);
+    await writeFile(join(dir, 'credentials.json'), '{}\n');
+    assert.throws(() => validateEvidenceSource(root, join(dir, 'credentials.json')), /looks like a secret by name/);
+    // Secret-by-content in an innocent-looking file.
+    await writeFile(join(dir, 'notes.md'), 'deploy key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\n');
+    assert.throws(() => validateEvidenceSource(root, join(dir, 'notes.md')), /content contains a private key/);
+    await writeFile(join(dir, 'ci.log'), `token=ghp_${'a'.repeat(36)} used\n`);
+    assert.throws(() => validateEvidenceSource(root, join(dir, 'ci.log')), /content contains a GitHub token/);
+    await writeFile(join(dir, 'aws.txt'), 'AKIAABCDEFGHIJKLMNOP\n');
+    assert.throws(() => validateEvidenceSource(root, join(dir, 'aws.txt')), /AWS access key id/);
+    // Innocent file still passes, and attachEvidence never copied anything above.
+    await writeFile(join(dir, 'report.md'), '# fine\nno secrets here\n');
+    assert.equal(validateEvidenceSource(root, join(dir, 'report.md')).kind, 'file');
+    for (const bad of ['.ssh/id_rsa', 'server.pem', 'notes.md']) {
+      assert.throws(() => attachEvidence(root, join(dir, bad)));
+    }
+    assert.equal(existsSync(join(root, 'evidence')), false, 'nothing was copied');
+    // The store itself may be a dot-directory (~/.memspec): files inside it are not "hidden".
+    const storeParent = await mkdtemp(join(tmpdir(), 'memspec-ev-dot-'));
+    const dotStore = new MemspecStore(join(storeParent, '.memspec'));
+    dotStore.init();
+    await mkdir(join(dotStore.root, 'dream'), { recursive: true });
+    await writeFile(join(dotStore.root, 'dream', '2026-09-11.md'), '# dream pass\n');
+    assert.equal(validateEvidenceSource(dotStore.root, join(dotStore.root, 'dream', '2026-09-11.md')).kind, 'file');
+    // The hidden rule (only) can be lifted by the operator; the name/content rules cannot.
+    process.env.MEMSPEC_EVIDENCE_ALLOW_HIDDEN = '1';
+    assert.equal(validateEvidenceSource(root, join(dir, '.aws', 'config')).kind, 'file');
+    assert.throws(() => validateEvidenceSource(root, join(dir, '.ssh', 'id_rsa')), /looks like a secret by name/);
+  } finally {
+    if (prevAllow === undefined) delete process.env.MEMSPEC_EVIDENCE_ALLOW_HIDDEN; else process.env.MEMSPEC_EVIDENCE_ALLOW_HIDDEN = prevAllow;
+  }
+});

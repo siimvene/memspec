@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveSessionId } from './usage.js';
+import { ensureStoreGitignore } from './store.js';
 
 /**
  * Per-store outcome log — a durable record of what happened AFTER a memory was
@@ -35,12 +36,20 @@ export interface AppendOutcomeOptions {
   at?: string;
 }
 
-/** Append one outcome entry. Errors are swallowed — outcome log loss is non-fatal. */
-export function appendOutcome(storeRoot: string, id: string, outcome: Outcome, options: AppendOutcomeOptions = {}): void {
+/**
+ * Append one outcome entry. Returns false (never throws) when the receipt
+ * could not be written — outcome log loss is non-fatal for the caller's own
+ * operation, but a command that ONLY records an outcome must say so.
+ * Keeps the store's .gitignore current first: on a pre-0.11 store an
+ * outcome-only write used to create `outcomes.jsonl` un-ignored (session ids +
+ * free-text notes on the next `git add -A`).
+ */
+export function appendOutcome(storeRoot: string, id: string, outcome: Outcome, options: AppendOutcomeOptions = {}): boolean {
   try {
     const path = outcomesPath(storeRoot);
     const dir = dirname(path);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    ensureStoreGitignore(storeRoot);
     const entry: OutcomeEntry = {
       id,
       outcome,
@@ -51,8 +60,9 @@ export function appendOutcome(storeRoot: string, id: string, outcome: Outcome, o
     if (options.source !== undefined) entry.source = options.source;
     if (options.note !== undefined) entry.note = options.note;
     appendFileSync(path, `${JSON.stringify(entry)}\n`, 'utf8');
+    return true;
   } catch {
-    // best-effort log — never fail the caller
+    return false; // best-effort log — never fail the caller
   }
 }
 

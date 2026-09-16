@@ -31,7 +31,9 @@ export type EvidenceSource = { kind: 'url'; url: string } | { kind: 'file'; src:
  * - http(s) URL → accepted as a pointer.
  * - local file → must exist, be a regular file (a symlink is refused outright:
  *   the copy would follow it to wherever it points), be at most 5 MB, and must
- *   not live under `<store>/local/` once BOTH sides are resolved to real paths.
+ *   not live under `<store>/local/` once BOTH sides are resolved to real paths;
+ *   must not come from a hidden path component outside the store, carry a
+ *   secret-by-convention file name, or contain a private key / access token.
  *   The lexical check alone was bypassable by a symlinked parent directory;
  *   `local/` is machine-local and may hold secrets, `evidence/` is committed.
  */
@@ -71,7 +73,60 @@ export function validateEvidenceSource(storeRoot: string, pathOrUrl: string): Ev
     );
   }
 
+  // Default-deny for secret-shaped sources. The evidence dir is committed and
+  // (in a git-synced store) pushed, and the path is attacker-controlled input
+  // on the MCP surface: a prompt-injected agent asking to attach ~/.ssh/id_rsa
+  // must be refused here, not by hoping the operator reviews the next push.
+  // Three checks, all deterministic: a hidden (dot-prefixed) path component
+  // outside the store itself (~/.ssh, ~/.aws, ~/.config, .env, .git/config,
+  // .npmrc...), a well-known secret file name, and a private-key / access-token
+  // marker in the content. MEMSPEC_EVIDENCE_ALLOW_HIDDEN=1 lifts the hidden-
+  // component rule only (an operator's deliberate CLI call), never the others.
+  const storeReal = canonicalize(resolve(storeRoot));
+  const insideStore = src === storeReal || src.startsWith(storeReal + sep);
+  if (!insideStore && process.env.MEMSPEC_EVIDENCE_ALLOW_HIDDEN !== '1') {
+    const hidden = src.split(sep).find((c) => c.length > 1 && c.startsWith('.'));
+    if (hidden) {
+      throw new Error(
+        `refusing evidence from a hidden path (${pathOrUrl}: component "${hidden}"): dot-directories and dot-files commonly hold credentials, and evidence/ is committed. ` +
+        'Copy the file somewhere visible first, or set MEMSPEC_EVIDENCE_ALLOW_HIDDEN=1 for a deliberate CLI run.',
+      );
+    }
+  }
+  const name = basename(src);
+  if (SECRET_FILENAME.test(name)) {
+    throw new Error(`refusing evidence that looks like a secret by name (${name}): evidence/ is committed. Record an http(s) pointer instead.`);
+  }
+  const content = readFileSync(src);
+  const marker = findSecretMarker(content);
+  if (marker) {
+    throw new Error(`refusing evidence whose content contains a ${marker} (${pathOrUrl}): evidence/ is committed.`);
+  }
+
   return { kind: 'file', src };
+}
+
+/** File names that are secrets by convention, wherever they live. */
+const SECRET_FILENAME =
+  /^(\.env(\..*)?|\.netrc|\.npmrc|\.pypirc|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|credentials(\..*)?|.*\.(pem|key|p12|pfx|jks|keystore|kdbx|ppk))$/i;
+
+/** Content markers of private keys and well-known access-token formats. Scans the first 5 MB (the size cap). */
+const SECRET_CONTENT: Array<[RegExp, string]> = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----/, 'private key'],
+  [/\bAKIA[0-9A-Z]{16}\b/, 'AWS access key id'],
+  [/\bgh[pousr]_[A-Za-z0-9]{36,}\b/, 'GitHub token'],
+  [/\bsk-ant-[A-Za-z0-9_-]{20,}/, 'Anthropic API key'],
+  [/\bsk-[A-Za-z0-9]{32,}\b/, 'OpenAI-style API key'],
+  [/\bxox[abpr]-[A-Za-z0-9-]{10,}/, 'Slack token'],
+  [/\bnpm_[A-Za-z0-9]{36}\b/, 'npm token'],
+  [/\bglpat-[A-Za-z0-9_-]{20,}/, 'GitLab token'],
+];
+
+export function findSecretMarker(content: Buffer): string | undefined {
+  // Binary files (images, PDFs) are scanned as latin1 text; the markers are ASCII.
+  const text = content.toString('latin1');
+  for (const [re, label] of SECRET_CONTENT) if (re.test(text)) return label;
+  return undefined;
 }
 
 /**
@@ -133,7 +188,25 @@ export function attachEvidence(storeRoot: string, pathOrUrl: string): EvidenceEn
     throw new Error(`evidence path escapes the evidence directory: ${pathOrUrl}`);
   }
 
+  // No-follow containment: a synced store can carry `evidence/` or
+  // `evidence/<sha>` as a SYMLINK (git stores symlinks), and the lexical check
+  // above would pass while mkdir/copy followed it out of the store. Refuse a
+  // symlinked evidence root or shard, and verify the real destination after
+  // mkdir still sits under the real evidence root.
+  for (const dir of [evidenceRoot, destDir]) {
+    if (existsSync(dir) && lstatSync(dir).isSymbolicLink()) {
+      throw new Error(`refusing to write evidence through a symlinked directory (${relative(storeRoot, dir)}): the store's evidence/ tree must be real directories.`);
+    }
+  }
   mkdirSync(destDir, { recursive: true });
+  const realRoot = realpathSync(evidenceRoot);
+  const realDest = realpathSync(destDir);
+  if (realDest !== realRoot && !realDest.startsWith(realRoot + sep)) {
+    throw new Error(`evidence destination resolves outside the evidence directory: ${pathOrUrl}`);
+  }
+  if (existsSync(destFile) && lstatSync(destFile).isSymbolicLink()) {
+    throw new Error(`refusing to write evidence over a symlink (${relative(storeRoot, destFile)})`);
+  }
   // Same sha + same basename → identical content; a re-copy is a harmless no-op.
   if (!existsSync(destFile)) {
     copyFileSync(src, destFile);

@@ -38,7 +38,10 @@ export function runOutcome(id: string, outcomeInput: string, options: OutcomeOpt
     throw new Error(`Memory not found: ${id}`);
   }
 
-  appendOutcome(composite.primary.root, id, outcome, { source: options.source, note: options.note });
+  const written = appendOutcome(composite.primary.root, id, outcome, { source: options.source, note: options.note });
+  if (!written) {
+    throw new Error(`Could not record outcome "${outcome}" for ${id}: ${composite.primary.root}/outcomes.jsonl is not writable`);
+  }
 
   return {
     id,

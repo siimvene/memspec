@@ -191,6 +191,13 @@ export interface SearchPayload {
    * strongest witness stands on its own.
    */
   coverage_witness_note?: 'drifted' | 'anchor unchecked';
+  /**
+   * Configured store layers whose directory is absent on this machine, so
+   * their records are missing from this result set. Present only when
+   * non-empty: a `coverage: none` with a layer listed here is "the team store
+   * is not checked out", not "nobody recorded this".
+   */
+  layers_unavailable?: Array<{ name: string; path: string; writable: boolean }>;
 }
 
 /**
@@ -677,6 +684,7 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     coverage_note,
     coverage_witness: coverageWitness.tier,
     ...(coverageWitness.note !== undefined ? { coverage_witness_note: coverageWitness.note } : {}),
+    ...(store.layersUnavailable.length > 0 ? { layers_unavailable: store.unavailableLayers() } : {}),
   };
 }
 
@@ -890,10 +898,13 @@ function classifyCoverage(
 export function formatCoverageLine(payload: SearchPayload): string {
   const witnessNote = payload.coverage_witness_note ? ` (${payload.coverage_witness_note})` : '';
   const witness = payload.coverage_witness ? ` (best witness: ${payload.coverage_witness}${witnessNote})` : '';
-  if (payload.coverage === 'none') {
-    return `Coverage: none — ${payload.coverage_note}`;
-  }
-  return `Coverage: ${payload.coverage} — ${payload.coverage_note}${witness}`;
+  const missing = (payload.layers_unavailable ?? []).map(
+    (l) => `Warning: store layer '${l.name}'${l.writable ? '' : ' (read-only)'} is not available at ${l.path}; its records are missing from this view`,
+  );
+  const line = payload.coverage === 'none'
+    ? `Coverage: none — ${payload.coverage_note}`
+    : `Coverage: ${payload.coverage} — ${payload.coverage_note}${witness}`;
+  return [line, ...missing].join('\n');
 }
 
 export function runSearch(query: string, options: SearchOptions): string {

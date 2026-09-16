@@ -237,27 +237,9 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   // already pointed storeRoot at the home directory, so when that store
   // declares no layer literally named `global`, the name is dropped and the
   // home store's own writable layer receives the write.
-  const layered = CompositeStore.forCwd(storeSelectionCwd);
-  let storeName = options.store;
-  if (storeName === 'global' && options.storeRoot !== undefined && !layered.getLayer('global')) {
-    storeName = undefined;
-  }
-  // No name, several writable layers, and the layer set came from the
-  // walked-up store's OWN config.yaml `stores:` block (the documented default
-  // declares `project` + `global`, both writable): default to the layer that
-  // IS the declaring store. That is where every pre-0.11 write landed (the
-  // write path ignored `stores:` entirely), and it is a layer of the read view
-  // for this cwd, so the record stays searchable from where it was written.
-  // A pointer-file repo keeps the strict rule: name the layer or be refused.
-  if (!storeName && layered.declaredIn && basename(layered.declaredIn) === 'config.yaml') {
-    const writableLayers = layered.layers.filter((l) => l.writable);
-    if (writableLayers.length > 1) {
-      const declaringRoot = resolve(dirname(layered.declaredIn));
-      const own = writableLayers.find((l) => resolve(l.store.root) === declaringRoot);
-      if (own) storeName = own.name;
-    }
-  }
-  const resolvedWrite = CompositeStore.resolveWritable(storeSelectionCwd, storeName);
+  // Both defaults live in `resolveWritableWithDefaults` so `observe` applies
+  // the identical rule.
+  const resolvedWrite = CompositeStore.resolveWritableWithDefaults(storeSelectionCwd, options.store, options.storeRoot !== undefined);
   const store = resolvedWrite.layer.store;
   store.init();
 

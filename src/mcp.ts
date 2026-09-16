@@ -124,6 +124,7 @@ server.tool(
           coverage_note: payload.coverage_note,
           coverage_witness: payload.coverage_witness,
           coverage_witness_note: payload.coverage_witness_note,
+          ...(payload.layers_unavailable ? { layers_unavailable: payload.layers_unavailable } : {}),
         },
       };
     } catch (err) {
@@ -324,7 +325,7 @@ server.tool(
     derived_from: z.array(z.string()).optional().describe('Memory ids this record was INFERRED from rather than observed directly (forms a typed edge; the record is then marked derived). Use when the claim is a conclusion drawn from other records, not a direct observation.'),
     conflicts_with: z.array(z.string()).optional().describe('Memory ids this record explicitly contradicts. Caller-asserted only — each target must exist and is marked "asserted" in ext.edge_sources. Use when you have confirmed the contradiction; for mere topic overlap, act on the response\'s suggested_conflicts instead.'),
     requires_human: z.array(z.string()).optional().describe('Procedures only: step labels or short phrases a human must perform. An unattended runner refuses these steps. Rejected on fact/decision records.'),
-    evidence: z.array(z.string()).optional().describe('Evidence attachments: local file paths (copied, content-addressed, into <store>/evidence/ — refused over 5 MB or from local/) or http(s) URLs (recorded as pointers, never fetched). A file-backed entry witnesses an anchorless claim as `evidence`.'),
+    evidence: z.array(z.string()).optional().describe('Evidence attachments: local file paths (copied, content-addressed, into <store>/evidence/ — refused over 5 MB, from local/, from hidden dot-paths outside the store, or when the name/content looks like a credential) or http(s) URLs (recorded as pointers, never fetched). A file-backed entry witnesses an anchorless claim as `evidence`.'),
     answers_question: z.string().optional().describe('A question id to register this new record against as a competing answer, in the same call (v0.11 question groups).'),
     valid_from: z.string().optional().describe('ISO 8601 timestamp when the world-state truth becomes valid (v0.5 temporal validity; orthogonal to check_by)'),
     valid_to: z.string().optional().describe('ISO 8601 timestamp when the world-state truth ceases to hold (v0.5 temporal validity; orthogonal to check_by)'),

@@ -54,6 +54,33 @@ shape is (real array vs string), a non-conforming `anchor` value must
 either be coerced or produce a loud `anchor_warnings` entry — a silent
 downgrade from `anchor` to `assertion` witness defeats the witness chain.
 
+### 4. Release-gate panel leftovers (2026-09-16, MEDIUM, deferred to 0.11.x)
+
+Cross-vendor panel on the 0.10→0.11 diff; verified against code, not fixed
+in 0.11.0:
+
+- **Layer-owned usage receipts are read only from the primary store.**
+  `recordSurfacedHitsByLayer` appends the receipt to the owning layer, but
+  `computeUsageStats`/`memspec_get`/context's usage boost read `store.root`
+  only, so a team-layer hit never gains `last_referenced`/`sessions`.
+- **Outcomes for layered records land in the primary, receipts in the owner.**
+  `status` on the owning store sees the sessions but not the `dead_end`, and
+  may list the record as a promotion candidate. Decide one home for both.
+- **Session-start hook ignores `.memspec.yaml` pointers.** `findMemspecRoot`
+  walks for `.memspec/` only; a pointer-only repo gets `~/.memspec` context
+  without the team layer. Mirror `registry.findPointer` in the hook.
+- **`remember --answers-question` resolves the question in the write layer
+  only.** A question in another layer reads "Question not found" although
+  `memspec question <id> --add` resolves its own layer.
+- **Schema: `resolved_by` not validated against `state`.** A resolved question
+  without `resolved_by` (or an open one with it) passes; require it for
+  resolved, forbid for open, and require membership in `answers`.
+- **Anchor write form differs by input spelling.** For a file in a git repo
+  nested under a non-repo project root, an ABSOLUTE input becomes
+  `{repo, file}` while the same file given RELATIVE stays project-relative
+  (the form reconcile's nested-repo rename detection relies on). Pick one;
+  the relative form is the tested one.
+
 ## Done
 
 (nothing yet — file created 2026-08-08)

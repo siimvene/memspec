@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { ulid } from 'ulid';
 import { loadConfig } from '../lib/config.js';
 import { assertKnownScope, assertScopeRequired, resolveScopeForCwd } from '../lib/scope.js';
-import { MemspecStore } from '../lib/store.js';
+import { CompositeStore } from '../lib/composite-store.js';
 import { DEFAULT_OBSERVATION_TTL_DAYS } from '../lib/types.js';
 
 export interface ObserveOptions {
@@ -81,7 +81,11 @@ export function runObserve(options: ObserveOptions): ObserveResult {
     throw new Error('observe requires non-empty text');
   }
 
-  const store = new MemspecStore(options.cwd);
+  // Same write-target resolution as `remember`: a `.memspec.yaml` pointer, a
+  // walked-up store's `stores:` block and read-only layers all apply. Building
+  // `new MemspecStore(cwd)` here (pre-gate 0.11) could create a phantom
+  // `<cwd>/.memspec` or write past a layer's `writable: false`.
+  const store = CompositeStore.resolveWritableWithDefaults(options.cwd).layer.store;
   store.init();
 
   // Same derivation as `remember`: an observation captured while working on one

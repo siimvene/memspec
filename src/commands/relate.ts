@@ -10,10 +10,10 @@ import type { MemoryItem } from '../lib/types.js';
  * record. Falls back to a plain store when no layer owns the id, so the
  * caller's own not-found error still fires with its original message.
  */
-function writableStoreFor(cwd: string | undefined, id: string): MemspecStore {
+function writableStoreFor(cwd: string | undefined, id: string): { store: MemspecStore; view: CompositeStore } {
   const composite = CompositeStore.forCwd(cwd);
   const owner = composite.assertWritableLayerForId(id);
-  return owner ? owner.store : new MemspecStore(cwd);
+  return { store: owner ? owner.store : new MemspecStore(cwd), view: composite };
 }
 
 /**
@@ -104,13 +104,16 @@ export function runRelate(options: RelateOptions): RelateResult {
     throw new Error(`relate refuses self-edges (${options.from} → ${options.to})`);
   }
 
-  const store = writableStoreFor(options.cwd, options.from);
+  const { store, view } = writableStoreFor(options.cwd, options.from);
 
   const from = store.findById(options.from);
   if (!from) throw new Error(`Memory not found: ${options.from}`);
   assertNotQuestion(from, 'relate');
 
-  const to = store.findById(options.to);
+  // The edge is written onto `from` only, so the target may live in ANY layer
+  // of the read view (a read-only team record included) — the same rule
+  // `remember --supports/--refines` applies at creation time.
+  const to = store.findById(options.to) ?? view.findById(options.to);
   if (!to) throw new Error(`Memory not found: ${options.to}`);
 
   // A record must not both conflict with and positively relate to the same
@@ -225,7 +228,7 @@ export function runUnrelate(options: UnrelateOptions): UnrelateResult {
     throw new Error('unrelate requires --reason (the removal is logged durably into the record)');
   }
 
-  const store = writableStoreFor(options.cwd, options.from);
+  const { store } = writableStoreFor(options.cwd, options.from);
 
   const from = store.findById(options.from);
   if (!from) throw new Error(`Memory not found: ${options.from}`);

@@ -2,6 +2,21 @@
 
 ## 0.11.0 — 2026-09-11
 
+### Security (release gate, 2026-09-16)
+
+- **Evidence attachments default-deny secret-shaped sources.** `--evidence` / `evidence` / `evidence_file` copy into the committed `evidence/` dir, and the path is attacker-controlled on the MCP surface (a prompt-injected agent could attach `~/.ssh/id_rsa` and the next store sync would push it). `validateEvidenceSource` now also refuses: any hidden (dot-prefixed) path component outside the store itself (`MEMSPEC_EVIDENCE_ALLOW_HIDDEN=1` lifts only this rule, for a deliberate CLI run), secret-by-convention file names (`.env*`, `.netrc`, `.npmrc`, ssh key names, `credentials*`, `*.pem/.key/.p12/.pfx/.jks/.keystore/.kdbx/.ppk`), and content carrying a private-key block or a well-known access-token format (AWS, GitHub, Anthropic, OpenAI-style, Slack, npm, GitLab). Decided before any byte is copied, like every other refusal. Blind security side-pass finding.
+- **Trusted-pointer check rejects foreign-group-writable directories.** `.memspec.yaml` redirects reads and writes; a pointer in a directory writable by a group other than the caller's is now ignored like a world-writable one (shared project groups could plant it).
+
+### Fixes from the release-gate consort panel (Codex gpt-5.6 + Gemini 3.1 Pro, 2026-09-16)
+
+- **`observe` resolves its write target like `remember`.** It built `new MemspecStore(cwd)` directly, so in a `.memspec.yaml`-bound repo it created a phantom `<cwd>/.memspec` and it could write past a layer's `writable: false`. Both commands now share `CompositeStore.resolveWritableWithDefaults` (both legs found this).
+- **Unavailable layers are disclosed.** `layersUnavailable` was computed but consumed nowhere: a missing team checkout read as `coverage: none`. `search`/`memspec_search` now carry `layers_unavailable` (name, path, writable) when non-empty, the text renderer prints a `Warning: store layer '<name>' … is not available at <path>` line under `Coverage:`, and `status` gains a `## Layers unavailable` section (`layers_unavailable` in JSON).
+- **Evidence destination is checked no-follow.** A synced store can carry `evidence/` or `evidence/<sha>` as a symlink; the lexical containment check passed and the copy followed it out of the store. Symlinked evidence root/shard/file are refused and the real destination is verified against the real evidence root after `mkdir`.
+- **Outcome-only writes keep `.gitignore` current and report loss.** `appendOutcome` (CLI `outcome`, MCP `memspec_outcome`, `supersede`) now calls `ensureStoreGitignore` first — on a pre-0.11 store the first outcome used to create `outcomes.jsonl` un-ignored — and returns `false` instead of swallowing a write failure; `memspec outcome` then errors instead of printing "Recorded".
+- **`relate` finds cross-layer targets.** The edge is written onto `--from` only, so `--to` may live in any layer of the read view (a read-only team record included), matching what `remember --supports/--refines` already accepted. Previously "Memory not found".
+- **Session-start hook parses the documented scope forms.** Inline lists (`kleidia: [~/git/kleidia, ~/git/kleidia-docs]`) and quoted entries resolved to no scope, so the hook ran `context` unscoped. Comments and blank lines inside `scopes:` are skipped.
+- Dismissed after verification: "relative anchor paths under the project root bypass the cross-repo check" — the project-relative form for a git repo nested under a non-repo store root is the tested contract that lets `reconcile` detect renames inside that repo (`test/reconcile.test.ts`); the absolute-path branch's cross-repo conversion is the inconsistency to revisit, logged in BACKLOG.md.
+
 ### Features
 
 - **Read-path anchor drift.** `search` / `memspec_search` now flag an active anchored record whose code has changed since it was last anchored, without a separate `reconcile` run. CLI text prints a `[DRIFTED]` marker next to the stale marker; the JSON/MCP result carries `drifted`, `anchor_unchecked` (repo not checked out, so drift could not be checked), and a per-file `drift` list. `memspec_get` carries the same fields. The check never mutates files, never throws, memoizes blob SHAs per process (keyed by path+mtime+size) so a long-lived MCP server does not re-hash stable files per query, and only runs for active anchored records. Boot context is unchanged.
