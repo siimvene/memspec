@@ -432,16 +432,20 @@ test('drift: memspec_get over MCP names the ref each drift entry was compared to
   }
 });
 
-test('drift: verify and reconcile keep working-tree semantics', async () => {
+test('drift: verify agrees with the read path; reconcile keeps working-tree semantics', async () => {
   const fx = await anchoredRepoFixture();
   git(fx.project, 'checkout', '-q', '-b', 'feature');
   writeFileSync(join(fx.project, 'engine.ts'), 'export const e = 5;\n');
   resetCaches();
   // Read path: matches main, not drifted.
   assert.equal(hit(fx.project).drifted, false);
-  // verify hashes the working tree, exactly as before.
+  // verify gives the same verdict as the read path: a record whose anchor still
+  // matches origin's default branch is verified even while this checkout sits on
+  // a branch that edited the file. Otherwise search says "fine" and verify says
+  // "needs review" for the same record (2026-10-17: a team-store triage whose
+  // anchors were taken at origin/main could not verify from a stale checkout).
   const v = runVerify(fx.id, { cwd: fx.project, source: 'test' });
-  assert.equal(v.status, 'needs_review');
+  assert.equal(v.status, 'verified');
   // reconcile answers "what did this checkout change" — the working tree.
   const rc = runReconcile({ cwd: fx.project });
   assert.deepEqual(rc.candidates.map((c) => c.changed_files), [[{ file: 'engine.ts', status: 'changed' }]]);

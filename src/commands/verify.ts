@@ -77,7 +77,14 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   }
 
   const config = loadConfig(store.root);
-  const statuses = checkAnchors(projectRoot, anchors, { repoSearchPaths: config.anchors?.repo_search_paths });
+  // Same verdict as the read path (search/get/context/status): an anchor holds
+  // when its recorded blob matches the working tree OR origin's default branch.
+  // A worktree-only check here contradicted search for any record anchored to
+  // main and verified from a checkout on another branch.
+  const statuses = checkAnchors(projectRoot, anchors, {
+    repoSearchPaths: config.anchors?.repo_search_paths,
+    compareTo: 'default-branch',
+  });
   const unavailable = statuses.filter((a) => a.status === 'repo_unavailable');
   const drifted = statuses.filter((a) => a.status === 'changed' || a.status === 'missing');
 
