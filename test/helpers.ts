@@ -27,6 +27,11 @@ export async function runCli(
       env: {
         ...process.env,
         TZ: 'UTC',
+        // init installs Claude Code hooks into CLAUDE_CONFIG_DIR. Point it at a
+        // directory that does not exist so a test run never writes into the
+        // developer's real config (hook install is skipped); a test that wants
+        // the install passes its own CLAUDE_CONFIG_DIR and HOME.
+        CLAUDE_CONFIG_DIR: join(tmpdir(), 'memspec-test-no-claude-config'),
         // Overrides land last so a test can redirect HOME — and with it the
         // `--store global` target — away from the operator's real store.
         ...env,

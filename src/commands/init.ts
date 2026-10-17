@@ -1,14 +1,20 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemspecStore } from '../lib/store.js';
 import { findStoreDirUpward } from '../lib/registry.js';
 import { detectBrownfieldSources, importBrownfield } from '../lib/brownfield.js';
 import { patchAgentInstructions } from '../lib/agent-addon.js';
+import { canonical, claudeConfigDir, isDefaultClaudeConfigDir, shellQuote } from '../lib/claude-config.js';
 
 export interface InitOptions {
   cwd?: string;
+  /**
+   * Positional form of the project root (`memspec init <path>`). Same meaning
+   * as `cwd`; giving both with different values is an error.
+   */
+  path?: string;
   /** Accepted for CLI back-compat (`--no-interactive`); no prompts remain to gate. */
   interactive?: boolean;
   skipImport?: boolean;
@@ -75,16 +81,91 @@ function isMemspecHookCommand(command: string): boolean {
   return /memspec-(session-start|consolidate)\.js/.test(command);
 }
 
-function installClaudeCodeHooks(): { messages: string[] } {
+/**
+ * Split a hook command into shell words: single quotes are literal, double
+ * quotes allow backslash escapes, and `$HOME` / `${HOME}` / a leading `~/` are
+ * expanded outside single quotes. Enough to recognise the hook paths memspec
+ * and people write; not a general shell parser.
+ */
+export function hookCommandWords(command: string, home: string): string[] {
+  const words: string[] = [];
+  let word = '';
+  let inWord = false;
+  let i = 0;
+  const expandHome = (text: string) => text.replace(/\$\{HOME\}|\$HOME(?![A-Za-z0-9_])/g, home);
+  while (i < command.length) {
+    const ch = command[i];
+    if (/\s/.test(ch)) {
+      if (inWord) words.push(word);
+      word = '';
+      inWord = false;
+      i += 1;
+      continue;
+    }
+    inWord = true;
+    if (ch === "'") {
+      const end = command.indexOf("'", i + 1);
+      const stop = end === -1 ? command.length : end;
+      word += command.slice(i + 1, stop);
+      i = stop + 1;
+      continue;
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      let chunk = '';
+      while (j < command.length && command[j] !== '"') {
+        if (command[j] === '\\' && j + 1 < command.length && '"\\$`'.includes(command[j + 1])) {
+          chunk += command[j + 1];
+          j += 2;
+          continue;
+        }
+        chunk += command[j];
+        j += 1;
+      }
+      word += expandHome(chunk);
+      i = j + 1;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < command.length) {
+      word += command[i + 1];
+      i += 2;
+      continue;
+    }
+    let j = i;
+    while (j < command.length && !/[\s'"\\]/.test(command[j])) j += 1;
+    let chunk = command.slice(i, j);
+    if (word === '' && (chunk === '~' || chunk.startsWith('~/'))) chunk = home + chunk.slice(1);
+    word += expandHome(chunk);
+    i = j;
+  }
+  if (inWord) words.push(word);
+  return words;
+}
+
+/** True when `command` runs exactly `hookPath` (compared after expansion and realpath). */
+export function commandRunsHook(command: string, hookPath: string, home: string = homedir()): boolean {
+  const target = canonical(hookPath);
+  return hookCommandWords(command, home).some((word) => word.startsWith('/') && canonical(word) === target);
+}
+
+export function installClaudeCodeHooks(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): { messages: string[] } {
   const messages: string[] = [];
-  const claudeDir = join(homedir(), '.claude');
+  const claudeDir = claudeConfigDir(env, home);
+  const isDefault = isDefaultClaudeConfigDir(claudeDir, home);
+  const shownDir = isDefault ? '~/.claude' : claudeDir;
   if (!existsSync(claudeDir)) {
+    if (!isDefault) {
+      messages.push(`CLAUDE_CONFIG_DIR is ${claudeDir}, which does not exist; skipped hook install`);
+    }
     return { messages };
   }
 
   const sourceHooksDir = findHooksDir();
   if (!sourceHooksDir) {
-    messages.push('Detected Claude Code at ~/.claude but could not locate memspec hook scripts; skipped hook install');
+    messages.push(`Detected Claude Code at ${shownDir} but could not locate memspec hook scripts; skipped hook install`);
     return { messages };
   }
 
@@ -136,14 +217,36 @@ function installClaudeCodeHooks(): { messages: string[] } {
   let registrationChanged = false;
   for (const hook of HOOKS_TO_INSTALL) {
     const event = hook.event;
-    const command = `node "$HOME/.claude/hooks/${hook.file}"`;
+    const hookPath = join(targetHooksDir, hook.file);
+    // The default directory keeps the portable `$HOME` form earlier versions
+    // wrote, so an existing registration still matches; any other directory
+    // gets its absolute path, quoted (config dirs often contain spaces).
+    const command = isDefault ? `node "$HOME/.claude/hooks/${hook.file}"` : `node ${shellQuote(hookPath)}`;
     const existingForEvent = settings.hooks[event] ?? [];
 
-    const alreadyRegistered = existingForEvent.some((entry) =>
-      entry.hooks?.some((h) => isMemspecHookCommand(h.command) && h.command.includes(hook.file)),
+    const memspecHooks = existingForEvent.flatMap((entry) =>
+      (entry.hooks ?? []).filter((h) => typeof h.command === 'string' && isMemspecHookCommand(h.command) && h.command.includes(hook.file)),
     );
-    if (alreadyRegistered) {
+    if (memspecHooks.some((h) => commandRunsHook(h.command, hookPath, home))) {
       messages.push(`Hook ${hook.file} already registered for ${event}; left settings.json unchanged`);
+      continue;
+    }
+    // A non-default config dir whose settings run the ~/.claude copy (copied
+    // settings, or an install from before CLAUDE_CONFIG_DIR was honoured):
+    // point those entries at the copy this directory holds, instead of adding
+    // a second entry that would run the hook twice.
+    const homeCopy = join(home, '.claude', 'hooks', hook.file);
+    const stale = isDefault ? [] : memspecHooks.filter((h) => commandRunsHook(h.command, homeCopy, home));
+    if (stale.length > 0) {
+      for (const h of stale) h.command = command;
+      registrationChanged = true;
+      messages.push(`Repointed ${hook.file} for ${event} from ${homeCopy} to ${hookPath} in ${settingsPath}`);
+      continue;
+    }
+    if (memspecHooks.length > 0) {
+      // Registered at some other path someone chose (a checkout, a package
+      // dir): theirs to keep. Left as it was, as before.
+      messages.push(`Hook ${hook.file} already registered for ${event} at another path; left settings.json unchanged`);
       continue;
     }
 
@@ -165,8 +268,27 @@ function installClaudeCodeHooks(): { messages: string[] } {
   return { messages };
 }
 
+/**
+ * The project root init works on. `memspec init <path>` and `--cwd <path>`
+ * mean the same thing. A path that names a store directory itself
+ * (`~/.memspec`) is taken as its parent, because the store always lives at
+ * `<root>/.memspec`: `memspec init ~/.memspec` creates `~/.memspec`, not
+ * `~/.memspec/.memspec`. The one exception is a `.memspec` directory that
+ * already holds its own nested store, which stays the root as before.
+ */
+export function resolveInitRoot(options: Pick<InitOptions, 'cwd' | 'path'>): string {
+  if (options.cwd && options.path && resolve(options.cwd) !== resolve(options.path)) {
+    throw new Error(`init got two different project roots (--cwd ${options.cwd} and ${options.path}); pass one`);
+  }
+  const root = resolve(options.cwd ?? options.path ?? process.cwd());
+  if (basename(root) === '.memspec' && !existsSync(join(root, '.memspec'))) {
+    return dirname(root);
+  }
+  return root;
+}
+
 export async function runInit(options: InitOptions): Promise<string> {
-  const projectRoot = resolve(options.cwd ?? process.cwd());
+  const projectRoot = resolveInitRoot(options);
 
   // C1: don't silently nest a store under a repo that already has one. If this
   // directory has no store of its own but a parent (within the walk fence: up

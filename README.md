@@ -224,7 +224,7 @@ For manual `.mcp.json` setup:
 `~/.memspec/` is a cross-project memory layer for personal preferences, common patterns, infra knowledge. When both stores exist, the project store takes priority; global merges as a lower layer.
 
 ```bash
-memspec init --cwd ~/.memspec
+memspec init ~          # or: memspec init ~/.memspec (a path ending in .memspec means its parent)
 ```
 
 ## Store resolution
@@ -376,7 +376,7 @@ Frontmatter fields per record: `id`, `kind` (`claim | observation | question`), 
 
 ## Hooks for Claude Code
 
-`memspec init` installs two hooks at `~/.claude/hooks/`:
+`memspec init` installs two hooks into the Claude Code config directory: `$CLAUDE_CONFIG_DIR/hooks/` when that variable is set, `~/.claude/hooks/` otherwise, and registers them in that directory's `settings.json`. Run it with the same `CLAUDE_CONFIG_DIR` your sessions use; for several config directories, run it once per directory. Settings there that still run the `~/.claude` copy are repointed to the directory's own copy:
 
 - `memspec-session-start.js` — runs `memspec context` and injects memory into the session prompt so the agent doesn't have to remember to search; also surfaces unreviewed dream passes (counts + open questions) until a `_Reviewed:` marker lands (v0.8+)
 - `memspec-consolidate.js` — on commit, prompts the agent to write memories about what just shipped

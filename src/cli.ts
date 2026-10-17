@@ -32,19 +32,20 @@ const program = new Command();
 program
   .name('memspec')
   .description('Structured memory for AI agents')
-  .version('0.12.2')
+  .version('0.12.3')
   .showHelpAfterError();
 
 program
   .command('init')
   .description('Initialize a memspec store')
+  .argument('[path]', 'project root (same as --cwd); a path ending in .memspec means its parent')
   .option('--cwd <path>', 'project root')
   .option('--no-interactive', 'disable setup prompts')
   .option('--skip-import', 'skip brownfield memory import')
   .option('--skip-patch', 'skip AGENTS.md/CLAUDE.md patching')
-  .option('--no-install-hooks', 'skip installing Claude Code hooks into ~/.claude/')
+  .option('--no-install-hooks', 'skip installing Claude Code hooks into $CLAUDE_CONFIG_DIR (default ~/.claude/)')
   .option('--force', 'create a store here even though a parent directory already has one; without it init refuses to nest stores')
-  .action(async (options: {
+  .action(async (path: string | undefined, options: {
     cwd?: string;
     interactive?: boolean;
     skipImport?: boolean;
@@ -52,7 +53,7 @@ program
     installHooks?: boolean;
     force?: boolean;
   }) => {
-    console.log(await runInit(options));
+    console.log(await runInit({ ...options, path }));
   });
 
 program
