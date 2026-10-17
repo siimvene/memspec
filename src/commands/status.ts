@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import { projectRootForStore } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
-import { CompositeStore, type PendingPromotion } from '../lib/composite-store.js';
+import { CompositeStore, describeStaleLayer, type PendingPromotion, type StaleLayer } from '../lib/composite-store.js';
 import { findDecayCandidates } from '../lib/decay.js';
 import { validateFrontmatter } from '../lib/schema.js';
 import { computeUsageStats, type UsageStatsEntry } from '../lib/usage-stats.js';
@@ -73,6 +73,12 @@ export interface StatusReport {
   warnings: number;
   /** Configured store layers absent on this machine (their records are missing from every layered view). */
   layers_unavailable: Array<{ name: string; path: string; writable: boolean }>;
+  /**
+   * Configured store layers read from a git checkout that is off its remote
+   * default branch or behind it (local refs, as of the last fetch): their
+   * records may be older than what the team has merged.
+   */
+  layers_stale: StaleLayer[];
   /**
    * v0.11 — active records created > 30 days ago that have either never been
    * retrieved, or not been retrieved in 60+ days. Named `cold` (not
@@ -334,6 +340,15 @@ function unavailableLayersFor(cwd: string | undefined): Array<{ name: string; pa
   }
 }
 
+/** Layers read from a stale git checkout in the cwd's layered view; never throws (same reason as above). */
+function staleLayersFor(cwd: string | undefined): StaleLayer[] {
+  try {
+    return CompositeStore.forCwd(cwd).staleLayers();
+  } catch {
+    return [];
+  }
+}
+
 /** Pending cross-layer promotions in the cwd's layered view; never throws (same reason as above). */
 function pendingPromotionsFor(cwd: string | undefined): PendingPromotion[] {
   try {
@@ -391,6 +406,7 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
       total: items.length,
       warnings: store.warnings.length,
       layers_unavailable: unavailableLayersFor(options.cwd),
+      layers_stale: staleLayersFor(options.cwd),
       cold,
       promotion_candidates: promotionCandidates,
       evidence_backed: evidenceBacked,
@@ -534,6 +550,13 @@ export function runStatus(options: StatusOptions): string {
     lines.push('', '## Layers unavailable');
     for (const l of report.layers_unavailable) {
       lines.push(`- '${l.name}'${l.writable ? '' : ' (read-only)'} not available at ${l.path} — its records are missing from every layered view here`);
+    }
+  }
+
+  if (report.layers_stale.length > 0) {
+    lines.push('', '## Layers stale');
+    for (const l of report.layers_stale) {
+      lines.push(`- ${describeStaleLayer(l)} — its records may be outdated; pull that checkout onto ${l.default_branch}`);
     }
   }
 

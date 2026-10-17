@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { anchorWithinBase, resolveRepoRoot } from './anchors.js';
+import { anchorWithinBase, blobOnDefaultBranch, resolveRepoRoot } from './anchors.js';
 import type { CodeAnchor } from './types.js';
 
 /**
@@ -17,6 +17,15 @@ import type { CodeAnchor } from './types.js';
  * once, and returns a compact drift summary the search payload surfaces as a
  * `[DRIFTED]` marker (CLI) / `drifted` + `anchor_unchecked` fields (MCP JSON).
  * Files are never mutated.
+ *
+ * What "current content" means: the blob on the anchored repo's remote default
+ * branch (`origin/main`, from local refs, as of the last fetch), not the
+ * working tree. A code checkout is usually on some feature branch; hashing its
+ * working tree made every record anchored to main read `drifted` there, and
+ * masked real drift on main while the checkout lagged behind it. The working
+ * tree is still the comparison when the repo has no remote default ref, the
+ * file is gitignored, or git cannot answer — and each drift entry's
+ * `compared_to` says which one was used.
  */
 
 export type DriftStatus = 'changed' | 'missing' | 'repo_unavailable';
@@ -27,7 +36,18 @@ export interface DriftInfo {
   /** At least one anchor could not be checked (repo not checked out, or path escaped its base). */
   anchor_unchecked: boolean;
   /** Per-anchor detail for the notable (non-unchanged) anchors only. */
-  drift: Array<{ file: string; status: DriftStatus }>;
+  drift: DriftEntry[];
+}
+
+export interface DriftEntry {
+  file: string;
+  status: DriftStatus;
+  /**
+   * What the recorded sha was compared against: the remote default-branch ref
+   * (e.g. `origin/main`) or `worktree`. Absent on `repo_unavailable`, where
+   * nothing could be compared.
+   */
+  compared_to?: string;
 }
 
 // Process-level blob-SHA cache. Keyed by identity+size+mtime so an edited file
@@ -69,6 +89,29 @@ export interface DriftCheckOptions {
 }
 
 /**
+ * One anchor's notable state, or null when it is unchanged. A repo that is not
+ * checked out (or a containment escape) is `repo_unavailable`; a changed or
+ * absent file is `changed` / `missing`, tagged with what it was compared to.
+ */
+function driftOf(projectRoot: string, anchor: CodeAnchor, repoSearchPaths: string[]): DriftEntry | null {
+  let root = projectRoot;
+  if (anchor.repo) {
+    const repoRoot = resolveRepoRoot(projectRoot, anchor.repo, repoSearchPaths);
+    if (!repoRoot) return { file: anchor.file, status: 'repo_unavailable' };
+    root = repoRoot;
+  }
+  if (!anchorWithinBase(root, anchor.file)) return { file: anchor.file, status: 'repo_unavailable' };
+  // Ref lookups are memoized in git-state (repo + ref commit sha + path),
+  // working-tree hashes here (path + mtime + size), so a long-lived server
+  // spawns git once per anchored path per ref position.
+  const abs = resolve(root, anchor.file);
+  const onRef = blobOnDefaultBranch(abs);
+  const current = onRef ? onRef.sha : cachedBlobSha(abs);
+  if (current === anchor.sha) return null;
+  return { file: anchor.file, status: current === null ? 'missing' : 'changed', compared_to: onRef ? onRef.ref : 'worktree' };
+}
+
+/**
  * Compare each anchor's recorded SHA against the file's current content, cheaply
  * and without throwing. A repo that is not checked out (or a containment escape)
  * is `anchor_unchecked`, not drift: we could not look, so we do not claim the
@@ -81,35 +124,15 @@ export function computeDrift(
   options: DriftCheckOptions = {},
 ): DriftInfo | null {
   if (anchors.length === 0) return null;
-  const detail: Array<{ file: string; status: DriftStatus }> = [];
+  const detail: DriftEntry[] = [];
   let drifted = false;
   let unchecked = false;
-
   for (const anchor of anchors) {
-    let root = projectRoot;
-    if (anchor.repo) {
-      const repoRoot = resolveRepoRoot(projectRoot, anchor.repo, options.repoSearchPaths ?? []);
-      if (!repoRoot) {
-        unchecked = true;
-        detail.push({ file: anchor.file, status: 'repo_unavailable' });
-        continue;
-      }
-      root = repoRoot;
-    }
-    if (!anchorWithinBase(root, anchor.file)) {
-      unchecked = true;
-      detail.push({ file: anchor.file, status: 'repo_unavailable' });
-      continue;
-    }
-    const current = cachedBlobSha(resolve(root, anchor.file));
-    if (current === null) {
-      drifted = true;
-      detail.push({ file: anchor.file, status: 'missing' });
-    } else if (current !== anchor.sha) {
-      drifted = true;
-      detail.push({ file: anchor.file, status: 'changed' });
-    }
+    const entry = driftOf(projectRoot, anchor, options.repoSearchPaths ?? []);
+    if (!entry) continue;
+    detail.push(entry);
+    if (entry.status === 'repo_unavailable') unchecked = true;
+    else drifted = true;
   }
-
   return { drifted, anchor_unchecked: unchecked, drift: detail };
 }

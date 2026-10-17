@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { CompositeStore } from '../lib/composite-store.js';
+import { CompositeStore, describeStaleLayer, type StaleLayer } from '../lib/composite-store.js';
 import { getAgingDays, getProfile, loadConfig } from '../lib/config.js';
 import { agingOf } from '../lib/decay.js';
 import { tokenizeLikeIndex } from '../lib/fts.js';
@@ -7,7 +7,7 @@ import { EDGE_TYPES, expandGraph, isDerived, type EdgeType, type ExpansionHit } 
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
 import { assertKnownScope, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
 import { type SearchRelevanceMeta, type StoreSearchOptions } from '../lib/store.js';
-import { type DriftStatus } from '../lib/drift.js';
+import { type DriftEntry } from '../lib/drift.js';
 import { MEMORY_TYPES, VERIFIED_WITH, type MemoryItem, type MemoryType, type RecordState, type VerifiedWith } from '../lib/types.js';
 import { recordSurfacedHitsByLayer, type UsageSurface } from '../lib/usage.js';
 import { computeUsageStats } from '../lib/usage-stats.js';
@@ -136,10 +136,12 @@ export interface SearchResult {
    * `drifted` is true when an anchored file changed or went missing within an
    * available repo; `anchor_unchecked` is true when at least one anchor could
    * not be checked (repo not checked out). Both absent on unanchored records.
+   * Each `drift` entry's `compared_to` names what the recorded blob was
+   * compared against: the remote default branch (`origin/main`) or `worktree`.
    */
   drifted?: boolean;
   anchor_unchecked?: boolean;
-  drift?: Array<{ file: string; status: DriftStatus }>;
+  drift?: DriftEntry[];
   /** v0.11 — most recent retrieval timestamp for this id, when it has ever been retrieved before. */
   last_referenced?: string;
   /** v0.11 — distinct session count that retrieved this id, when known. */
@@ -209,6 +211,13 @@ export interface SearchPayload {
    * is not checked out", not "nobody recorded this".
    */
   layers_unavailable?: Array<{ name: string; path: string; writable: boolean }>;
+  /**
+   * Configured store layers read from a git checkout that is off its remote
+   * default branch or behind it (local refs, as of the last fetch), so their
+   * records may be older than what the team has merged. Present only when
+   * non-empty. `branch` is the short sha for a detached HEAD.
+   */
+  layers_stale?: StaleLayer[];
 }
 
 /**
@@ -698,6 +707,7 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     }
   }
 
+  const staleLayers = store.staleLayers();
   return {
     query,
     profile: profileName,
@@ -709,6 +719,7 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     coverage_witness: coverageWitness.tier,
     ...(coverageWitness.note !== undefined ? { coverage_witness_note: coverageWitness.note } : {}),
     ...(store.layersUnavailable.length > 0 ? { layers_unavailable: store.unavailableLayers() } : {}),
+    ...(staleLayers.length > 0 ? { layers_stale: staleLayers } : {}),
   };
 }
 
@@ -925,10 +936,11 @@ export function formatCoverageLine(payload: SearchPayload): string {
   const missing = (payload.layers_unavailable ?? []).map(
     (l) => `Warning: store layer '${l.name}'${l.writable ? '' : ' (read-only)'} is not available at ${l.path}; its records are missing from this view`,
   );
+  const stale = (payload.layers_stale ?? []).map((l) => `Warning: store layer ${describeStaleLayer(l)}; its records may be outdated`);
   const line = payload.coverage === 'none'
     ? `Coverage: none — ${payload.coverage_note}`
     : `Coverage: ${payload.coverage} — ${payload.coverage_note}${witness}`;
-  return [line, ...missing].join('\n');
+  return [line, ...missing, ...stale].join('\n');
 }
 
 /** Text-renderer marker for the aging signal; empty when the row is not aged. Shared with the MCP text renderer. */

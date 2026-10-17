@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { blobAtRef, defaultBranchOf } from './git-state.js';
 import type { CodeAnchor, MemoryItem } from './types.js';
 
 export interface AnchorStatus extends CodeAnchor {
@@ -9,11 +10,27 @@ export interface AnchorStatus extends CodeAnchor {
   // repo_unavailable: the anchor names a repo that is not checked out here —
   // the claim cannot be witnessed locally, only flagged for review.
   status: 'unchanged' | 'changed' | 'missing' | 'repo_unavailable';
+  /**
+   * What the recorded sha was compared against: the remote default-branch ref
+   * (e.g. `origin/main`) or `worktree`. Set only in `default-branch` mode, and
+   * absent on `repo_unavailable` (nothing was compared).
+   */
+  compared_to?: string;
 }
 
 export interface AnchorCheckOptions {
   /** Directories searched (after the project root's parent) for cross-repo anchor checkouts. */
   repoSearchPaths?: string[];
+  /**
+   * `worktree` (default): hash the file as it sits in the working tree — the
+   * write-adjacent contract `verify` and `reconcile` keep, since their
+   * follow-ups (`anchor`, re-verify) hash the working tree too.
+   * `default-branch`: compare against the blob on the anchored repo's remote
+   * default branch (see `blobOnDefaultBranch`), falling back to the working
+   * tree when the repo has none. The read/report paths (search, get, context,
+   * status) use this so drift does not depend on which branch a checkout is on.
+   */
+  compareTo?: 'worktree' | 'default-branch';
 }
 
 /** Project root for a store rooted at <project>/.memspec */
@@ -208,7 +225,27 @@ export function resolveAnchorRepo(
   return { repoRoot, relPath: relative(repoRoot, absFile).split(sep).join('/') };
 }
 
-/** Compare each anchor's recorded SHA against the file's current content. */
+/**
+ * The anchored file's blob on its repo's remote default branch, from local
+ * refs only (`origin/HEAD`, else `origin/main`, else `origin/master`; never a
+ * fetch). `sha: null` means the path does not exist on that ref. Returns null
+ * — "compare the working tree instead" — when the file is in no git repo, the
+ * repo has no remote default ref, the path is gitignored (it can never be on
+ * any branch), or git fails.
+ */
+export function blobOnDefaultBranch(absFile: string): { sha: string | null; ref: string } | null {
+  const repoRoot = findRepoRoot(dirname(absFile));
+  if (!repoRoot) return null;
+  const rel = relative(repoRoot, absFile);
+  if (rel === '' || rel.startsWith('..')) return null;
+  const def = defaultBranchOf(repoRoot);
+  if (!def) return null;
+  const at = blobAtRef(repoRoot, def.sha, rel.split(sep).join('/'));
+  if (!at || at.kind === 'ignored') return null;
+  return { sha: at.kind === 'blob' ? at.sha : null, ref: def.ref };
+}
+
+/** Compare each anchor's recorded SHA against the file's current content (see `AnchorCheckOptions.compareTo`). */
 export function checkAnchors(projectRoot: string, anchors: CodeAnchor[], options: AnchorCheckOptions = {}): AnchorStatus[] {
   return anchors.map((anchor) => {
     let root = projectRoot;
@@ -231,10 +268,13 @@ export function checkAnchors(projectRoot: string, anchors: CodeAnchor[], options
       process.stderr.write(`memspec: anchor ${anchor.file} escapes ${root}; treating as unavailable.\n`);
       return { ...anchor, currentSha: null, status: 'repo_unavailable' as const };
     }
-    const currentSha = blobSha(resolve(root, anchor.file));
+    const abs = resolve(root, anchor.file);
+    const onRef = options.compareTo === 'default-branch' ? blobOnDefaultBranch(abs) : null;
+    const currentSha = onRef ? onRef.sha : blobSha(abs);
     const status: AnchorStatus['status'] =
       currentSha === null ? 'missing' : currentSha === anchor.sha ? 'unchanged' : 'changed';
-    return { ...anchor, currentSha, status };
+    if (options.compareTo !== 'default-branch') return { ...anchor, currentSha, status };
+    return { ...anchor, currentSha, status, compared_to: onRef ? onRef.ref : 'worktree' };
   });
 }
 

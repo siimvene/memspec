@@ -161,7 +161,9 @@ function findNeedsAttention(
   for (const item of items) {
     const anchors = getCodeAnchors(item);
     if (anchors.length > 0) {
-      const bad = checkAnchors(projectRoot, anchors, { repoSearchPaths }).filter(
+      // Boot is a read path: compare to the remote default branch, exactly as
+      // search does, so the attention list and [DRIFTED] markers agree.
+      const bad = checkAnchors(projectRoot, anchors, { repoSearchPaths, compareTo: 'default-branch' }).filter(
         (a) => a.status !== 'unchanged',
       );
       if (bad.length > 0) {

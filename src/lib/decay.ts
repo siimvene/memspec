@@ -64,7 +64,10 @@ export function findDecayCandidates(items: MemoryItem[], options: DecayScanOptio
     if (options.projectRoot) {
       const anchors = getCodeAnchors(item);
       if (anchors.length === 0) continue;
-      const drifted = checkAnchors(options.projectRoot, anchors).filter((a) => a.status !== 'unchanged');
+      // Same comparison as the search read path (the remote default branch),
+      // so status's drift count agrees with what search marks [DRIFTED].
+      const drifted = checkAnchors(options.projectRoot, anchors, { compareTo: 'default-branch' })
+        .filter((a) => a.status !== 'unchanged');
       if (drifted.length > 0) {
         candidates.push({
           item,

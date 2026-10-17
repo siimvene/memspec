@@ -6,6 +6,7 @@ import { loadConfig, type StoreLayerConfig } from './config.js';
 import { findPointer, POINTER_FILENAME } from './registry.js';
 import { getCodeAnchors, projectRootForStore } from './anchors.js';
 import { computeDrift, type DriftInfo } from './drift.js';
+import { checkoutStateOf } from './git-state.js';
 import type { MemoryItem, MemoryFrontmatter } from './types.js';
 
 /**
@@ -73,6 +74,32 @@ function liveEndOfChain(start: MemoryItem, local: ReadonlyMap<string, MemoryItem
   return null;
 }
 
+/**
+ * A configured layer read from a git checkout that is off its remote default
+ * branch, or behind it (local refs only — as of the last fetch). Its records
+ * may be older than what the team has already merged.
+ */
+export interface StaleLayer {
+  name: string;
+  /** Resolved store directory, as in `layers_unavailable`. */
+  path: string;
+  /** Branch the checkout is on; the short sha when HEAD is detached. */
+  branch: string;
+  /** Remote default-branch ref compared against, e.g. `origin/main`. */
+  default_branch: string;
+  /** Commits on `default_branch` not reachable from the checkout's HEAD. */
+  behind: number;
+}
+
+/**
+ * "'team' reads branch 'x', 3 commit(s) behind origin/main as of the last
+ * fetch" — shared by the search Coverage warning and status's `## Layers
+ * stale`, so the two never word the same condition differently.
+ */
+export function describeStaleLayer(l: StaleLayer): string {
+  return `'${l.name}' reads branch '${l.branch}', ${l.behind} commit(s) behind ${l.default_branch} as of the last fetch`;
+}
+
 export class CompositeStore {
   readonly layers: StoreLayer[];
   readonly primary: MemspecStore;
@@ -85,6 +112,8 @@ export class CompositeStore {
    * missing layer).
    */
   readonly layersUnavailable: string[];
+  /** False for the unlayered fallback (no `stores:` declaration): a single project store. */
+  private readonly layered: boolean;
   /** File that declared the layers (config.yaml or .memspec.yaml), for messages. */
   readonly declaredIn: string | undefined;
 
@@ -102,8 +131,10 @@ export class CompositeStore {
       this.primary = new MemspecStore(projectRoot);
       this.layers = [{ name: 'project', store: this.primary, priority: 10, writable: true }];
       this.layersUnavailable = [];
+      this.layered = false;
       return;
     }
+    this.layered = true;
 
     this.layers = layers
       .map((cfg) => {
@@ -143,6 +174,37 @@ export class CompositeStore {
     return this.layers
       .filter((l) => this.layersUnavailable.includes(l.name))
       .map((l) => ({ name: l.name, path: l.store.root, writable: l.writable }));
+  }
+
+  /**
+   * Configured layers whose store directory sits in a git checkout that is
+   * not on its remote default branch, or is behind it. Same scope as
+   * `unavailableLayers`: only a declared layer set (the unlayered fallback is
+   * the caller's own project store, routinely on a feature branch by design),
+   * and only layers that exist. A layer outside git, or a checkout with no
+   * `origin` default ref, is skipped silently. Never throws; git state is
+   * cached per process for a few seconds (see git-state.ts), so calling this
+   * per query costs no git spawn inside that window.
+   */
+  staleLayers(): StaleLayer[] {
+    if (!this.layered) return [];
+    const out: StaleLayer[] = [];
+    for (const l of this.layers) {
+      if (!l.store.exists) continue;
+      const state = checkoutStateOf(l.store.root);
+      if (!state || !state.defaultBranch || state.behind === null) continue;
+      const defaultName = state.defaultBranch.ref.slice(state.defaultBranch.ref.indexOf('/') + 1);
+      const onDefault = !state.detached && state.branch === defaultName;
+      if (onDefault && state.behind === 0) continue;
+      out.push({
+        name: l.name,
+        path: l.store.root,
+        branch: state.branch,
+        default_branch: state.defaultBranch.ref,
+        behind: state.behind,
+      });
+    }
+    return out;
   }
 
   /**
