@@ -3,8 +3,9 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import { projectRootForStore } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
-import { CompositeStore } from '../lib/composite-store.js';
+import { CompositeStore, describeStaleLayer, type PendingPromotion, type StaleLayer } from '../lib/composite-store.js';
 import { findDecayCandidates } from '../lib/decay.js';
+import { loadConfig } from '../lib/config.js';
 import { validateFrontmatter } from '../lib/schema.js';
 import { computeUsageStats, type UsageStatsEntry } from '../lib/usage-stats.js';
 import { eliminationStatus } from '../lib/questions.js';
@@ -74,6 +75,12 @@ export interface StatusReport {
   /** Configured store layers absent on this machine (their records are missing from every layered view). */
   layers_unavailable: Array<{ name: string; path: string; writable: boolean }>;
   /**
+   * Configured store layers read from a git checkout that is off its remote
+   * default branch or behind it (local refs, as of the last fetch): their
+   * records may be older than what the team has merged.
+   */
+  layers_stale: StaleLayer[];
+  /**
    * v0.11 — active records created > 30 days ago that have either never been
    * retrieved, or not been retrieved in 60+ days. Named `cold` (not
    * `coldRecords`) so the MCP JSON surface matches exactly.
@@ -90,6 +97,13 @@ export interface StatusReport {
   evidence_backed: number;
   /** v0.11 — question groups and their elimination disposition. */
   questions: QuestionReportEntry[];
+  /**
+   * Local records that supersede a record in a read-only layer of this cwd's
+   * view (see `CompositeStore.pendingPromotions`). Each pair is a promotion
+   * still owed to the read-only layer's repo; until it lands, only this view
+   * sees the target as superseded. Sorted by local id.
+   */
+  pending_promotions: PendingPromotion[];
 }
 
 function walk(dir: string): string[] {
@@ -327,6 +341,25 @@ function unavailableLayersFor(cwd: string | undefined): Array<{ name: string; pa
   }
 }
 
+/** Layers read from a stale git checkout in the cwd's layered view; never throws (same reason as above). */
+function staleLayersFor(cwd: string | undefined): StaleLayer[] {
+  try {
+    return CompositeStore.forCwd(cwd).staleLayers();
+  } catch {
+    return [];
+  }
+}
+
+/** Pending cross-layer promotions in the cwd's layered view; never throws (same reason as above). */
+function pendingPromotionsFor(cwd: string | undefined): PendingPromotion[] {
+  try {
+    return [...CompositeStore.forCwd(cwd).pendingPromotions().values()]
+      .sort((a, b) => (a.id === b.id ? a.target_id.localeCompare(b.target_id) : a.id.localeCompare(b.id)));
+  } catch {
+    return [];
+  }
+}
+
 export function buildStatusReport(options: StatusOptions): { store: MemspecStore; report: StatusReport } {
   const store = new MemspecStore(options.cwd);
   const items = store.loadAll();
@@ -346,7 +379,10 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
     }
   }
 
-  const candidates = findDecayCandidates(items, { projectRoot: projectRootForStore(store.root) });
+  const candidates = findDecayCandidates(items, {
+    projectRoot: projectRootForStore(store.root),
+    repoSearchPaths: loadConfig(store.root).anchors?.repo_search_paths,
+  });
   const drifted = candidates.filter((c) => c.kind === 'anchor-drift').length;
 
   const conflicts = findConflicts(items);
@@ -374,10 +410,12 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
       total: items.length,
       warnings: store.warnings.length,
       layers_unavailable: unavailableLayersFor(options.cwd),
+      layers_stale: staleLayersFor(options.cwd),
       cold,
       promotion_candidates: promotionCandidates,
       evidence_backed: evidenceBacked,
       questions,
+      pending_promotions: pendingPromotionsFor(options.cwd),
     },
   };
 }
@@ -505,10 +543,25 @@ export function runStatus(options: StatusOptions): string {
     }
   }
 
+  if (report.pending_promotions.length > 0) {
+    lines.push('', `Pending promotions (${report.pending_promotions.length}) — local records superseding read-only layer records; promote each to its layer:`);
+    for (const p of report.pending_promotions) {
+      const conflict = p.conflicting_ids ? ` — CONFLICT: also superseded by ${p.conflicting_ids.join(', ')}; supersede all but one` : '';
+      lines.push(`  ${p.id} supersedes ${p.target_id} (layer: ${p.target_layer})${conflict}`);
+    }
+  }
+
   if (report.layers_unavailable.length > 0) {
     lines.push('', '## Layers unavailable');
     for (const l of report.layers_unavailable) {
       lines.push(`- '${l.name}'${l.writable ? '' : ' (read-only)'} not available at ${l.path} — its records are missing from every layered view here`);
+    }
+  }
+
+  if (report.layers_stale.length > 0) {
+    lines.push('', '## Layers stale');
+    for (const l of report.layers_stale) {
+      lines.push(`- ${describeStaleLayer(l)} — its records may be outdated; pull that checkout onto ${l.default_branch}`);
     }
   }
 

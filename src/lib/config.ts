@@ -65,6 +65,14 @@ export interface MemspecConfig {
    * runtime consumer is still `claimsOf()` in registry.ts.
    */
   claims?: string[];
+  /**
+   * Days an assertion-witnessed claim may go unverified before search and
+   * `memspec_get` mark it `aged: true` (see `agingOf` in decay.ts). Separate
+   * from `check_by`: a claim can sit inside its review window and still rest
+   * on nothing but its author's word. 0 disables the signal. Read through
+   * `getAgingDays`, which applies the default (90).
+   */
+  aging_days?: number;
 }
 
 export interface MemspecProfile {
@@ -218,6 +226,7 @@ export function loadConfig(root: string): MemspecConfig {
     const scopes = parseScopesConfig(data.scopes, configPath);
     const claims = parseClaimsConfig(data.claims, configPath);
     const scopesRequire = typeof data.scopes_require === 'boolean' ? data.scopes_require : DEFAULT_CONFIG.scopes_require;
+    const agingDays = parseAgingDays(data.aging_days, configPath);
 
     return {
       decay: { ...DEFAULT_CONFIG.decay, ...(data.decay as Record<string, string> ?? {}) },
@@ -228,6 +237,7 @@ export function loadConfig(root: string): MemspecConfig {
       scopes,
       scopes_require: scopesRequire,
       claims,
+      ...(agingDays !== undefined ? { aging_days: agingDays } : {}),
     };
   } catch (err) {
     // Structural config errors are the one failure we refuse to swallow —
@@ -239,6 +249,28 @@ export function loadConfig(root: string): MemspecConfig {
 }
 
 /** Parse a duration string like "90d", "7d", "180d" into days. Returns null if unparseable. */
+/** Default for `aging_days:` when the config does not set it. */
+export const DEFAULT_AGING_DAYS = 90;
+
+/**
+ * `aging_days:` — a non-negative integer, or absent. Refused loudly rather
+ * than defaulted: a typo that silently fell back to 90 (or to 0) would change
+ * which claims are shown as unverified without anyone noticing.
+ */
+function parseAgingDays(value: unknown, configPath: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new MemspecConfigError(
+      `${configPath}: aging_days must be a non-negative integer (days; 0 disables the aging signal), got ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
+export function getAgingDays(config: MemspecConfig): number {
+  return config.aging_days ?? DEFAULT_AGING_DAYS;
+}
+
 export function parseDurationDays(duration: string): number | null {
   const match = duration.match(/^(\d+)d$/);
   return match ? parseInt(match[1], 10) : null;
@@ -250,6 +282,13 @@ export function getDecayDays(config: MemspecConfig, type: MemoryType): number {
   if (!raw) return DEFAULT_DECAY_DAYS[type] ?? 90;
   const days = parseDurationDays(raw);
   return days ?? DEFAULT_DECAY_DAYS[type] ?? 90;
+}
+
+/** `getDecayDays` for every memory type: the per-type TTL table the store's `decay:` block configures. */
+export function decayDaysByType(config: MemspecConfig): Record<MemoryType, number> {
+  const out = { ...DEFAULT_DECAY_DAYS };
+  for (const type of Object.keys(out) as MemoryType[]) out[type] = getDecayDays(config, type);
+  return out;
 }
 
 export function getProfile(config: MemspecConfig, name: string = 'default'): MemspecProfile {
@@ -316,6 +355,14 @@ profiles:
 # nothing (no --scope passed, cwd matches no pattern above). Pass
 # --scope universal for a record that genuinely belongs everywhere.
 # scopes_require: true
+`;
+
+  yaml += `
+# Aging signal (optional)
+# Search hits and memspec_get results witnessed only by assertion, and not
+# verified for longer than this many days, carry aged: true plus
+# unverified_days. Independent of check_by; 0 disables it.
+# aging_days: 90
 `;
 
   yaml += `

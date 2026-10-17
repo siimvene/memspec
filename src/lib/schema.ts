@@ -7,6 +7,7 @@ import {
   QUESTION_STATES,
   SOURCE_KINDS,
   VERIFIED_WITH,
+  DEFAULT_DECAY_DAYS,
   type MemoryFrontmatter,
 } from './types.js';
 
@@ -61,7 +62,7 @@ export const memoryFrontmatterSchema = z.object({
   scope: z.string().min(1).optional()
     .describe('Read-side partition matching a `scopes:` key in config.yaml. Absent means visible from every scope (the default for pre-scoping records); `universal` means explicitly visible everywhere; any other value restricts the record to that one active scope.'),
   check_by: isoOrNever
-    .describe('ISO 8601 deadline or `"never"`; when it passes the record is flagged `stale: true` at read time but never deleted (renamed from `decay_after`).'),
+    .describe('ISO 8601 deadline or `"never"`; when it passes the record is flagged `stale: true` at read time but never deleted (renamed from `decay_after`; a legacy `decay_after: never` on a claim reads as the type default TTL, only an explicit `check_by: never` pins).'),
   stale: z.boolean().optional()
     .describe('Set when `check_by` has passed; cleared by a successful `verify`. Lazy-flagged in memory on read; physical removal only via `memspec sweep`.'),
   last_verified: z.string().refine(
@@ -148,14 +149,57 @@ const LEGACY_STATE_MAP: Record<string, string> = {
  * accepts pre-0.3 records. Mutates a clone, never the input.
  *
  * - state: captured → active, corrected → superseded, decayed|archived → retired
- * - decay_after → check_by
+ * - decay_after → check_by, except legacy `decay_after: never` on a claim (see
+ *   `legacyNeverCheckBy`)
  * - corrects (string) → supersedes (array)
  * - corrected_by → superseded_by
  * - correction_reason → supersede_reason
  * - ext.code_anchors → top-level anchors (if anchors not already set)
  * - top-level confidence → ext.legacy_confidence (and removed from top level)
  */
-export function normalizeLegacyFrontmatter(input: Record<string, unknown>): Record<string, unknown> {
+/**
+ * The `check_by` a legacy `decay_after: never` claim reads as: the type's TTL
+ * counted from `last_verified`, else `created`. The TTL is the store's
+ * `config.yaml` `decay:` value for that type when the caller has the store
+ * config (`decayDays`, from `decayDaysByType`), else `DEFAULT_DECAY_DAYS`.
+ *
+ * Pre-0.3 writers stamped `decay_after: never` as a default on whole batches
+ * of records (imports, early agent writes), so the value records no decision.
+ * Mapping it straight to `check_by: never` exempted those records from every
+ * staleness check forever: a team decision imported in Sept 2026 kept ranking
+ * `stale: false` months after the auth flow and vendor price it cited had
+ * changed, and a stale-record cleanup never saw it. An explicit v0.3
+ * `check_by: never` is different: it is written deliberately (`verify
+ * --check-by never`, settled event records) and stays honoured, which is why
+ * this only runs when `check_by` is absent.
+ *
+ * Computed at read time, so nothing is rewritten on disk; `memspec migrate`
+ * persists the same value. Returns undefined for non-claims (observations
+ * expire on their own clock, questions never go stale) and when the base date
+ * does not parse, leaving the caller's old mapping in place.
+ */
+export function legacyNeverCheckBy(
+  data: Record<string, unknown>,
+  decayDays: Partial<Record<string, number>> = DEFAULT_DECAY_DAYS,
+): string | undefined {
+  if (data.kind !== undefined && data.kind !== 'claim') return undefined;
+  const asIso = (v: unknown): unknown => (v instanceof Date ? v.toISOString() : v);
+  const base = asIso(data.last_verified) ?? asIso(data.created);
+  if (typeof base !== 'string') return undefined;
+  const baseMs = Date.parse(base);
+  if (Number.isNaN(baseMs)) return undefined;
+  const type = typeof data.type === 'string' ? data.type : undefined;
+  const days = (type ? decayDays[type] ?? DEFAULT_DECAY_DAYS[type as keyof typeof DEFAULT_DECAY_DAYS] : undefined) ?? 90;
+  return new Date(baseMs + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+/** Store context for normalisation; absent fields fall back to the built-in defaults. */
+export interface NormalizeOptions {
+  /** Per-type TTL in days from the store's `config.yaml` `decay:` block (`decayDaysByType`). */
+  decayDays?: Partial<Record<string, number>>;
+}
+
+export function normalizeLegacyFrontmatter(input: Record<string, unknown>, options: NormalizeOptions = {}): Record<string, unknown> {
   const data = { ...input };
 
   if (data.kind === undefined) data.kind = 'claim';
@@ -165,7 +209,9 @@ export function normalizeLegacyFrontmatter(input: Record<string, unknown>): Reco
   }
 
   if (data.check_by === undefined && data.decay_after !== undefined) {
-    data.check_by = data.decay_after;
+    data.check_by = data.decay_after === 'never'
+      ? legacyNeverCheckBy(data, options.decayDays) ?? data.decay_after
+      : data.decay_after;
   }
   delete data.decay_after;
 
@@ -207,9 +253,12 @@ export function normalizeLegacyFrontmatter(input: Record<string, unknown>): Reco
   return data;
 }
 
-export function validateFrontmatter(data: unknown): { success: true; data: MemoryItemFrontmatter } | { success: false; errors: string[] } {
+export function validateFrontmatter(
+  data: unknown,
+  options: NormalizeOptions = {},
+): { success: true; data: MemoryItemFrontmatter } | { success: false; errors: string[] } {
   const normalized = data && typeof data === 'object'
-    ? normalizeLegacyFrontmatter(data as Record<string, unknown>)
+    ? normalizeLegacyFrontmatter(data as Record<string, unknown>, options)
     : data;
   const result = memoryFrontmatterSchema.safeParse(normalized);
   if (result.success) {
@@ -221,9 +270,9 @@ export function validateFrontmatter(data: unknown): { success: true; data: Memor
   };
 }
 
-export function assertValidFrontmatter(data: unknown): MemoryFrontmatter {
+export function assertValidFrontmatter(data: unknown, options: NormalizeOptions = {}): MemoryFrontmatter {
   const normalized = data && typeof data === 'object'
-    ? normalizeLegacyFrontmatter(data as Record<string, unknown>)
+    ? normalizeLegacyFrontmatter(data as Record<string, unknown>, options)
     : data;
   return memoryFrontmatterSchema.parse(normalized) as MemoryFrontmatter;
 }

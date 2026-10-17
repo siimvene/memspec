@@ -3,7 +3,10 @@ import { getDecayDays, loadConfig } from '../lib/config.js';
 import { appendOutcome } from '../lib/outcomes.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import { assertKnownScope } from '../lib/scope.js';
-import { CompositeStore } from '../lib/composite-store.js';
+import { createHash } from 'node:crypto';
+import { closeSync, mkdirSync, openSync, rmSync, statSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
+import { CompositeStore, type StoreLayer } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_DECAY_DAYS, type EvidenceEntry, type MemoryItem, type MemoryType } from '../lib/types.js';
 
@@ -38,6 +41,14 @@ export interface SupersedeResult {
   superseded_ids: string[];
   reason: string;
   message: string;
+  /**
+   * Set when the target lives in a read-only layer: the replacement was
+   * written to the one writable layer with `supersedes: [target_id]`, the
+   * read-only file was left alone, and the read view now treats the target as
+   * superseded. The supersession reaches `layer` itself only when the
+   * replacement is promoted there (`memspec status` lists what is pending).
+   */
+  pending_promotion?: { layer: string; target_id: string };
 }
 
 function decayDaysFor(type: MemoryType | undefined, root: string): number {
@@ -113,6 +124,166 @@ function inheritedScope(contributors: MemoryItem[]): string | undefined {
 }
 
 /**
+ * Supersede of a record that lives in a READ-ONLY layer (e.g. a team store
+ * bound by path, corrected only through a PR to its own repo). Returns null
+ * when the target is not in a read-only layer, or when this cannot proceed —
+ * the caller then falls through to `assertWritableLayerForId`, which raises
+ * the existing refusal naming the layer.
+ *
+ * Proceeds only for a REPLACEMENT (a body; no `merge_from`) and only when the
+ * read view has exactly one writable layer: a guessed write target is how team
+ * knowledge leaks into the wrong store, so an ambiguous view keeps refusing.
+ * A retraction has no local record to carry it, and a merge would mix
+ * read-only and local lifecycles in one operation; both still refuse.
+ *
+ * The replacement is written to the writable layer with
+ * `supersedes: [targetId]`; the read-only file is never touched. The read view
+ * (`CompositeStore.pendingPromotions`) then hides the target from active
+ * results, and `memspec status` lists the pair so the promotion PR can be
+ * built from it.
+ */
+function crossLayerTarget(composite: CompositeStore, targetId: string, options: SupersedeOptions): SupersedeResult | null {
+  const owner = composite.layerForId(targetId);
+  if (!owner || owner.writable) return null;
+  const body = options.body;
+  if (body === undefined || body === null) return null;
+  if ((options.mergeFrom ?? []).some((id) => id !== targetId)) return null;
+  const writable = composite.layers.filter((l) => l.writable);
+  if (writable.length !== 1) return null;
+  const local = writable[0];
+
+  const target = owner.store.findById(targetId);
+  if (!target) return null;
+  local.store.init();
+  return withSupersedeLock(local.store.root, targetId, () => writeCrossLayerReplacement(composite, owner, local, target, body, options));
+}
+
+/** A lock older than this is a crashed writer's, and is reclaimed. A cross-layer supersede takes milliseconds. */
+const SUPERSEDE_LOCK_STALE_MS = 30_000;
+
+/**
+ * Run `fn` holding an exclusive per-target lock file in the writable layer's
+ * machine-local subtree (`local/locks/supersede-<target>.lock`, created with
+ * the `wx` flag, removed in `finally`). Two processes superseding the same
+ * read-only record could otherwise both pass the "already superseded in this
+ * view" guard and both write an active replacement: the guard reads the
+ * store, the write lands after it, and nothing orders the two. A lock older
+ * than `SUPERSEDE_LOCK_STALE_MS` is left by a crashed writer and is reclaimed.
+ */
+function withSupersedeLock<T>(storeRoot: string, targetId: string, fn: () => T): T {
+  const dir = join(storeRoot, 'local', 'locks');
+  const name = /^[A-Za-z0-9_-]{1,128}$/.test(targetId) ? targetId : createHash('sha1').update(targetId).digest('hex');
+  const path = join(dir, `supersede-${name}.lock`);
+  mkdirSync(dir, { recursive: true });
+  const busy = () => new Error(
+    `another supersede of "${targetId}" is in progress (lock ${path}); retry in a moment, ` +
+      'or delete the lock file if no memspec process is running',
+  );
+  const acquire = (): number | null => {
+    try {
+      return openSync(path, 'wx');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
+      throw err;
+    }
+  };
+  let fd = acquire();
+  if (fd === null) {
+    let age = Number.POSITIVE_INFINITY;
+    try {
+      age = Date.now() - statSync(path).mtimeMs;
+    } catch {
+      // Released between our open and stat: reclaim below.
+    }
+    if (age < SUPERSEDE_LOCK_STALE_MS) throw busy();
+    rmSync(path, { force: true });
+    fd = acquire();
+    if (fd === null) throw busy();
+  }
+  try {
+    writeSync(fd, `${process.pid}\n`);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    return fn();
+  } finally {
+    rmSync(path, { force: true });
+  }
+}
+
+/** The check + write half of `crossLayerTarget`, run under the per-target lock. */
+function writeCrossLayerReplacement(
+  composite: CompositeStore,
+  owner: StoreLayer,
+  local: StoreLayer,
+  target: MemoryItem,
+  body: string,
+  options: SupersedeOptions,
+): SupersedeResult {
+  const targetId = target.id;
+  // A second local replacement would fork the correction: two active local
+  // records claiming one target, only one of which the view honours. The
+  // live record is the one to supersede. Read fresh, under the lock: another
+  // process may have written one since this view was loaded.
+  const existing = composite.pendingPromotions({ fresh: true }).get(targetId);
+  if (existing) {
+    throw new Error(
+      `"${targetId}" is already superseded in this view by ${existing.id} (pending promotion to layer '${owner.name}'); ` +
+        `supersede ${existing.id} instead`,
+    );
+  }
+  const reason = assertSupersedable(target, options.overrideOperator ?? false, options.reason);
+
+  // Scope is validated against the store the record is written to.
+  const explicitScope = options.scope !== undefined
+    ? assertKnownScope(loadConfig(local.store.root).scopes, options.scope, () => local.store.scopesInUse())
+    : undefined;
+  const scope = explicitScope ?? target.scope;
+
+  const newId = `ms_${ulid()}`;
+  const now = new Date().toISOString();
+  const expires = new Date();
+  expires.setUTCDate(expires.getUTCDate() + decayDaysFor(target.type, local.store.root));
+  const source = options.source ?? 'unknown';
+
+  const replacement: Parameters<typeof local.store.writeItem>[0] = {
+    id: newId,
+    kind: 'claim',
+    type: target.type,
+    state: 'active',
+    created: now,
+    source,
+    tags: target.tags,
+    check_by: expires.toISOString(),
+    last_verified: now,
+    supersedes: [targetId],
+    supersede_reason: reason,
+    title: options.title ?? target.title,
+    body,
+  };
+  if (scope) replacement.scope = scope;
+  const carried = carryV011Fields([target]);
+  if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
+  if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
+
+  local.store.writeItem(replacement);
+  appendOutcome(local.store.root, targetId, 'corrected', { source, note: reason });
+
+  return {
+    survivor_id: newId,
+    superseded_ids: [targetId],
+    reason,
+    pending_promotion: { layer: owner.name, target_id: targetId },
+    message:
+      `Superseded ${targetId} → ${newId} in this view (written to layer '${local.name}')\n` +
+      `Reason: ${reason}\n` +
+      `Pending promotion: ${targetId} lives in read-only layer '${owner.name}' and is unchanged there; ` +
+      `promote ${newId} to '${owner.name}' to supersede it for everyone (memspec status lists pending promotions)`,
+  };
+}
+
+/**
  * v0.3 entry point for retracting, replacing, or merging memories.
  *
  * - `body` empty + no `mergeFrom` → retraction. Target moves to superseded.
@@ -127,6 +298,8 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   // writing. A non-layered store resolves to its single writable layer, so the
   // owning store is byte-identical to `new MemspecStore(options.cwd)`.
   const composite = CompositeStore.forCwd(options.cwd);
+  const crossLayer = crossLayerTarget(composite, targetId, options);
+  if (crossLayer) return crossLayer;
   const owner = composite.assertWritableLayerForId(targetId);
   const store = owner ? owner.store : new MemspecStore(options.cwd);
 

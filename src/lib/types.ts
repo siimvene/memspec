@@ -170,6 +170,16 @@ export interface MemoryItem extends MemoryFrontmatter {
    * does not include this one.
    */
   layer?: string;
+  /**
+   * Read-time annotation stamped by `CompositeStore.loadAll` on a record that
+   * lives in a READ-ONLY layer and is superseded, in this read view, by an
+   * active record in a writable layer (one declaring `supersedes: [<this id>]`).
+   * Such a record is served with `state: 'superseded'` and `superseded_by`
+   * pointing at the local record, and is left out of `loadActive`/`search`.
+   * The file in the read-only layer is untouched; the supersession lands there
+   * only when the local record is promoted. Never persisted.
+   */
+  superseded_in_view?: true;
 }
 
 export const DEFAULT_DECAY_DAYS: Record<MemoryType, number> = {

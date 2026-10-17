@@ -105,7 +105,7 @@ test('search JSON carries drifted; it flips on edit and clears on re-anchor', as
   await writeFile(join(project, 'engine.ts'), 'export const e = 2; // changed\n');
   const after = JSON.parse((await runCli(['search', 'engine constant', '--cwd', project, '--json'])).stdout).results;
   assert.equal(after[0].drifted, true);
-  assert.deepEqual(after[0].drift, [{ file: 'engine.ts', status: 'changed' }]);
+  assert.deepEqual(after[0].drift, [{ file: 'engine.ts', status: 'changed', compared_to: 'worktree' }]);
 
   await runCli(['anchor', id, 'engine.ts', '--cwd', project]);
   const reanchored = JSON.parse((await runCli(['search', 'engine constant', '--cwd', project, '--json'])).stdout).results;
@@ -229,7 +229,7 @@ test('read-path drift agrees with reconcile for a home-rooted store with a repo-
   const after = JSON.parse((await runCli(['search', 'estate simulation flywheel', '--cwd', home, '--json'])).stdout).results;
   const afterRow = after.find((r: { id: string }) => r.id === id);
   assert.equal(afterRow.drifted, true);
-  assert.deepEqual(afterRow.drift, [{ file: 'ESTATE.md', status: 'changed' }]);
+  assert.deepEqual(afterRow.drift, [{ file: 'ESTATE.md', status: 'changed', compared_to: 'worktree' }]);
 });
 
 test('coverage_witness reports the strongest witness among hits (anchor beats assertion)', async () => {

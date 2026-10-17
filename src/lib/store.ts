@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { defaultConfigYaml } from './config.js';
+import { decayDaysByType, defaultConfigYaml, loadConfig } from './config.js';
 import { findStoreDirUpward } from './registry.js';
 import { FtsIndex } from './fts.js';
 import { parseMemoryFile, serializeMemoryFile } from './frontmatter.js';
@@ -235,7 +235,19 @@ export class MemspecStore {
     return join(dir, `${item.id}.md`);
   }
 
+  /**
+   * Bumped by every record write through this instance (`writeItem`,
+   * `updateItem`, `moveToArchive`). Lets a view that memoizes a derivation of
+   * this store's records (`CompositeStore.pendingPromotions`) notice a write.
+   */
+  get writeGeneration(): number {
+    return this.writes;
+  }
+
+  private writes = 0;
+
   writeItem(item: MemoryFrontmatter & { title: string; body: string }): string {
+    this.writes++;
     const filePath = this.pathForItem(item);
     const dir = resolve(filePath, '..');
     mkdirSync(dir, { recursive: true });
@@ -260,6 +272,19 @@ export class MemspecStore {
   }
 
   /**
+   * Per-type TTLs from this store's `config.yaml` `decay:` block. A config
+   * that cannot be read falls back to the built-in defaults: loading records
+   * must not fail over a TTL table.
+   */
+  private configuredDecayDays(): Record<MemoryType, number> | undefined {
+    try {
+      return decayDaysByType(loadConfig(this.root));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Raw load — every record in every state, without the lazy stale
    * projection. Feeds the mutation lookup (`findById`): commands that read a
    * record, edit it, and write it back must not bake a computed `stale: true`
@@ -279,6 +304,9 @@ export class MemspecStore {
     // authoritative). Stderr warning so callers notice the drift; no throw.
     const operatorMemoryRoot = join(this.root, 'memory', 'operator');
     const byId = new Map<string, MemoryItem>();
+    // The store's own `decay:` TTLs, so a legacy `decay_after: never` reads
+    // with the TTL this store configured (see `legacyNeverCheckBy`).
+    const normalize = { decayDays: this.configuredDecayDays() };
 
     for (const file of files) {
       try {
@@ -293,13 +321,13 @@ export class MemspecStore {
           }
         }
 
-        const result = validateFrontmatter(data);
+        const result = validateFrontmatter(data, normalize);
         if (!result.success) {
           this.warnings.push({ file, reason: `Invalid frontmatter: ${result.errors.join('; ')}` });
           continue;
         }
 
-        const item = parseMemoryFile(raw, file);
+        const item = parseMemoryFile(raw, file, normalize);
         const existing = byId.get(item.id);
         if (existing) {
           const incomingIsOperator = file.startsWith(operatorMemoryRoot);
@@ -383,6 +411,7 @@ export class MemspecStore {
   }
 
   moveToArchive(item: MemoryItem, state: MemoryItem['state'] = 'retired'): void {
+    this.writes++;
     const archivePath = join(this.root, 'archive', `${item.id}.md`);
     writeFileSync(
       archivePath,
@@ -397,6 +426,7 @@ export class MemspecStore {
   }
 
   updateItem(item: MemoryItem): void {
+    this.writes++;
     writeFileSync(item.filePath, serializeMemoryFile(item));
   }
 

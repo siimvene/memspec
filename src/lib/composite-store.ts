@@ -6,6 +6,7 @@ import { loadConfig, type StoreLayerConfig } from './config.js';
 import { findPointer, POINTER_FILENAME } from './registry.js';
 import { getCodeAnchors, projectRootForStore } from './anchors.js';
 import { computeDrift, type DriftInfo } from './drift.js';
+import { checkoutStateOf } from './git-state.js';
 import type { MemoryItem, MemoryFrontmatter } from './types.js';
 
 /**
@@ -31,12 +32,80 @@ export interface StoreLayer {
   writable: boolean;
 }
 
+/**
+ * A record in a READ-ONLY layer that an active record in a writable layer
+ * supersedes (`supersedes: [target_id]`). The read view treats the target as
+ * superseded; the read-only layer itself only learns about it when the local
+ * record is promoted there (a PR to the team repo), hence "pending promotion".
+ */
+export interface PendingPromotion {
+  /** The local (writable-layer) record that supersedes the target. */
+  id: string;
+  /** The superseded record's id in the read-only layer. */
+  target_id: string;
+  /** Name of the read-only layer holding the target — where the promotion goes. */
+  target_layer: string;
+  /**
+   * Other live local records that also supersede the target (a forked
+   * correction, e.g. two concurrent supersedes before the lock existed, or
+   * hand-written records). Present only on a conflict; `id` is then the
+   * lowest id (earliest ULID), so the view is deterministic. Resolve by
+   * superseding all but one.
+   */
+  conflicting_ids?: string[];
+}
+
 /** Result of `CompositeStore.resolveWritable`: the layer a write must target. */
 export interface WritableResolution {
   layer: StoreLayer;
   composite: CompositeStore;
   /** Where the layer list came from: a `.memspec.yaml` pointer, a store's `stores:` block, or no layering at all. */
   via: 'pointer' | 'config' | 'single';
+}
+
+/**
+ * Follow `superseded_by` from a local record to the record that currently
+ * carries its claim: itself when active, its active successor when it was
+ * replaced locally (a correction of a correction still supersedes the
+ * read-only original), or null when the chain ends retired, missing, or loops
+ * — a retracted correction withdraws its claim on the target.
+ */
+function liveEndOfChain(start: MemoryItem, local: ReadonlyMap<string, MemoryItem>): MemoryItem | null {
+  const visited = new Set<string>();
+  let cur: MemoryItem | undefined = start;
+  while (cur && !visited.has(cur.id)) {
+    if (cur.state === 'active') return cur;
+    if (cur.state !== 'superseded' || !cur.superseded_by) return null;
+    visited.add(cur.id);
+    cur = local.get(cur.superseded_by);
+  }
+  return null;
+}
+
+/**
+ * A configured layer read from a git checkout that is behind its remote
+ * default branch (local refs only — as of the last fetch). Its records may be
+ * older than what the team has already merged.
+ */
+export interface StaleLayer {
+  name: string;
+  /** Resolved store directory, as in `layers_unavailable`. */
+  path: string;
+  /** Branch the checkout is on; the short sha when HEAD is detached. */
+  branch: string;
+  /** Remote default-branch ref compared against, e.g. `origin/main`. */
+  default_branch: string;
+  /** Commits on `default_branch` not reachable from the checkout's HEAD. */
+  behind: number;
+}
+
+/**
+ * "'team' reads branch 'x', 3 commit(s) behind origin/main as of the last
+ * fetch" — shared by the search Coverage warning and status's `## Layers
+ * stale`, so the two never word the same condition differently.
+ */
+export function describeStaleLayer(l: StaleLayer): string {
+  return `'${l.name}' reads branch '${l.branch}', ${l.behind} commit(s) behind ${l.default_branch} as of the last fetch`;
 }
 
 export class CompositeStore {
@@ -51,6 +120,8 @@ export class CompositeStore {
    * missing layer).
    */
   readonly layersUnavailable: string[];
+  /** False for the unlayered fallback (no `stores:` declaration): a single project store. */
+  private readonly layered: boolean;
   /** File that declared the layers (config.yaml or .memspec.yaml), for messages. */
   readonly declaredIn: string | undefined;
 
@@ -68,8 +139,10 @@ export class CompositeStore {
       this.primary = new MemspecStore(projectRoot);
       this.layers = [{ name: 'project', store: this.primary, priority: 10, writable: true }];
       this.layersUnavailable = [];
+      this.layered = false;
       return;
     }
+    this.layered = true;
 
     this.layers = layers
       .map((cfg) => {
@@ -109,6 +182,37 @@ export class CompositeStore {
     return this.layers
       .filter((l) => this.layersUnavailable.includes(l.name))
       .map((l) => ({ name: l.name, path: l.store.root, writable: l.writable }));
+  }
+
+  /**
+   * Configured layers whose store directory sits in a git checkout that is
+   * behind its remote default branch: at least one commit on `origin/<default>`
+   * is not reachable from HEAD. Which branch the checkout is on does not
+   * matter by itself: a detached CI checkout at origin/main, or a branch that
+   * contains main, reads everything the team merged. Same scope as
+   * `unavailableLayers`: only a declared layer set (the unlayered fallback is
+   * the caller's own project store, routinely on a feature branch by design),
+   * and only layers that exist. A layer outside git, or a checkout with no
+   * `origin` default ref, is skipped silently. Never throws; git state is
+   * cached per process for a few seconds (see git-state.ts), so calling this
+   * per query costs no git spawn inside that window.
+   */
+  staleLayers(): StaleLayer[] {
+    if (!this.layered) return [];
+    const out: StaleLayer[] = [];
+    for (const l of this.layers) {
+      if (!l.store.exists) continue;
+      const state = checkoutStateOf(l.store.root);
+      if (!state || !state.defaultBranch || state.behind === null || state.behind === 0) continue;
+      out.push({
+        name: l.name,
+        path: l.store.root,
+        branch: state.branch,
+        default_branch: state.defaultBranch.ref,
+        behind: state.behind,
+      });
+    }
+    return out;
   }
 
   /**
@@ -315,15 +419,108 @@ export class CompositeStore {
     return layer.store === this.primary ? item : { ...item, layer: layer.name };
   }
 
-  /** Load all items from all layers */
+  /**
+   * Cross-layer supersession: active records in a writable layer whose
+   * `supersedes` names a record that lives (active) in a read-only layer,
+   * keyed by that target id. A record id present in several writable layers
+   * is read from the highest-priority one.
+   *
+   * Why the read view has to honour this: a read-only layer (a team store
+   * bound by path) can only be corrected through a PR to its own repo. Until
+   * that PR lands, a local correction sits beside the original and the
+   * original keeps ranking as active — an agent then repeats the very claim
+   * that was corrected. Reading the local `supersedes` edge as authoritative
+   * for THIS view closes that gap without touching the read-only files.
+   *
+   * Empty (and free) unless the view has both a read-only and a writable
+   * layer on disk, so single-store retrieval is unaffected. The claim is
+   * carried by the live end of the local record's `superseded_by` chain
+   * (`liveEndOfChain`): an active record holds it, a local correction of it
+   * inherits it, and a chain ending retired withdraws it. Two live records
+   * claiming one target are a conflict: the lowest id holds it and the rest
+   * are listed in `conflicting_ids`.
+   *
+   * Memoized per view: one search calls this from `loadActive`, `loadAll` and
+   * `loadSuperseded`, and each computation parses every record of every
+   * layer. The memo is keyed by each layer's presence and write generation,
+   * so a write through a layer's store is seen; `{ fresh: true }` bypasses it
+   * for a check that must see other processes' writes (the cross-layer
+   * supersede guard, under its lock).
+   */
+  pendingPromotions(options: { fresh?: boolean } = {}): Map<string, PendingPromotion> {
+    const key = this.layers.map((l) => `${l.store.exists ? 1 : 0}:${l.store.writeGeneration}`).join(',');
+    if (!options.fresh && this.pendingMemo?.key === key) return this.pendingMemo.value;
+    const value = this.computePendingPromotions();
+    this.pendingMemo = { key, value };
+    return value;
+  }
+
+  private pendingMemo: { key: string; value: Map<string, PendingPromotion> } | undefined;
+
+  private computePendingPromotions(): Map<string, PendingPromotion> {
+    const out = new Map<string, PendingPromotion>();
+    const present = this.layers.filter((l) => l.store.exists);
+    const readOnly = present.filter((l) => !l.writable);
+    const writable = present.filter((l) => l.writable);
+    if (readOnly.length === 0 || writable.length === 0) return out;
+
+    const readOnlyOwner = new Map<string, string>();
+    for (const layer of readOnly) {
+      for (const item of layer.store.loadActive()) {
+        if (!readOnlyOwner.has(item.id)) readOnlyOwner.set(item.id, layer.name);
+      }
+    }
+    const local = new Map<string, MemoryItem>();
+    for (const layer of writable) {
+      for (const item of layer.store.loadAll()) {
+        if (!local.has(item.id)) local.set(item.id, item);
+      }
+    }
+    const liveByTarget = new Map<string, Set<string>>();
+    for (const item of local.values()) {
+      for (const targetId of item.supersedes ?? []) {
+        if (!readOnlyOwner.has(targetId)) continue;
+        const live = liveEndOfChain(item, local);
+        if (!live) continue;
+        const ids = liveByTarget.get(targetId) ?? new Set<string>();
+        ids.add(live.id);
+        liveByTarget.set(targetId, ids);
+      }
+    }
+    for (const [targetId, ids] of liveByTarget) {
+      const [id, ...others] = [...ids].sort();
+      out.set(targetId, {
+        id,
+        target_id: targetId,
+        target_layer: readOnlyOwner.get(targetId)!,
+        ...(others.length > 0 ? { conflicting_ids: others } : {}),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Load all items from all layers. A read-only-layer record superseded in
+   * this view (see `pendingPromotions`) is served as `superseded`, with
+   * `superseded_by` naming the local record and `superseded_in_view: true`.
+   */
   loadAll(): MemoryItem[] {
+    const pending = this.pendingPromotions();
     const allItems: MemoryItem[] = [];
     for (const layer of this.layers) {
       if (layer.store.exists) {
-        allItems.push(...layer.store.loadAll().map((item) => this.stampLayer(item, layer)));
+        allItems.push(...layer.store.loadAll().map((item) => this.markSupersededInView(this.stampLayer(item, layer), layer, pending)));
       }
     }
     return allItems;
+  }
+
+  /** The `loadAll` projection of one record under cross-layer supersession; identity for everything else. */
+  private markSupersededInView(item: MemoryItem, layer: StoreLayer, pending: ReadonlyMap<string, PendingPromotion>): MemoryItem {
+    if (layer.writable || item.state !== 'active') return item;
+    const promotion = pending.get(item.id);
+    if (!promotion) return item;
+    return { ...item, state: 'superseded', superseded_by: promotion.id, superseded_in_view: true };
   }
 
   /**
@@ -344,6 +541,17 @@ export class CompositeStore {
         }
       }
     }
+    // Records superseded only in this view, so a walk along a local record's
+    // `supersedes` edge can still reach the read-only original.
+    const pending = this.pendingPromotions();
+    if (pending.size > 0) {
+      for (const item of this.loadAll()) {
+        if (item.superseded_in_view && !seen.has(item.id)) {
+          seen.add(item.id);
+          items.push(item);
+        }
+      }
+    }
     return items;
   }
 
@@ -351,6 +559,7 @@ export class CompositeStore {
   loadActive(): MemoryItem[] {
     const seen = new Set<string>();
     const items: MemoryItem[] = [];
+    const pending = this.pendingPromotions();
 
     // Layers are sorted by priority desc, so higher priority items get added first
     for (const layer of this.layers) {
@@ -358,6 +567,8 @@ export class CompositeStore {
       for (const item of layer.store.loadActive()) {
         if (!seen.has(item.id)) {
           seen.add(item.id);
+          // Superseded in this view by a local record: not active here.
+          if (!layer.writable && pending.has(item.id)) continue;
           items.push(this.stampLayer(item, layer));
         }
       }
@@ -416,6 +627,9 @@ export class CompositeStore {
 
     // Over-fetch so fusion has material below the caller's cut.
     const perLayerLimit = Math.max(limit * 2, 20);
+    // Read-only-layer records a local record supersedes are dropped before the
+    // cut, so they cannot crowd out the hits the caller should see.
+    const pending = this.pendingPromotions();
 
     interface FusedEntry {
       item: MemoryItem;
@@ -438,6 +652,7 @@ export class CompositeStore {
       }
 
       results.forEach((item, index) => {
+        if (!layer.writable && pending.has(item.id)) return;
         const rank = index + 1;
         const contribution = 1 / (RRF_K + rank);
         const existing = fused.get(item.id);
