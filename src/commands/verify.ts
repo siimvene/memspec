@@ -183,8 +183,14 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
 
   const mechanical = anchors.length > 0;
   const status = mechanical ? 'verified' : 'verified_inferred';
+  // Say which side witnessed each anchor: an anchor that matched only origin's
+  // default branch is NOT unchanged in this checkout, and `reconcile` will list
+  // it, so the note must not read as a clean working tree.
+  const refOnly = statuses.filter((a) => a.status === 'unchanged' && a.compared_to !== undefined && a.compared_to !== 'worktree');
   const anchorNote = anchors.length > 0
-    ? `${anchors.length} anchor(s) unchanged`
+    ? refOnly.length > 0
+      ? `${anchors.length} anchor(s) hold; ${refOnly.length} matched ${refOnly[0].compared_to} only (this checkout's copy differs): ${refOnly.map((a) => a.file).join(', ')}`
+      : `${anchors.length} anchor(s) unchanged`
     : 'no code anchors — verification asserted by caller';
   const probeNote = probe ? `; probe present, not exercised (memspec probe ${id})` : '';
 

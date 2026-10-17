@@ -2,7 +2,7 @@
 
 ## 0.12.2 — 2026-10-17
 
-- **`verify` agrees with the read path.** It now judges anchors the way search/get/context/status do since 0.12.0: an anchor holds when its recorded blob matches the working tree OR origin's default branch. Before, `verify` hashed only the working tree, so a record anchored to main (for example from a separate checkout via `--anchor-root`) verified as NEEDS REVIEW from any checkout sitting on another branch while search showed it clean. `reconcile` keeps working-tree semantics (it answers "what did this checkout change").
+- **`verify` agrees with the read path.** It now judges anchors the way search/get/context/status do since 0.12.0: an anchor holds when its recorded blob matches the working tree OR origin's default branch. Before, `verify` hashed only the working tree, so a record anchored to main (for example from a separate checkout via `--anchor-root`) verified as NEEDS REVIEW from any checkout sitting on another branch while search showed it clean. `reconcile` keeps working-tree semantics (it answers "what did this checkout change"). Its message names any anchor that held only on the default branch ("matched origin/main only (this checkout's copy differs)"); README and SPEC §13.3 updated to the either-side rule.
 
 ## 0.12.1 — 2026-10-17
 

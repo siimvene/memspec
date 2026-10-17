@@ -446,6 +446,8 @@ test('drift: verify agrees with the read path; reconcile keeps working-tree sema
   // anchors were taken at origin/main could not verify from a stale checkout).
   const v = runVerify(fx.id, { cwd: fx.project, source: 'test' });
   assert.equal(v.status, 'verified');
+  // ...and says the anchor held only on the default branch, not in this checkout.
+  assert.match(JSON.stringify(v), /matched origin\/main only \(this checkout's copy differs\): engine\.ts/);
   // reconcile answers "what did this checkout change" — the working tree.
   const rc = runReconcile({ cwd: fx.project });
   assert.deepEqual(rc.candidates.map((c) => c.changed_files), [[{ file: 'engine.ts', status: 'changed' }]]);

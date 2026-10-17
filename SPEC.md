@@ -749,7 +749,7 @@ Implementations MAY use additional `ext` keys. Unknown keys MUST be preserved on
 
 A memory about code state ("auth uses argon2id", "the app has 7 screens") goes stale the moment the code it describes changes — calendar TTL fires too late. Code anchors link a memory to the files it depends on so staleness can be detected from code change, not just time.
 
-`ext.code_anchors` is an array of `{file, sha}` pairs. `sha` is the git blob SHA of the file content (`git hash-object <file>`) at the time the anchor was set or last verified. Comparing the recorded SHA against the current file content answers "has this file changed since the memory was last known true?" — including uncommitted edits, and insensitive to history rewrites.
+`ext.code_anchors` is an array of `{file, sha}` pairs. `sha` is the git blob SHA of the file content (`git hash-object <file>`) at the time the anchor was set or last verified. Comparing the recorded SHA against the current file content answers "has this file changed since the memory was last known true?" — including uncommitted edits, and insensitive to history rewrites. Since 0.12, the read path (search, get, context, status) and `verify` treat an anchor as holding when the recorded SHA matches either the working-tree file or the file on the repo's remote default branch (local refs, no fetch); `reconcile` compares the working tree only.
 
 Anchors are a convention, not a schema requirement. Tools that understand them (verify, reconcile, anchor-aware decay) use them; tools that don't ignore them. Memories without anchors keep calendar-only behavior.
 
