@@ -481,6 +481,7 @@ function questionSearchPayload(
     coverage,
     coverage_note,
     coverage_witness: strongestWitness(results).tier,
+    ...layerHealth(store),
   };
 }
 
@@ -707,7 +708,6 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     }
   }
 
-  const staleLayers = store.staleLayers();
   return {
     query,
     profile: profileName,
@@ -718,6 +718,18 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     coverage_note,
     coverage_witness: coverageWitness.tier,
     ...(coverageWitness.note !== undefined ? { coverage_witness_note: coverageWitness.note } : {}),
+    ...layerHealth(store),
+  };
+}
+
+/**
+ * `layers_unavailable` / `layers_stale`, each present only when non-empty.
+ * Shared by the record and the question search paths so neither drops a
+ * layer warning the other carries.
+ */
+function layerHealth(store: CompositeStore): Pick<SearchPayload, 'layers_unavailable' | 'layers_stale'> {
+  const staleLayers = store.staleLayers();
+  return {
     ...(store.layersUnavailable.length > 0 ? { layers_unavailable: store.unavailableLayers() } : {}),
     ...(staleLayers.length > 0 ? { layers_stale: staleLayers } : {}),
   };

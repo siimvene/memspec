@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { anchorWithinBase, blobOnDefaultBranch, resolveRepoRoot } from './anchors.js';
+import { anchorWithinBase, compareAnchorReadPath, resolveRepoRoot } from './anchors.js';
 import type { CodeAnchor } from './types.js';
 
 /**
@@ -18,14 +18,15 @@ import type { CodeAnchor } from './types.js';
  * `[DRIFTED]` marker (CLI) / `drifted` + `anchor_unchecked` fields (MCP JSON).
  * Files are never mutated.
  *
- * What "current content" means: the blob on the anchored repo's remote default
- * branch (`origin/main`, from local refs, as of the last fetch), not the
- * working tree. A code checkout is usually on some feature branch; hashing its
- * working tree made every record anchored to main read `drifted` there, and
- * masked real drift on main while the checkout lagged behind it. The working
- * tree is still the comparison when the repo has no remote default ref, the
- * file is gitignored, or git cannot answer — and each drift entry's
- * `compared_to` says which one was used.
+ * What "drifted" means (`compareAnchorReadPath`): the recorded blob matches
+ * NEITHER the working tree NOR the anchored repo's remote default branch
+ * (`origin/main`, from local refs, as of the last fetch). A checkout on a
+ * feature branch therefore neither drifts records anchored to main nor
+ * records anchored on that branch a moment ago (which `verify` and `anchor`,
+ * hashing the working tree, could never clear). The working tree alone
+ * decides when the repo has no remote default ref, the file is gitignored, or
+ * git cannot answer; each drift entry's `compared_to` says which
+ * (`worktree+origin/main` or `worktree`).
  */
 
 export type DriftStatus = 'changed' | 'missing' | 'repo_unavailable';
@@ -43,9 +44,10 @@ export interface DriftEntry {
   file: string;
   status: DriftStatus;
   /**
-   * What the recorded sha was compared against: the remote default-branch ref
-   * (e.g. `origin/main`) or `worktree`. Absent on `repo_unavailable`, where
-   * nothing could be compared.
+   * What the recorded sha was compared against: `worktree+<ref>` (e.g.
+   * `worktree+origin/main`) when both the working tree and the remote
+   * default branch were checked, `worktree` when the repo has no remote
+   * default ref. Absent on `repo_unavailable`, where nothing could be compared.
    */
   compared_to?: string;
 }
@@ -104,11 +106,9 @@ function driftOf(projectRoot: string, anchor: CodeAnchor, repoSearchPaths: strin
   // Ref lookups are memoized in git-state (repo + ref commit sha + path),
   // working-tree hashes here (path + mtime + size), so a long-lived server
   // spawns git once per anchored path per ref position.
-  const abs = resolve(root, anchor.file);
-  const onRef = blobOnDefaultBranch(abs);
-  const current = onRef ? onRef.sha : cachedBlobSha(abs);
-  if (current === anchor.sha) return null;
-  return { file: anchor.file, status: current === null ? 'missing' : 'changed', compared_to: onRef ? onRef.ref : 'worktree' };
+  const verdict = compareAnchorReadPath(resolve(root, anchor.file), anchor.sha, cachedBlobSha);
+  if (verdict.status === 'unchanged') return null;
+  return { file: anchor.file, status: verdict.status, compared_to: verdict.compared_to };
 }
 
 /**

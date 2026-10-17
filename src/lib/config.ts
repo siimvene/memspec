@@ -284,6 +284,13 @@ export function getDecayDays(config: MemspecConfig, type: MemoryType): number {
   return days ?? DEFAULT_DECAY_DAYS[type] ?? 90;
 }
 
+/** `getDecayDays` for every memory type: the per-type TTL table the store's `decay:` block configures. */
+export function decayDaysByType(config: MemspecConfig): Record<MemoryType, number> {
+  const out = { ...DEFAULT_DECAY_DAYS };
+  for (const type of Object.keys(out) as MemoryType[]) out[type] = getDecayDays(config, type);
+  return out;
+}
+
 export function getProfile(config: MemspecConfig, name: string = 'default'): MemspecProfile {
   const fallback = config.profiles.default ?? DEFAULT_CONFIG.profiles.default;
   const requested = config.profiles[name] ?? fallback;

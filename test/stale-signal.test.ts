@@ -150,6 +150,27 @@ test('migrate --apply: legacy decay_after never becomes a dated check_by, not ne
   assert.equal(fm.stale, true, 'the derived check_by is in the past, so migrate flags it like any other');
 });
 
+test('legacy never honours the store config.yaml decay: override, on the read path and in migrate', async () => {
+  const dir = await makeTempProject();
+  const store = await initStore(dir);
+  const configPath = join(store.root, 'config.yaml');
+  const config = await readFile(configPath, 'utf8');
+  assert.match(config, /decision: 180d/);
+  await writeFile(configPath, config.replace('decision: 180d', 'decision: 30d'), 'utf8');
+  const created = daysAgo(60);
+  const path = await writeLegacyDecision(store.root, fixedId(13), 'never', created);
+
+  const row = searchPayload('token lifetime', { cwd: dir }).results.find((r) => r.id === fixedId(13));
+  assert.ok(row);
+  assert.equal(row.stale, true, '60 days past created with a configured 30d decision TTL is stale (180d default would not be)');
+  assert.equal(new MemspecStore(dir).findById(fixedId(13))?.check_by, new Date(Date.parse(created) + 30 * DAY).toISOString());
+
+  await runCli(['migrate', '--cwd', dir, '--apply']);
+  const fm = matter(await readFile(path, 'utf8')).data as Record<string, unknown>;
+  const checkBy = fm.check_by instanceof Date ? fm.check_by.toISOString() : fm.check_by;
+  assert.equal(checkBy, new Date(Date.parse(created) + 30 * DAY).toISOString());
+});
+
 // --- 2. aging signal ---------------------------------------------------------
 
 test('search: an assertion-only hit unverified past aging_days carries aged + unverified_days', async () => {
@@ -454,4 +475,76 @@ test('supersede: a read-only target already superseded in view points at the liv
     new RegExp(`already superseded in this view by ${first.survivor_id}`),
   );
   assert.equal(fx.personalStore.loadActive().length, 1, 'no second local replacement was written');
+});
+
+// --- 4. cross-layer supersede: memo, lock, determinism ----------------------
+
+test('read view: pendingPromotions parses the layers once per view, and a write through a layer store invalidates it', async () => {
+  const fx = await makeTeamFixture();
+  const { CompositeStore } = await import('../src/lib/composite-store.js');
+  const composite = CompositeStore.forCwd(fx.personal);
+  const proto = MemspecStore.prototype as unknown as Record<'loadAll' | 'loadActive', (...a: unknown[]) => unknown>;
+  const original = { loadAll: proto.loadAll, loadActive: proto.loadActive };
+  let loads = 0;
+  for (const name of ['loadAll', 'loadActive'] as const) {
+    proto[name] = function (this: unknown, ...args: unknown[]) { loads++; return original[name].apply(this, args); };
+  }
+  try {
+    assert.equal(composite.pendingPromotions().size, 0);
+    const first = loads;
+    assert.ok(first > 0);
+    composite.pendingPromotions();
+    composite.pendingPromotions();
+    assert.equal(loads, first, 'repeat calls on one view reuse the computed map');
+
+    const local = composite.layers.find((l) => l.writable)!;
+    writeClaim(local.store, { id: fixedId(40), title: 'Token lifetime follows auth', body: 'New flow.', supersedes: [fx.teamId] });
+    assert.equal(composite.pendingPromotions().get(fx.teamId)?.id, fixedId(40), 'a write through the layer store is seen');
+  } finally {
+    proto.loadAll = original.loadAll;
+    proto.loadActive = original.loadActive;
+  }
+});
+
+test('supersede: a cross-layer supersede holds a lock on the target; a held lock refuses, a stale one is reclaimed', async () => {
+  const fx = await makeTeamFixture();
+  const { utimes } = await import('node:fs/promises');
+  const lockDir = join(fx.personalStore.root, 'local', 'locks');
+  const lock = join(lockDir, `supersede-${fx.teamId}.lock`);
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(lock, 'pid 1\n', { flag: 'wx' });
+
+  assert.throws(
+    () => runSupersede(fx.teamId, { cwd: fx.personal, reason: 'stale', body: 'Racing replacement.', source: 'agent:test' }),
+    /another supersede of .* is in progress/,
+  );
+  assert.equal(fx.personalStore.loadActive().length, 0, 'nothing written while the lock is held');
+
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  await utimes(lock, old, old);
+  const result = runSupersede(fx.teamId, { cwd: fx.personal, reason: 'stale', body: 'Replacement.', source: 'agent:test' });
+  assert.deepEqual(result.pending_promotion, { layer: 'team', target_id: fx.teamId });
+  await assert.rejects(readFile(lock, 'utf8'), /ENOENT/, 'the lock is released after the write');
+});
+
+test('supersede: two concurrent cross-layer supersedes of one target write one replacement', async () => {
+  const fx = await makeTeamFixture();
+  const run = (body: string) => runCli(['supersede', fx.teamId, '--cwd', fx.personal, '--reason', 'race', '--body', body, '--source', 'agent:test'])
+    .then(() => 'ok', (err: unknown) => String((err as { stderr?: string }).stderr ?? err));
+  const outcomes = await Promise.all([run('First take.'), run('Second take.')]);
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `exactly one succeeds: ${JSON.stringify(outcomes)}`);
+  assert.equal(fx.personalStore.loadActive().length, 1, 'one active local replacement');
+});
+
+test('read view: two live local replacements of one target are reported deterministically, flagged as a conflict', async () => {
+  const fx = await makeTeamFixture();
+  // Ids chosen so the lexically-larger one sorts first on disk by title.
+  writeClaim(fx.personalStore, { id: fixedId(52), title: 'A token lifetime take', body: 'One.', supersedes: [fx.teamId] });
+  writeClaim(fx.personalStore, { id: fixedId(51), title: 'Z token lifetime take', body: 'Two.', supersedes: [fx.teamId] });
+  const { CompositeStore } = await import('../src/lib/composite-store.js');
+  const pending = CompositeStore.forCwd(fx.personal).pendingPromotions().get(fx.teamId);
+  assert.deepEqual(pending, { id: fixedId(51), target_id: fx.teamId, target_layer: 'team', conflicting_ids: [fixedId(52)] });
+  const { report } = buildStatusReport({ cwd: fx.personal });
+  assert.deepEqual(report.pending_promotions, [pending]);
+  assert.match(runStatus({ cwd: fx.personal }), new RegExp(`${fixedId(51)} supersedes ${fx.teamId} \\(layer: team\\) — CONFLICT: also superseded by ${fixedId(52)}`));
 });

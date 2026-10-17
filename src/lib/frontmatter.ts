@@ -1,6 +1,6 @@
 import matter from 'gray-matter';
 import type { MemoryFrontmatter, MemoryItem } from './types.js';
-import { assertValidFrontmatter } from './schema.js';
+import { assertValidFrontmatter, type NormalizeOptions } from './schema.js';
 
 const LEGACY_DATE_KEYS = ['decay_after'] as const;
 const DATE_KEYS = ['created', 'check_by', 'last_verified', 'expires', 'valid_from', 'valid_to', ...LEGACY_DATE_KEYS] as const;
@@ -15,9 +15,9 @@ function coerceDates(data: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
-export function parseMemoryFile(content: string, filePath: string): MemoryItem {
+export function parseMemoryFile(content: string, filePath: string, options: NormalizeOptions = {}): MemoryItem {
   const parsed = matter(content);
-  const data = assertValidFrontmatter(coerceDates(parsed.data as Record<string, unknown>));
+  const data = assertValidFrontmatter(coerceDates(parsed.data as Record<string, unknown>), options);
   const body = parsed.content.trim();
 
   // Extract title from first heading

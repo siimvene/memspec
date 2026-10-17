@@ -17,6 +17,8 @@ export interface DecayCandidate {
 export interface DecayScanOptions {
   /** When set, active memories with ext.code_anchors are checked for drift against files under this root. */
   projectRoot?: string;
+  /** `anchors.repo_search_paths` of the store, so repo-qualified anchors resolve exactly as search resolves them. */
+  repoSearchPaths?: string[];
 }
 
 export function parseDuration(duration: string): number {
@@ -64,9 +66,13 @@ export function findDecayCandidates(items: MemoryItem[], options: DecayScanOptio
     if (options.projectRoot) {
       const anchors = getCodeAnchors(item);
       if (anchors.length === 0) continue;
-      // Same comparison as the search read path (the remote default branch),
-      // so status's drift count agrees with what search marks [DRIFTED].
-      const drifted = checkAnchors(options.projectRoot, anchors, { compareTo: 'default-branch' })
+      // Same comparison as the search read path (working tree or remote
+      // default branch, same repo search paths), so status's drift count
+      // agrees with what search marks [DRIFTED].
+      const drifted = checkAnchors(options.projectRoot, anchors, {
+        repoSearchPaths: options.repoSearchPaths,
+        compareTo: 'default-branch',
+      })
         .filter((a) => a.status !== 'unchanged');
       if (drifted.length > 0) {
         candidates.push({

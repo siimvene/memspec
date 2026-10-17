@@ -158,8 +158,10 @@ const LEGACY_STATE_MAP: Record<string, string> = {
  * - top-level confidence → ext.legacy_confidence (and removed from top level)
  */
 /**
- * The `check_by` a legacy `decay_after: never` claim reads as: the type default
- * TTL (`DEFAULT_DECAY_DAYS`) counted from `last_verified`, else `created`.
+ * The `check_by` a legacy `decay_after: never` claim reads as: the type's TTL
+ * counted from `last_verified`, else `created`. The TTL is the store's
+ * `config.yaml` `decay:` value for that type when the caller has the store
+ * config (`decayDays`, from `decayDaysByType`), else `DEFAULT_DECAY_DAYS`.
  *
  * Pre-0.3 writers stamped `decay_after: never` as a default on whole batches
  * of records (imports, early agent writes), so the value records no decision.
@@ -176,19 +178,28 @@ const LEGACY_STATE_MAP: Record<string, string> = {
  * expire on their own clock, questions never go stale) and when the base date
  * does not parse, leaving the caller's old mapping in place.
  */
-export function legacyNeverCheckBy(data: Record<string, unknown>): string | undefined {
+export function legacyNeverCheckBy(
+  data: Record<string, unknown>,
+  decayDays: Partial<Record<string, number>> = DEFAULT_DECAY_DAYS,
+): string | undefined {
   if (data.kind !== undefined && data.kind !== 'claim') return undefined;
   const asIso = (v: unknown): unknown => (v instanceof Date ? v.toISOString() : v);
   const base = asIso(data.last_verified) ?? asIso(data.created);
   if (typeof base !== 'string') return undefined;
   const baseMs = Date.parse(base);
   if (Number.isNaN(baseMs)) return undefined;
-  const type = data.type as keyof typeof DEFAULT_DECAY_DAYS | undefined;
-  const days = (type && DEFAULT_DECAY_DAYS[type]) ?? 90;
+  const type = typeof data.type === 'string' ? data.type : undefined;
+  const days = (type ? decayDays[type] ?? DEFAULT_DECAY_DAYS[type as keyof typeof DEFAULT_DECAY_DAYS] : undefined) ?? 90;
   return new Date(baseMs + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-export function normalizeLegacyFrontmatter(input: Record<string, unknown>): Record<string, unknown> {
+/** Store context for normalisation; absent fields fall back to the built-in defaults. */
+export interface NormalizeOptions {
+  /** Per-type TTL in days from the store's `config.yaml` `decay:` block (`decayDaysByType`). */
+  decayDays?: Partial<Record<string, number>>;
+}
+
+export function normalizeLegacyFrontmatter(input: Record<string, unknown>, options: NormalizeOptions = {}): Record<string, unknown> {
   const data = { ...input };
 
   if (data.kind === undefined) data.kind = 'claim';
@@ -199,7 +210,7 @@ export function normalizeLegacyFrontmatter(input: Record<string, unknown>): Reco
 
   if (data.check_by === undefined && data.decay_after !== undefined) {
     data.check_by = data.decay_after === 'never'
-      ? legacyNeverCheckBy(data) ?? data.decay_after
+      ? legacyNeverCheckBy(data, options.decayDays) ?? data.decay_after
       : data.decay_after;
   }
   delete data.decay_after;
@@ -242,9 +253,12 @@ export function normalizeLegacyFrontmatter(input: Record<string, unknown>): Reco
   return data;
 }
 
-export function validateFrontmatter(data: unknown): { success: true; data: MemoryItemFrontmatter } | { success: false; errors: string[] } {
+export function validateFrontmatter(
+  data: unknown,
+  options: NormalizeOptions = {},
+): { success: true; data: MemoryItemFrontmatter } | { success: false; errors: string[] } {
   const normalized = data && typeof data === 'object'
-    ? normalizeLegacyFrontmatter(data as Record<string, unknown>)
+    ? normalizeLegacyFrontmatter(data as Record<string, unknown>, options)
     : data;
   const result = memoryFrontmatterSchema.safeParse(normalized);
   if (result.success) {
@@ -256,9 +270,9 @@ export function validateFrontmatter(data: unknown): { success: true; data: Memor
   };
 }
 
-export function assertValidFrontmatter(data: unknown): MemoryFrontmatter {
+export function assertValidFrontmatter(data: unknown, options: NormalizeOptions = {}): MemoryFrontmatter {
   const normalized = data && typeof data === 'object'
-    ? normalizeLegacyFrontmatter(data as Record<string, unknown>)
+    ? normalizeLegacyFrontmatter(data as Record<string, unknown>, options)
     : data;
   return memoryFrontmatterSchema.parse(normalized) as MemoryFrontmatter;
 }

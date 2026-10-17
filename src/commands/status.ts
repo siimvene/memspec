@@ -5,6 +5,7 @@ import { projectRootForStore } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
 import { CompositeStore, describeStaleLayer, type PendingPromotion, type StaleLayer } from '../lib/composite-store.js';
 import { findDecayCandidates } from '../lib/decay.js';
+import { loadConfig } from '../lib/config.js';
 import { validateFrontmatter } from '../lib/schema.js';
 import { computeUsageStats, type UsageStatsEntry } from '../lib/usage-stats.js';
 import { eliminationStatus } from '../lib/questions.js';
@@ -378,7 +379,10 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
     }
   }
 
-  const candidates = findDecayCandidates(items, { projectRoot: projectRootForStore(store.root) });
+  const candidates = findDecayCandidates(items, {
+    projectRoot: projectRootForStore(store.root),
+    repoSearchPaths: loadConfig(store.root).anchors?.repo_search_paths,
+  });
   const drifted = candidates.filter((c) => c.kind === 'anchor-drift').length;
 
   const conflicts = findConflicts(items);
@@ -542,7 +546,8 @@ export function runStatus(options: StatusOptions): string {
   if (report.pending_promotions.length > 0) {
     lines.push('', `Pending promotions (${report.pending_promotions.length}) — local records superseding read-only layer records; promote each to its layer:`);
     for (const p of report.pending_promotions) {
-      lines.push(`  ${p.id} supersedes ${p.target_id} (layer: ${p.target_layer})`);
+      const conflict = p.conflicting_ids ? ` — CONFLICT: also superseded by ${p.conflicting_ids.join(', ')}; supersede all but one` : '';
+      lines.push(`  ${p.id} supersedes ${p.target_id} (layer: ${p.target_layer})${conflict}`);
     }
   }
 

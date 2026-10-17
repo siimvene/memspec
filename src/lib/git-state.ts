@@ -31,7 +31,9 @@ import { execFileSync } from 'node:child_process';
  *     short TTL so a burst of queries spawns git once per repo, while a
  *     checkout switch or a fetch is noticed within seconds. Blob lookups are
  *     keyed by the ref's commit sha, so they are immutable and cached for the
- *     life of the process.
+ *     life of the process. Whether a path is gitignored depends on the
+ *     working tree's mutable ignore rules, so that answer gets the same TTL as
+ *     the repo-level state.
  */
 
 const GIT_TIMEOUT_MS = 2000;
@@ -124,9 +126,12 @@ interface Cached<T> {
 
 const checkoutCache = new Map<string, Cached<CheckoutState | null>>();
 const defaultBranchCache = new Map<string, Cached<DefaultBranch | null>>();
-// (repoRoot, ref commit sha, path) → blob sha, or 'missing' / 'ignored'.
-// Immutable for a given commit, so never expired.
+// (repoRoot, ref commit sha, path) → blob sha, or 'absent' when the path is
+// not on that commit. Immutable for a given commit, so never expired.
 const blobCache = new Map<string, string>();
+// (repoRoot, path) → gitignored in this working tree. Mutable (.gitignore
+// edits), so TTL-bound like the repo-level state.
+const ignoredCache = new Map<string, Cached<boolean>>();
 
 function fresh<T>(entry: Cached<T> | undefined): entry is Cached<T> {
   return entry !== undefined && Date.now() - entry.at < GIT_STATE_TTL_MS;
@@ -136,6 +141,7 @@ function fresh<T>(entry: Cached<T> | undefined): entry is Cached<T> {
 export function expireGitStateCache(): void {
   checkoutCache.clear();
   defaultBranchCache.clear();
+  ignoredCache.clear();
 }
 
 /** Test-only: forget every cached git answer. */
@@ -198,23 +204,31 @@ export type RefBlob =
  */
 export function blobAtRef(repoRoot: string, refSha: string, relPath: string): RefBlob | null {
   const key = `${repoRoot}\0${refSha}\0${relPath}`;
-  const hit = blobCache.get(key);
-  if (hit !== undefined) {
-    return hit === 'missing' || hit === 'ignored' ? { kind: hit } : { kind: 'blob', sha: hit };
+  let value = blobCache.get(key);
+  if (value === undefined) {
+    const r = runGit(repoRoot, ['rev-parse', '--verify', '-q', `${refSha}:${relPath}`]);
+    if (r.ok && /^[0-9a-f]{40,64}$/.test(r.out)) {
+      value = r.out;
+    } else if (!r.ok && r.status === 1) {
+      // `rev-parse --verify -q` exits 1 for a name that does not resolve. The
+      // commit itself was just resolved, so the path is what is absent.
+      value = 'absent';
+    } else {
+      return null;
+    }
+    blobCache.set(key, value);
   }
-  const r = runGit(repoRoot, ['rev-parse', '--verify', '-q', `${refSha}:${relPath}`]);
-  let value: string;
-  if (r.ok && /^[0-9a-f]{40,64}$/.test(r.out)) {
-    value = r.out;
-  } else if (!r.ok && r.status === 1) {
-    // `rev-parse --verify -q` exits 1 for a name that does not resolve. The
-    // commit itself was just resolved, so the path is what is absent. An
-    // ignored path is a local-only file by design, never "deleted on main".
-    const ignored = runGit(repoRoot, ['check-ignore', '-q', '--', relPath]);
-    value = ignored.ok ? 'ignored' : 'missing';
-  } else {
-    return null;
-  }
-  blobCache.set(key, value);
-  return value === 'missing' || value === 'ignored' ? { kind: value } : { kind: 'blob', sha: value };
+  if (value !== 'absent') return { kind: 'blob', sha: value };
+  // An ignored path is a local-only file by design, never "deleted on main".
+  return { kind: isIgnored(repoRoot, relPath) ? 'ignored' : 'missing' };
+}
+
+/** `git check-ignore` for `relPath`, cached per (repo, path) for `GIT_STATE_TTL_MS`. A git failure reads as not ignored. */
+function isIgnored(repoRoot: string, relPath: string): boolean {
+  const key = `${repoRoot}\0${relPath}`;
+  const hit = ignoredCache.get(key);
+  if (fresh(hit)) return hit.value;
+  const value = runGit(repoRoot, ['check-ignore', '-q', '--', relPath]).ok;
+  ignoredCache.set(key, { at: Date.now(), value });
+  return value;
 }

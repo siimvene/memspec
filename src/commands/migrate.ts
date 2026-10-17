@@ -3,6 +3,7 @@ import { join, basename, dirname } from 'node:path';
 import matter from 'gray-matter';
 import { canonicalSourceForBucketing, inferSourceKind, storageTierForSourceKind } from '../lib/source.js';
 import { legacyNeverCheckBy, normalizeLegacyFrontmatter } from '../lib/schema.js';
+import { decayDaysByType, loadConfig } from '../lib/config.js';
 import { MemspecStore } from '../lib/store.js';
 import type { SourceKind, VerifiedWith } from '../lib/types.js';
 
@@ -71,6 +72,7 @@ function computeFileChange(
   filePath: string,
   raw: string,
   sourceOverrides: Record<string, SourceKind>,
+  decayDays?: Partial<Record<string, number>>,
 ): FileChange | null {
   let parsed;
   try {
@@ -106,7 +108,7 @@ function computeFileChange(
   // deliberate pin: it becomes the type default TTL, the same value the read
   // path computes (see `legacyNeverCheckBy` in schema.ts).
   if (data.decay_after !== undefined && data.check_by === undefined) {
-    const derived = data.decay_after === 'never' ? legacyNeverCheckBy(data) : undefined;
+    const derived = data.decay_after === 'never' ? legacyNeverCheckBy(data, decayDays) : undefined;
     data.check_by = derived ?? data.decay_after;
     changes.push('decay_after -> check_by');
   }
@@ -215,7 +217,7 @@ function computeFileChange(
 
   // Run the normalized record through the same legacy adapter the reader uses,
   // so any field aliases we didn't handle explicitly above still get migrated.
-  const normalized = normalizeLegacyFrontmatter(data);
+  const normalized = normalizeLegacyFrontmatter(data, { decayDays });
 
   const orderedFm = orderedFrontmatter(normalized);
   const afterRaw = matter.stringify(parsed.content, orderedFm);
@@ -380,6 +382,7 @@ export function runMigrate(options: MigrateOptions): MigrateResult {
   }
 
   const sourceOverrides = options.sourceOverrides ?? {};
+  const decayDays = decayDaysByType(loadConfig(store.root));
   const files = walkMarkdown(store.root);
 
   // First pass: load all the docs so we can render the inference table BEFORE
@@ -403,7 +406,7 @@ export function runMigrate(options: MigrateOptions): MigrateResult {
     if (!data || typeof data !== 'object' || !data.id) continue;
     rawDocs.push({ path: file, raw, source: String(data.source ?? '') });
 
-    const change = computeFileChange(store.root, file, raw, sourceOverrides);
+    const change = computeFileChange(store.root, file, raw, sourceOverrides, decayDays);
     if (change) fileChanges.push(change);
   }
 

@@ -11,9 +11,11 @@ export interface AnchorStatus extends CodeAnchor {
   // the claim cannot be witnessed locally, only flagged for review.
   status: 'unchanged' | 'changed' | 'missing' | 'repo_unavailable';
   /**
-   * What the recorded sha was compared against: the remote default-branch ref
-   * (e.g. `origin/main`) or `worktree`. Set only in `default-branch` mode, and
-   * absent on `repo_unavailable` (nothing was compared).
+   * What the recorded sha was compared against (see `compareAnchorReadPath`):
+   * `worktree+origin/main` when both sides were checked, `worktree` when the
+   * repo has no remote default ref; on `unchanged`, the side that matched
+   * (`worktree` or the ref). Set only in `default-branch` mode, and absent on
+   * `repo_unavailable` (nothing was compared).
    */
   compared_to?: string;
 }
@@ -25,10 +27,11 @@ export interface AnchorCheckOptions {
    * `worktree` (default): hash the file as it sits in the working tree — the
    * write-adjacent contract `verify` and `reconcile` keep, since their
    * follow-ups (`anchor`, re-verify) hash the working tree too.
-   * `default-branch`: compare against the blob on the anchored repo's remote
-   * default branch (see `blobOnDefaultBranch`), falling back to the working
-   * tree when the repo has none. The read/report paths (search, get, context,
-   * status) use this so drift does not depend on which branch a checkout is on.
+   * `default-branch`: the read-path verdict (`compareAnchorReadPath`): drifted
+   * only when the recorded sha matches neither the working tree nor the blob
+   * on the anchored repo's remote default branch. The read/report paths
+   * (search, get, context, status) use this so drift neither depends on which
+   * branch a checkout is on nor contradicts `verify` for a fresh anchor.
    */
   compareTo?: 'worktree' | 'default-branch';
 }
@@ -236,13 +239,76 @@ export function resolveAnchorRepo(
 export function blobOnDefaultBranch(absFile: string): { sha: string | null; ref: string } | null {
   const repoRoot = findRepoRoot(dirname(absFile));
   if (!repoRoot) return null;
-  const rel = relative(repoRoot, absFile);
-  if (rel === '' || rel.startsWith('..')) return null;
+  const rel = refPathOf(repoRoot, absFile);
+  if (rel === null) return null;
   const def = defaultBranchOf(repoRoot);
   if (!def) return null;
-  const at = blobAtRef(repoRoot, def.sha, rel.split(sep).join('/'));
+  const at = blobAtRef(repoRoot, def.sha, rel);
   if (!at || at.kind === 'ignored') return null;
   return { sha: at.kind === 'blob' ? at.sha : null, ref: def.ref };
+}
+
+/**
+ * Repo-relative POSIX path to look `absFile` up under on a ref, like for like
+ * with the working-tree hash. `blobSha` follows symlinks, so a symlinked
+ * anchor (or one under a symlinked directory) records its target's content;
+ * on a ref, the link's own path holds the link text. Resolving both sides
+ * with `realpath` looks the target up instead. A file absent from the working
+ * tree keeps its lexical path. Null when the path is the root or resolves
+ * outside the repo (the caller compares the working tree only).
+ */
+function refPathOf(repoRoot: string, absFile: string): string | null {
+  let rel = relative(repoRoot, absFile);
+  try {
+    rel = relative(realpathSync(repoRoot), realpathSync(absFile));
+  } catch {
+    // Not in the working tree: nothing to resolve, the lexical path stands.
+  }
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
+  return rel.split(sep).join('/');
+}
+
+/** Read-path verdict for one anchor; see `compareAnchorReadPath`. */
+export interface ReadPathComparison {
+  status: 'unchanged' | 'changed' | 'missing';
+  /** Working-tree blob, else the default-branch blob, else null. */
+  currentSha: string | null;
+  /** `worktree+<ref>` / `worktree` for a drifted anchor; the side that matched for an unchanged one. */
+  compared_to: string;
+}
+
+/**
+ * The read path's drift rule. An anchor is drifted only when its recorded sha
+ * matches NEITHER the working-tree blob NOR the blob on the anchored repo's
+ * remote default branch (when the repo has one; otherwise the working tree
+ * alone decides, as before).
+ *
+ * Why both: the default branch alone made a record anchored on a feature
+ * branch read `drifted` (or `missing`) seconds after it was written, while
+ * every remedy (`verify`, `reconcile`, `anchor`) hashes the working tree and
+ * so could never clear it. The working tree alone made a checkout's local
+ * edits drift records that still describe what the team merged. A match on
+ * either side means the claim describes real code someone is reading.
+ *
+ * `missing` when the file is absent from the working tree and from the ref
+ * (or the ref was not consulted); otherwise `changed`. The working tree is
+ * hashed first, and a match there costs no git call.
+ */
+export function compareAnchorReadPath(
+  absFile: string,
+  recordedSha: string,
+  worktreeSha: (absPath: string) => string | null = blobSha,
+): ReadPathComparison {
+  const worktree = worktreeSha(absFile);
+  if (worktree === recordedSha) return { status: 'unchanged', currentSha: worktree, compared_to: 'worktree' };
+  const onRef = blobOnDefaultBranch(absFile);
+  if (onRef && onRef.sha === recordedSha) return { status: 'unchanged', currentSha: worktree ?? onRef.sha, compared_to: onRef.ref };
+  const absent = worktree === null && (onRef === null || onRef.sha === null);
+  return {
+    status: absent ? 'missing' : 'changed',
+    currentSha: worktree ?? onRef?.sha ?? null,
+    compared_to: onRef ? `worktree+${onRef.ref}` : 'worktree',
+  };
 }
 
 /** Compare each anchor's recorded SHA against the file's current content (see `AnchorCheckOptions.compareTo`). */
@@ -269,12 +335,11 @@ export function checkAnchors(projectRoot: string, anchors: CodeAnchor[], options
       return { ...anchor, currentSha: null, status: 'repo_unavailable' as const };
     }
     const abs = resolve(root, anchor.file);
-    const onRef = options.compareTo === 'default-branch' ? blobOnDefaultBranch(abs) : null;
-    const currentSha = onRef ? onRef.sha : blobSha(abs);
+    if (options.compareTo === 'default-branch') return { ...anchor, ...compareAnchorReadPath(abs, anchor.sha) };
+    const currentSha = blobSha(abs);
     const status: AnchorStatus['status'] =
       currentSha === null ? 'missing' : currentSha === anchor.sha ? 'unchanged' : 'changed';
-    if (options.compareTo !== 'default-branch') return { ...anchor, currentSha, status };
-    return { ...anchor, currentSha, status, compared_to: onRef ? onRef.ref : 'worktree' };
+    return { ...anchor, currentSha, status };
   });
 }
 

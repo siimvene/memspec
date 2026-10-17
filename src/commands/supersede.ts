@@ -3,7 +3,10 @@ import { getDecayDays, loadConfig } from '../lib/config.js';
 import { appendOutcome } from '../lib/outcomes.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import { assertKnownScope } from '../lib/scope.js';
-import { CompositeStore } from '../lib/composite-store.js';
+import { createHash } from 'node:crypto';
+import { closeSync, mkdirSync, openSync, rmSync, statSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
+import { CompositeStore, type StoreLayer } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_DECAY_DAYS, type EvidenceEntry, type MemoryItem, type MemoryType } from '../lib/types.js';
 
@@ -142,7 +145,8 @@ function inheritedScope(contributors: MemoryItem[]): string | undefined {
 function crossLayerTarget(composite: CompositeStore, targetId: string, options: SupersedeOptions): SupersedeResult | null {
   const owner = composite.layerForId(targetId);
   if (!owner || owner.writable) return null;
-  if (options.body === undefined || options.body === null) return null;
+  const body = options.body;
+  if (body === undefined || body === null) return null;
   if ((options.mergeFrom ?? []).some((id) => id !== targetId)) return null;
   const writable = composite.layers.filter((l) => l.writable);
   if (writable.length !== 1) return null;
@@ -150,10 +154,79 @@ function crossLayerTarget(composite: CompositeStore, targetId: string, options: 
 
   const target = owner.store.findById(targetId);
   if (!target) return null;
+  local.store.init();
+  return withSupersedeLock(local.store.root, targetId, () => writeCrossLayerReplacement(composite, owner, local, target, body, options));
+}
+
+/** A lock older than this is a crashed writer's, and is reclaimed. A cross-layer supersede takes milliseconds. */
+const SUPERSEDE_LOCK_STALE_MS = 30_000;
+
+/**
+ * Run `fn` holding an exclusive per-target lock file in the writable layer's
+ * machine-local subtree (`local/locks/supersede-<target>.lock`, created with
+ * the `wx` flag, removed in `finally`). Two processes superseding the same
+ * read-only record could otherwise both pass the "already superseded in this
+ * view" guard and both write an active replacement: the guard reads the
+ * store, the write lands after it, and nothing orders the two. A lock older
+ * than `SUPERSEDE_LOCK_STALE_MS` is left by a crashed writer and is reclaimed.
+ */
+function withSupersedeLock<T>(storeRoot: string, targetId: string, fn: () => T): T {
+  const dir = join(storeRoot, 'local', 'locks');
+  const name = /^[A-Za-z0-9_-]{1,128}$/.test(targetId) ? targetId : createHash('sha1').update(targetId).digest('hex');
+  const path = join(dir, `supersede-${name}.lock`);
+  mkdirSync(dir, { recursive: true });
+  const busy = () => new Error(
+    `another supersede of "${targetId}" is in progress (lock ${path}); retry in a moment, ` +
+      'or delete the lock file if no memspec process is running',
+  );
+  const acquire = (): number | null => {
+    try {
+      return openSync(path, 'wx');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
+      throw err;
+    }
+  };
+  let fd = acquire();
+  if (fd === null) {
+    let age = Number.POSITIVE_INFINITY;
+    try {
+      age = Date.now() - statSync(path).mtimeMs;
+    } catch {
+      // Released between our open and stat: reclaim below.
+    }
+    if (age < SUPERSEDE_LOCK_STALE_MS) throw busy();
+    rmSync(path, { force: true });
+    fd = acquire();
+    if (fd === null) throw busy();
+  }
+  try {
+    writeSync(fd, `${process.pid}\n`);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    return fn();
+  } finally {
+    rmSync(path, { force: true });
+  }
+}
+
+/** The check + write half of `crossLayerTarget`, run under the per-target lock. */
+function writeCrossLayerReplacement(
+  composite: CompositeStore,
+  owner: StoreLayer,
+  local: StoreLayer,
+  target: MemoryItem,
+  body: string,
+  options: SupersedeOptions,
+): SupersedeResult {
+  const targetId = target.id;
   // A second local replacement would fork the correction: two active local
   // records claiming one target, only one of which the view honours. The
-  // live record is the one to supersede.
-  const existing = composite.pendingPromotions().get(targetId);
+  // live record is the one to supersede. Read fresh, under the lock: another
+  // process may have written one since this view was loaded.
+  const existing = composite.pendingPromotions({ fresh: true }).get(targetId);
   if (existing) {
     throw new Error(
       `"${targetId}" is already superseded in this view by ${existing.id} (pending promotion to layer '${owner.name}'); ` +
@@ -187,14 +260,13 @@ function crossLayerTarget(composite: CompositeStore, targetId: string, options: 
     supersedes: [targetId],
     supersede_reason: reason,
     title: options.title ?? target.title,
-    body: options.body,
+    body,
   };
   if (scope) replacement.scope = scope;
   const carried = carryV011Fields([target]);
   if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
   if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
 
-  local.store.init();
   local.store.writeItem(replacement);
   appendOutcome(local.store.root, targetId, 'corrected', { source, note: reason });
 
