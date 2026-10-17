@@ -72,7 +72,7 @@ field/state names into this v0.3+ shape before validation.
 
 - **Type:** `string`
 - **Required:** yes
-- **Description:** ISO 8601 deadline or `"never"`; when it passes the record is flagged `stale: true` at read time but never deleted (renamed from `decay_after`).
+- **Description:** ISO 8601 deadline or `"never"`; when it passes the record is flagged `stale: true` at read time but never deleted (renamed from `decay_after`; a legacy `decay_after: never` on a claim reads as the type default TTL, only an explicit `check_by: never` pins).
 
 ### `stale`
 

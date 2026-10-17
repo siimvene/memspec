@@ -89,7 +89,8 @@ test('migrate relocates v0.2 operator-sourced record to memory/operator/<type>s/
 
   const fm = await loadFm(operatorPath);
   assert.equal(fm.source_kind, 'operator');
-  assert.equal(fm.check_by, 'never', 'decay_after should be renamed to check_by');
+  // Legacy `decay_after: never` becomes the type default TTL (fact 90d from created), not `never`.
+  assert.equal(fm.check_by, '2026-07-03T10:30:00.000Z', 'decay_after should be renamed to check_by');
   assert.equal(fm.decay_after, undefined);
   assert.equal(fm.state, 'active');
   assert.equal(fm.kind, 'claim');

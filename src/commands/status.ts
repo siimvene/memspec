@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import { projectRootForStore } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
-import { CompositeStore } from '../lib/composite-store.js';
+import { CompositeStore, type PendingPromotion } from '../lib/composite-store.js';
 import { findDecayCandidates } from '../lib/decay.js';
 import { validateFrontmatter } from '../lib/schema.js';
 import { computeUsageStats, type UsageStatsEntry } from '../lib/usage-stats.js';
@@ -90,6 +90,13 @@ export interface StatusReport {
   evidence_backed: number;
   /** v0.11 — question groups and their elimination disposition. */
   questions: QuestionReportEntry[];
+  /**
+   * Local records that supersede a record in a read-only layer of this cwd's
+   * view (see `CompositeStore.pendingPromotions`). Each pair is a promotion
+   * still owed to the read-only layer's repo; until it lands, only this view
+   * sees the target as superseded. Sorted by local id.
+   */
+  pending_promotions: PendingPromotion[];
 }
 
 function walk(dir: string): string[] {
@@ -327,6 +334,16 @@ function unavailableLayersFor(cwd: string | undefined): Array<{ name: string; pa
   }
 }
 
+/** Pending cross-layer promotions in the cwd's layered view; never throws (same reason as above). */
+function pendingPromotionsFor(cwd: string | undefined): PendingPromotion[] {
+  try {
+    return [...CompositeStore.forCwd(cwd).pendingPromotions().values()]
+      .sort((a, b) => (a.id === b.id ? a.target_id.localeCompare(b.target_id) : a.id.localeCompare(b.id)));
+  } catch {
+    return [];
+  }
+}
+
 export function buildStatusReport(options: StatusOptions): { store: MemspecStore; report: StatusReport } {
   const store = new MemspecStore(options.cwd);
   const items = store.loadAll();
@@ -378,6 +395,7 @@ export function buildStatusReport(options: StatusOptions): { store: MemspecStore
       promotion_candidates: promotionCandidates,
       evidence_backed: evidenceBacked,
       questions,
+      pending_promotions: pendingPromotionsFor(options.cwd),
     },
   };
 }
@@ -502,6 +520,13 @@ export function runStatus(options: StatusOptions): string {
     lines.push('', 'Recent:');
     for (const item of recent) {
       lines.push(`  ${item.created.substring(0, 10)} [${item.type ?? 'observation'}] ${item.title}`);
+    }
+  }
+
+  if (report.pending_promotions.length > 0) {
+    lines.push('', `Pending promotions (${report.pending_promotions.length}) — local records superseding read-only layer records; promote each to its layer:`);
+    for (const p of report.pending_promotions) {
+      lines.push(`  ${p.id} supersedes ${p.target_id} (layer: ${p.target_layer})`);
     }
   }
 

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFile
 import { join, basename, dirname } from 'node:path';
 import matter from 'gray-matter';
 import { canonicalSourceForBucketing, inferSourceKind, storageTierForSourceKind } from '../lib/source.js';
-import { normalizeLegacyFrontmatter } from '../lib/schema.js';
+import { legacyNeverCheckBy, normalizeLegacyFrontmatter } from '../lib/schema.js';
 import { MemspecStore } from '../lib/store.js';
 import type { SourceKind, VerifiedWith } from '../lib/types.js';
 
@@ -102,9 +102,12 @@ function computeFileChange(
     changes.push('kind: claim (default)');
   }
 
-  // 3. decay_after -> check_by.
+  // 3. decay_after -> check_by. A legacy `never` is not carried over as a
+  // deliberate pin: it becomes the type default TTL, the same value the read
+  // path computes (see `legacyNeverCheckBy` in schema.ts).
   if (data.decay_after !== undefined && data.check_by === undefined) {
-    data.check_by = data.decay_after;
+    const derived = data.decay_after === 'never' ? legacyNeverCheckBy(data) : undefined;
+    data.check_by = derived ?? data.decay_after;
     changes.push('decay_after -> check_by');
   }
   if (data.decay_after !== undefined) delete data.decay_after;

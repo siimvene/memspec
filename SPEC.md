@@ -169,6 +169,10 @@ active   ──→ retired      (operator-approved sweep)
 
 TTL expiry does **not** transition state. An item past `check_by` stays `active` and gets `stale: true` in frontmatter — it remains retrievable, with the flag carried in results so readers know to re-verify or supersede before relying on it. A successful verification clears the flag.
 
+A legacy `decay_after: never` (pre-0.3, often stamped on whole import batches) is not a deliberate pin: when no explicit `check_by` is present, the record reads with the type default TTL (`decay` per type) counted from `last_verified`, else `created`. Only an explicit `check_by: never` (written by `verify --check-by never`, or by hand for settled event history) exempts a record from the review clock. The mapping happens at read time; `memspec migrate` persists the same value.
+
+**Aging (unverified claims).** Independent of `check_by`, an active claim witnessed only by `assertion` whose `last_verified` (else `created`) is older than the config's top-level `aging_days` (default 90; `0` disables) is reported with `aged: true` and `unverified_days: <int>` on search hits and `memspec_get`. Records with an explicit `check_by: never` and records already `stale: true` are exempt. Aging is a read-time signal only: it never changes state, ranking, or the file.
+
 State transitions out of `active` are explicit acts: a supersede (with a durable reason) or an operator-approved sweep. Time alone never removes knowledge.
 
 ### 3.3 Decay Defaults
@@ -260,6 +264,7 @@ A retrieval response is an ordered list of memory items, ranked by relevance, tr
 - The memory content
 - The memory type
 - The witness class (`verified_with`) and the stale flag, if set
+- The aging signal, if set: `aged: true` plus `unverified_days` (§3.2); the text renderer prints `[UNVERIFIED <N>d — check before relying]`
 - Known `conflicts_with` edges (including edges to non-returned claims, with their titles inline)
 - The creation date
 - When `expand_edges` surfaced the hit, an `expanded_via: {from_id, edge_type, hops}` field naming the search match the linked note was reached from (v0.5+)
@@ -662,8 +667,9 @@ stores:
 When multiple layers contain memories:
 - **Search**: Results from all layers are merged, deduplicated by ID. Higher-priority layers win on ID collisions. A hit served from a non-primary layer carries a `layer: <name>` field (JSON) / `(layer: <name>)` suffix (text); hits from the primary writable layer carry none, so single-store retrieval is byte-identical.
 - **Write**: Writes go to the highest-priority writable layer by default. An explicit layer name may be specified. A write with no explicit target never selects a `writable: false` layer.
-- **Read-only layers (`writable: false`)**: included in every read, refused for every write. An explicit write to such a layer refuses, and an in-place edit of a record it owns (`supersede`, `relate`/`unrelate`, `verify`, `anchor`) refuses, naming the layer — the same way `writeItem` refuses a read-only target. `remember`/`observe` create new records and always land in the writable primary.
+- **Read-only layers (`writable: false`)**: included in every read, refused for every write. An explicit write to such a layer refuses, and an in-place edit of a record it owns (`supersede`, `relate`/`unrelate`, `verify`, `anchor`) refuses, naming the layer (a `supersede` with a replacement body is the one exception: see cross-layer supersede below) — the same way `writeItem` refuses a read-only target. `remember`/`observe` create new records and always land in the writable primary.
 - **Correction**: A correction in any layer marks the target as corrected, regardless of which layer the target lives in.
+- **Cross-layer supersede (pending promotion)**: a `supersede` WITH a replacement body whose target lives in a read-only layer writes the replacement to the view's one writable layer with `supersedes: [<target id>]` and leaves the read-only file untouched; the result carries `pending_promotion: {layer, target_id}`. In that view, a read-only-layer record superseded by an active writable-layer record (however that record was written, including by hand) is dropped from active search results and boot context, and `memspec_get` reports it as `state: "superseded-in-view"` with `superseded_by` and its `layer`. A local correction of the replacement inherits the claim; a chain ending in a retraction withdraws it. `memspec status` lists every such pair under `pending_promotions` (`id`, `target_id`, `target_layer`) — the input for the promotion PR to that layer. With zero or several writable layers, and for a retraction or merge, the refusal above stands.
 
 ### 12.4 Auto-Detection
 

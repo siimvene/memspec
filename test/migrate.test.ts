@@ -151,7 +151,9 @@ test('migrate --apply renames fields and remaps state', async () => {
     join(target, '.memspec', 'memory', 'operator', 'decisions', 'ms_01HXK7Y3P5QZJKM8N4R2T6W9VD.md'),
   );
   assert.equal(operator.source_kind, 'operator');
-  assert.equal(operator.check_by, 'never');
+  // Legacy `decay_after: never` is not a deliberate pin: it reads as the type
+  // default TTL (decision 180d from created), even on operator records.
+  assert.equal(operator.check_by, '2026-10-01T10:30:00.000Z');
   // verified_with backfilled: operator-sourced fall through to 'operator'
   assert.equal(operator.verified_with, 'operator');
 

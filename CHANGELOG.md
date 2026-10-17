@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+Stop presenting old, unverified records as current truth. Origin: a team-store decision imported with legacy `decay_after: never`, no anchors, witness `assertion`, last verified months earlier, kept ranking `stale: false` after the auth system and vendor price it cited had changed; an agent repeated it as fact, a stale-record cleanup never saw it, and a local correction could not displace it because the team layer is read-only.
+
+### Changed
+
+- **Legacy `decay_after: never` no longer means never.** When a record carries `decay_after: never` and no explicit `check_by`, normalisation (`normalizeLegacyFrontmatter`, new `legacyNeverCheckBy`) gives it the type default TTL (`DEFAULT_DECAY_DAYS`) from `last_verified`, else `created`, so the read-time stale flag applies. Read-time only: search/get rewrite nothing. `memspec migrate` persists the same date instead of writing `check_by: never`. A legacy dated `decay_after` maps as before, and an explicit `check_by: never` (`verify --check-by never`, event records) stays honoured. This applies to operator-sourced legacy records too; re-pin one with `verify --check-by never` if `never` was deliberate.
+- **`supersede` of a read-only-layer record with a replacement body now takes effect locally.** When the read view has exactly one writable layer, the replacement is written there with `supersedes: [<target>]`, the read-only file is untouched, and the result carries `pending_promotion: { layer, target_id }` (CLI text says so; MCP `memspec_supersede` returns the field). Retraction, merge, and an ambiguous writable layer keep the existing refusal.
+
+### Added
+
+- **Aging signal.** Search hits (CLI text/JSON, MCP `memspec_search`) and `memspec_get` carry `aged: true` + `unverified_days` for an active claim witnessed only by `assertion` and unverified for longer than `aging_days` (new top-level `config.yaml` key, default 90, `0` disables; a non-integer or negative value is a config error). Independent of `check_by`; never set on explicit `check_by: never` pins or on records already `stale: true`. Text renderers print `[UNVERIFIED <N>d — check before relying]`. Ranking is unchanged. `memspec_get` now also reports `stale`.
+- **Superseded-in-view.** In a layered view, a read-only-layer record superseded by an active writable-layer record (written by `supersede` or by hand) is dropped from active search results and boot context (`CompositeStore.loadActive`/`search`), served from `loadAll` as superseded, and reported by `memspec_get` as `state: "superseded-in-view"` with `superseded_by` and `layer`. A local correction of the replacement inherits the claim; a chain ending in a retraction withdraws it.
+- **`memspec status` pending promotions.** New `pending_promotions` array in the status report (MCP JSON) and a `Pending promotions` text section: local record id, target id, target layer, the input for the promotion PR to the team repo.
+
 ## 0.11.0 — 2026-09-11
 
 ### Security (release gate, 2026-09-16)

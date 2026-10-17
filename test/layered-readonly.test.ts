@@ -111,10 +111,13 @@ test('layered read-only: remember without --store lands in the writable personal
   assert.equal(fx.teamStore.findById(result.id), null, 'read-only team store must not receive the write');
 });
 
-test('layered read-only: supersede on a team record refuses, naming the layer', async () => {
+// A REPLACEMENT of a team record now lands in the personal layer as a pending
+// promotion (test/stale-signal.test.ts); a retraction has no local record to
+// carry it and still refuses.
+test('layered read-only: retracting a team record refuses, naming the layer', async () => {
   const fx = await makeReadonlyTeamFixture();
   assert.throws(
-    () => runSupersede(fx.teamId, { cwd: fx.personal, reason: 'trying to edit team memory', body: 'new' }),
+    () => runSupersede(fx.teamId, { cwd: fx.personal, reason: 'trying to edit team memory' }),
     /read-only store layer 'team'/,
   );
   // The team record is untouched.

@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { CompositeStore } from '../lib/composite-store.js';
-import { getProfile, loadConfig } from '../lib/config.js';
+import { getAgingDays, getProfile, loadConfig } from '../lib/config.js';
+import { agingOf } from '../lib/decay.js';
 import { tokenizeLikeIndex } from '../lib/fts.js';
 import { EDGE_TYPES, expandGraph, isDerived, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
@@ -106,6 +107,16 @@ export interface SearchResult {
   source: string;
   tags: string[];
   stale: boolean;
+  /**
+   * Aging signal: present (`true`) only on an active claim witnessed by
+   * `assertion` alone whose `last_verified` (else `created`) is older than the
+   * config's `aging_days` (default 90). Independent of `check_by` — a hit can
+   * be `stale: false` and still `aged: true`. Never set on `check_by: "never"`
+   * pins or on rows already `stale: true`. See `agingOf` in decay.ts.
+   */
+  aged?: true;
+  /** Whole days since `last_verified` (else `created`); present exactly when `aged` is. */
+  unverified_days?: number;
   conflicts_with: string[];
   /** v0.4 typed relation edges — ids of records this hit refines/supports/depends on. */
   refines: string[];
@@ -257,7 +268,7 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-function witnessOf(item: MemoryItem): VerifiedWith {
+export function witnessOf(item: MemoryItem): VerifiedWith {
   if (item.verified_with) return item.verified_with;
   if (item.anchors && item.anchors.length > 0) return 'anchor';
   return 'assertion';
@@ -627,6 +638,19 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
     if (drift.drift.length > 0) row.drift = drift.drift;
   }
 
+  // Aging signal — an assertion-only claim nobody has re-verified in
+  // `aging_days`. Joined on the same witness the row displays, so a row never
+  // reads `(assertion)` without the age check, or `(anchor)` with it.
+  const agingDays = getAgingDays(config);
+  const surfacedById = new Map([...items, ...expansionItems].map((i) => [i.id, i]));
+  for (const row of results) {
+    const item = surfacedById.get(row.id);
+    const aging = item ? agingOf(item, row.verified_with, agingDays) : null;
+    if (!aging) continue;
+    row.aged = aging.aged;
+    row.unverified_days = aging.unverified_days;
+  }
+
   // v0.11 — surface last_referenced/sessions when this id has prior usage-log
   // history. Never written back to frontmatter; purely a read-side join.
   const usageStats = computeUsageStats(store.root);
@@ -907,6 +931,11 @@ export function formatCoverageLine(payload: SearchPayload): string {
   return [line, ...missing].join('\n');
 }
 
+/** Text-renderer marker for the aging signal; empty when the row is not aged. Shared with the MCP text renderer. */
+export function agedTag(row: Pick<SearchResult, 'aged' | 'unverified_days'>): string {
+  return row.aged ? ` [UNVERIFIED ${row.unverified_days}d — check before relying]` : '';
+}
+
 export function runSearch(query: string, options: SearchOptions): string {
   const payload = searchPayload(query, options);
 
@@ -937,7 +966,7 @@ export function runSearch(query: string, options: SearchOptions): string {
     // more than one layer is configured.
     const layerTag = item.layer ? ` (layer: ${item.layer})` : '';
     const derivedTag = item.derived ? ' (derived)' : '';
-    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${derivedTag}${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${driftTag}${conflictTag}${expandedTag}${layerTag}`);
+    lines.push(`[${item.type}] ${item.title} (${item.verified_with})${derivedTag}${item.stale ? ' [STALE — verify or supersede before relying on this]' : ''}${agedTag(item)}${driftTag}${conflictTag}${expandedTag}${layerTag}`);
     lines.push(`  ${item.id} | ${item.created.substring(0, 10)} | ${item.source}`);
     if (item.tags.length > 0) {
       lines.push(`  tags: ${item.tags.join(', ')}`);
