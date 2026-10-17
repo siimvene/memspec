@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 — 2026-10-17
 
 Stop presenting old, unverified records as current truth. Origin: a team-store decision imported with legacy `decay_after: never`, no anchors, witness `assertion`, last verified months earlier, kept ranking `stale: false` after the auth system and vendor price it cited had changed; an agent repeated it as fact, a stale-record cleanup never saw it, and a local correction could not displace it because the team layer is read-only.
 
