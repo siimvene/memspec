@@ -60,16 +60,19 @@ function checkBunfig(home) {
 }
 
 // Mirrors claudeConfigDir() in src/lib/claude-config.ts; this file is copied
-// into the config dir on its own, so it cannot import from the package.
+// into the config dir on its own, so it cannot import from the package. Claude
+// Code needs CLAUDE_CONFIG_DIR absolute and does not expand ~, so neither do we.
 function claudeConfigDir(home, env) {
   const raw = (env.CLAUDE_CONFIG_DIR || '').trim();
-  if (!raw) return path.join(home, '.claude');
-  if (raw === '~') return path.resolve(home);
-  if (raw.startsWith('~/')) return path.resolve(home, raw.slice(2));
+  if (!raw || !path.isAbsolute(raw)) return path.join(home, '.claude');
   return path.resolve(raw);
 }
 
 function checkSessionHook(home, env) {
+  const raw = (env.CLAUDE_CONFIG_DIR || '').trim();
+  if (raw && !path.isAbsolute(raw)) {
+    return ['WARN', `session-hook: CLAUDE_CONFIG_DIR is "${raw}", not an absolute path; Claude Code needs the full path`];
+  }
   const claudeDir = claudeConfigDir(home, env);
   const shown = path.resolve(claudeDir) === path.resolve(home, '.claude') ? '~/.claude' : claudeDir;
   const hookFile = path.join(claudeDir, 'hooks', 'memspec-session-start.js');

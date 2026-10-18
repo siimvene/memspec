@@ -1,12 +1,12 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemspecStore } from '../lib/store.js';
 import { findStoreDirUpward } from '../lib/registry.js';
 import { detectBrownfieldSources, importBrownfield } from '../lib/brownfield.js';
 import { patchAgentInstructions } from '../lib/agent-addon.js';
-import { canonical, claudeConfigDir, isDefaultClaudeConfigDir, shellQuote } from '../lib/claude-config.js';
+import { canonical, claudeConfigDir, claudeConfigDirProblem, isDefaultClaudeConfigDir, shellQuote } from '../lib/claude-config.js';
 
 export interface InitOptions {
   cwd?: string;
@@ -31,6 +31,8 @@ export interface InitOptions {
 interface HookEntry {
   type: 'command';
   command: string;
+  /** Exec form: `command` is spawned directly with these arguments, no shell. */
+  args?: string[];
   timeout?: number;
 }
 
@@ -142,10 +144,27 @@ export function hookCommandWords(command: string, home: string): string[] {
   return words;
 }
 
-/** True when `command` runs exactly `hookPath` (compared after expansion and realpath). */
-export function commandRunsHook(command: string, hookPath: string, home: string = homedir()): boolean {
+/** The argument vector a hook entry runs: exec form as written, shell form split into words. */
+export function hookWords(hook: Pick<HookEntry, 'command' | 'args'>, home: string = homedir()): string[] {
+  if (Array.isArray(hook.args)) return [hook.command, ...hook.args.map(String)];
+  return hookCommandWords(hook.command, home);
+}
+
+/** True when some word of the hook entry is exactly `hookPath` (compared after expansion and realpath). */
+export function commandRunsHook(
+  hook: string | Pick<HookEntry, 'command' | 'args'>,
+  hookPath: string,
+  home: string = homedir(),
+): boolean {
+  const entry = typeof hook === 'string' ? { command: hook } : hook;
   const target = canonical(hookPath);
-  return hookCommandWords(command, home).some((word) => word.startsWith('/') && canonical(word) === target);
+  return hookWords(entry, home).some((word) => word.startsWith('/') && canonical(word) === target);
+}
+
+/** True when the hook entry is exactly `node <hookPath>`: what memspec itself writes. */
+function isPlainNodeHook(hook: Pick<HookEntry, 'command' | 'args'>, hookPath: string, home: string): boolean {
+  const words = hookWords(hook, home);
+  return words.length === 2 && words[0] === 'node' && words[1].startsWith('/') && canonical(words[1]) === canonical(hookPath);
 }
 
 export function installClaudeCodeHooks(
@@ -153,6 +172,11 @@ export function installClaudeCodeHooks(
   home: string = homedir(),
 ): { messages: string[] } {
   const messages: string[] = [];
+  const problem = claudeConfigDirProblem(env);
+  if (problem) {
+    messages.push(`${problem}; skipped hook install`);
+    return { messages };
+  }
   const claudeDir = claudeConfigDir(env, home);
   const isDefault = isDefaultClaudeConfigDir(claudeDir, home);
   const shownDir = isDefault ? '~/.claude' : claudeDir;
@@ -225,9 +249,13 @@ export function installClaudeCodeHooks(
     const existingForEvent = settings.hooks[event] ?? [];
 
     const memspecHooks = existingForEvent.flatMap((entry) =>
-      (entry.hooks ?? []).filter((h) => typeof h.command === 'string' && isMemspecHookCommand(h.command) && h.command.includes(hook.file)),
+      (entry.hooks ?? []).filter((h) => {
+        if (typeof h.command !== 'string') return false;
+        const text = [h.command, ...(Array.isArray(h.args) ? h.args.map(String) : [])].join(' ');
+        return isMemspecHookCommand(text) && text.includes(hook.file);
+      }),
     );
-    if (memspecHooks.some((h) => commandRunsHook(h.command, hookPath, home))) {
+    if (memspecHooks.some((h) => commandRunsHook(h, hookPath, home))) {
       messages.push(`Hook ${hook.file} already registered for ${event}; left settings.json unchanged`);
       continue;
     }
@@ -235,10 +263,15 @@ export function installClaudeCodeHooks(
     // settings, or an install from before CLAUDE_CONFIG_DIR was honoured):
     // point those entries at the copy this directory holds, instead of adding
     // a second entry that would run the hook twice.
+    // Only the exact `node <~/.claude copy>` form is rewritten: a wrapper, a
+    // chained command or extra arguments are someone's choice and stay.
     const homeCopy = join(home, '.claude', 'hooks', hook.file);
-    const stale = isDefault ? [] : memspecHooks.filter((h) => commandRunsHook(h.command, homeCopy, home));
+    const stale = isDefault ? [] : memspecHooks.filter((h) => isPlainNodeHook(h, homeCopy, home));
     if (stale.length > 0) {
-      for (const h of stale) h.command = command;
+      for (const h of stale) {
+        h.command = command;
+        delete h.args;
+      }
       registrationChanged = true;
       messages.push(`Repointed ${hook.file} for ${event} from ${homeCopy} to ${hookPath} in ${settingsPath}`);
       continue;
@@ -270,21 +303,15 @@ export function installClaudeCodeHooks(
 
 /**
  * The project root init works on. `memspec init <path>` and `--cwd <path>`
- * mean the same thing. A path that names a store directory itself
- * (`~/.memspec`) is taken as its parent, because the store always lives at
- * `<root>/.memspec`: `memspec init ~/.memspec` creates `~/.memspec`, not
- * `~/.memspec/.memspec`. The one exception is a `.memspec` directory that
- * already holds its own nested store, which stays the root as before.
+ * mean the same thing; giving both with different values is an error. A path
+ * that names a store directory (`~/.memspec`) is that store, as everywhere
+ * else in memspec (`MemspecStore` uses a `.memspec` path as-is).
  */
 export function resolveInitRoot(options: Pick<InitOptions, 'cwd' | 'path'>): string {
   if (options.cwd && options.path && resolve(options.cwd) !== resolve(options.path)) {
     throw new Error(`init got two different project roots (--cwd ${options.cwd} and ${options.path}); pass one`);
   }
-  const root = resolve(options.cwd ?? options.path ?? process.cwd());
-  if (basename(root) === '.memspec' && !existsSync(join(root, '.memspec'))) {
-    return dirname(root);
-  }
-  return root;
+  return resolve(options.cwd ?? options.path ?? process.cwd());
 }
 
 export async function runInit(options: InitOptions): Promise<string> {
@@ -294,7 +321,9 @@ export async function runInit(options: InitOptions): Promise<string> {
   // directory has no store of its own but a parent (within the walk fence: up
   // to $HOME inside it, to the filesystem root outside it) does, refuse unless
   // --force — a nested store fragments memory and hides the parent's.
-  const ownStore = join(projectRoot, '.memspec');
+  // The store this root names: `<root>/.memspec`, or the root itself when it
+  // is a `.memspec` directory (`memspec init ~/.memspec`).
+  const ownStore = new MemspecStore(projectRoot, { walk: false }).root;
   if (!existsSync(ownStore) && !options.force) {
     const parentStore = findStoreDirUpward(dirname(projectRoot));
     if (parentStore) {

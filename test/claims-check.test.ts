@@ -69,10 +69,10 @@ test('claims-check looks for the session hook in CLAUDE_CONFIG_DIR when it is se
   assert.match(found ?? '', /^PASS .*cfg dir\/hooks/);
 });
 
-test('claims-check expands a leading ~ in CLAUDE_CONFIG_DIR against HOME', async () => {
+test('claims-check warns on a CLAUDE_CONFIG_DIR that is not absolute', async () => {
   const home = await makeTempProject();
   await mkdir(join(home, '.claude-alt', 'hooks'), { recursive: true });
   await writeFile(join(home, '.claude-alt', 'hooks', 'memspec-session-start.js'), '// installed\n');
   const line = runClaimsCheck(home, { CLAUDE_CONFIG_DIR: '~/.claude-alt' }).find((l) => l.includes('session-hook'));
-  assert.match(line ?? '', /^PASS /);
+  assert.match(line ?? '', /^WARN .*not an absolute path/);
 });

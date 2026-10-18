@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { makeTempProject, runCli } from './helpers.js';
 import { commandRunsHook, hookCommandWords, resolveInitRoot } from '../src/commands/init.js';
-import { claudeConfigDir } from '../src/lib/claude-config.js';
+import { claudeConfigDir, claudeConfigDirProblem } from '../src/lib/claude-config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -151,7 +151,7 @@ test('a CLAUDE_CONFIG_DIR that does not exist skips the install and says so', as
   assert.equal(existsSync(missing), false);
 });
 
-test('init takes the project root positionally, and a .memspec path means its parent', async () => {
+test('init takes the project root positionally, and a .memspec path is that store', async () => {
   const { home } = await fixture();
   const env = { HOME: home };
   const a = join(home, 'a');
@@ -159,25 +159,88 @@ test('init takes the project root positionally, and a .memspec path means its pa
   await runCli(['init', a, '--skip-import', '--skip-patch'], undefined, env);
   await access(join(a, '.memspec', 'config.yaml'));
 
+  // `memspec init ~/.memspec`: the store is that directory, never a nested one,
+  // and init's other files stay inside it (no .mcp.json in the parent).
   const b = join(home, 'b');
   await mkdir(b);
   await runCli(['init', join(b, '.memspec'), '--skip-import', '--skip-patch'], undefined, env);
   await access(join(b, '.memspec', 'config.yaml'));
   assert.equal(existsSync(join(b, '.memspec', '.memspec')), false, 'no nested store');
+  assert.equal(existsSync(join(b, '.mcp.json')), false, 'the parent gets no .mcp.json');
 
-  const c = join(home, 'c');
-  await mkdir(c);
-  await runCli(['init', '--cwd', join(c, '.memspec'), '--skip-import', '--skip-patch'], undefined, env);
-  await access(join(c, '.memspec', 'config.yaml'));
+  // Re-running on an existing .memspec store is not refused as a nested store.
+  const again = await runCli(['init', join(b, '.memspec'), '--skip-import', '--skip-patch'], undefined, env);
+  assert.match(again.stdout, /Initialized Memspec store at .*b\/\.memspec/);
 });
 
-test('resolveInitRoot keeps a .memspec dir that already holds a nested store, and refuses two roots', async () => {
-  const home = await makeTempProject();
-  const legacy = join(home, '.memspec');
-  await mkdir(join(legacy, '.memspec'), { recursive: true });
-  assert.equal(resolveInitRoot({ path: legacy }), legacy);
-  assert.equal(resolveInitRoot({ cwd: join(home, 'x'), path: join(home, 'x') }), join(home, 'x'));
-  assert.throws(() => resolveInitRoot({ cwd: join(home, 'x'), path: join(home, 'y') }), /two different project roots/);
+test('resolveInitRoot refuses two different roots', () => {
+  assert.equal(resolveInitRoot({ cwd: '/x', path: '/x' }), '/x');
+  assert.throws(() => resolveInitRoot({ cwd: '/x', path: '/y' }), /two different project roots/);
+});
+
+test('a non-absolute CLAUDE_CONFIG_DIR is refused, not expanded', async () => {
+  const { home, project } = await fixture();
+  await mkdir(join(home, '.claude-alt'), { recursive: true });
+  const { stdout } = await runCli(['init', '--cwd', project, '--skip-import', '--skip-patch'], undefined, {
+    HOME: home,
+    CLAUDE_CONFIG_DIR: '~/.claude-alt',
+  });
+  assert.match(stdout, /not an absolute path.*skipped hook install/);
+  assert.equal(existsSync(join(home, '.claude-alt', 'hooks')), false);
+});
+
+test('a wrapper or chained command that mentions the ~/.claude copy is kept', async () => {
+  const { home, project, cfg } = await fixture();
+  const wrapper = 'node /opt/wrap.js "$HOME/.claude/hooks/memspec-session-start.js"';
+  const chained = 'node "$HOME/.claude/hooks/memspec-consolidate.js" && /usr/local/bin/audit';
+  await writeFile(
+    join(cfg, 'settings.json'),
+    JSON.stringify({
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: wrapper }] }],
+        PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: chained }] }],
+      },
+    }),
+  );
+  const { stdout } = await runCli(['init', '--cwd', project, '--skip-import', '--skip-patch'], undefined, {
+    HOME: home,
+    CLAUDE_CONFIG_DIR: cfg,
+  });
+  const settings = await readSettings(cfg);
+  assert.ok(commands(settings, 'SessionStart').includes(wrapper));
+  assert.ok(commands(settings, 'PostToolUse').includes(chained));
+  assert.doesNotMatch(stdout, /Repointed/);
+});
+
+test('an exec-form registration (command + args) is recognised, not duplicated', async () => {
+  const { home, project, cfg } = await fixture();
+  const hookPath = join(cfg, 'hooks', 'memspec-session-start.js');
+  await writeFile(
+    join(cfg, 'settings.json'),
+    JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node', args: [hookPath] }] }] } }),
+  );
+  const { stdout } = await runCli(['init', '--cwd', project, '--skip-import', '--skip-patch'], undefined, {
+    HOME: home,
+    CLAUDE_CONFIG_DIR: cfg,
+  });
+  const settings = await readSettings(cfg);
+  assert.equal((settings.hooks?.SessionStart ?? []).length, 1);
+  assert.match(stdout, /memspec-session-start\.js already registered for SessionStart; left settings.json unchanged/);
+});
+
+test('an exec-form registration of the ~/.claude copy is repointed to shell form', async () => {
+  const { home, project, cfg } = await fixture();
+  await writeFile(
+    join(cfg, 'settings.json'),
+    JSON.stringify({
+      hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node', args: [join(home, '.claude', 'hooks', 'memspec-session-start.js')] }] }] },
+    }),
+  );
+  await runCli(['init', '--cwd', project, '--skip-import', '--skip-patch'], undefined, { HOME: home, CLAUDE_CONFIG_DIR: cfg });
+  const raw = JSON.parse(await readFile(join(cfg, 'settings.json'), 'utf8'));
+  const entry = raw.hooks.SessionStart[0].hooks[0];
+  assert.equal(entry.args, undefined);
+  assert.ok(commandRunsHook(entry.command, join(cfg, 'hooks', 'memspec-session-start.js'), home), entry.command);
 });
 
 test('hookCommandWords and commandRunsHook read the forms people write', () => {
@@ -193,9 +256,12 @@ test('hookCommandWords and commandRunsHook read the forms people write', () => {
   assert.equal(commandRunsHook('node hooks/a.js', '/home/u/hooks/a.js', home), false, 'relative paths never match');
 });
 
-test('claudeConfigDir: unset or blank means ~/.claude; ~ expands; relative resolves', () => {
+test('claudeConfigDir: unset, blank or non-absolute means ~/.claude; the problem is reported', () => {
   assert.equal(claudeConfigDir({}, '/h'), '/h/.claude');
   assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: '  ' }, '/h'), '/h/.claude');
-  assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: '~/.c2' }, '/h'), '/h/.c2');
+  assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: '~/.c2' }, '/h'), '/h/.claude');
   assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: '/x/y/' }, '/h'), '/x/y');
+  assert.equal(claudeConfigDirProblem({ CLAUDE_CONFIG_DIR: '/x/y' }), undefined);
+  assert.equal(claudeConfigDirProblem({}), undefined);
+  assert.match(claudeConfigDirProblem({ CLAUDE_CONFIG_DIR: 'rel/dir' }) ?? '', /not an absolute path/);
 });
