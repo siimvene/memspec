@@ -7,10 +7,12 @@
 // Checks:
 //   1. ~/.npmrc declares a release-age gate (min-release-age | minimum-release-age)
 //   2. ~/.bunfig.toml declares minimumReleaseAge — OR bun is not installed
-//   3. the memspec session-start hook is installed under ~/.claude
+//   3. the memspec session-start hook is installed in the Claude Code config
+//      directory: $CLAUDE_CONFIG_DIR when set, ~/.claude otherwise
 //
 // Usage: node hooks/memspec-claims-check.js
-// HOME is honoured (via os.homedir()), so a caller can point it at a fixture.
+// HOME is honoured (via os.homedir()) and so is CLAUDE_CONFIG_DIR, so a caller
+// can point either at a fixture.
 
 const fs = require('fs');
 const path = require('path');
@@ -57,23 +59,37 @@ function checkBunfig(home) {
   return ['WARN', 'bunfig: bun present but ~/.bunfig.toml has no minimumReleaseAge'];
 }
 
-function checkSessionHook(home) {
-  const claudeDir = path.join(home, '.claude');
+// Mirrors claudeConfigDir() in src/lib/claude-config.ts; this file is copied
+// into the config dir on its own, so it cannot import from the package. Claude
+// Code needs CLAUDE_CONFIG_DIR absolute and does not expand ~, so neither do we.
+function claudeConfigDir(home, env) {
+  const raw = (env.CLAUDE_CONFIG_DIR || '').trim();
+  if (!raw || !path.isAbsolute(raw)) return path.join(home, '.claude');
+  return path.resolve(raw);
+}
+
+function checkSessionHook(home, env) {
+  const raw = (env.CLAUDE_CONFIG_DIR || '').trim();
+  if (raw && !path.isAbsolute(raw)) {
+    return ['WARN', `session-hook: CLAUDE_CONFIG_DIR is "${raw}", not an absolute path; Claude Code needs the full path`];
+  }
+  const claudeDir = claudeConfigDir(home, env);
+  const shown = path.resolve(claudeDir) === path.resolve(home, '.claude') ? '~/.claude' : claudeDir;
   const hookFile = path.join(claudeDir, 'hooks', 'memspec-session-start.js');
   if (fs.existsSync(hookFile)) {
-    return ['PASS', 'session-hook: memspec-session-start.js installed under ~/.claude/hooks'];
+    return ['PASS', `session-hook: memspec-session-start.js installed under ${shown}/hooks`];
   }
   for (const settings of ['settings.json', 'settings.local.json']) {
     const content = readFileSafe(path.join(claudeDir, settings));
     if (content !== null && content.includes('memspec-session-start')) {
-      return ['PASS', `session-hook: registered in ~/.claude/${settings}`];
+      return ['PASS', `session-hook: registered in ${shown}/${settings}`];
     }
   }
-  return ['WARN', 'session-hook: memspec session-start hook not found under ~/.claude'];
+  return ['WARN', `session-hook: memspec session-start hook not found under ${shown}`];
 }
 
-function runClaimsCheck(home = os.homedir()) {
-  return [checkNpmrc(home), checkBunfig(home), checkSessionHook(home)]
+function runClaimsCheck(home = os.homedir(), env = process.env) {
+  return [checkNpmrc(home), checkBunfig(home), checkSessionHook(home, env)]
     .map(([level, msg]) => `${level} ${msg}`);
 }
 
