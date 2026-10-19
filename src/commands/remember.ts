@@ -12,6 +12,7 @@ import { assertKnownScope, assertScopeRequired, resolveScopeForCwd } from '../li
 import { CompositeStore } from '../lib/composite-store.js';
 import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
 import { addAnswers, loadQuestion } from '../lib/questions.js';
+import { distinctFromExclusion, type RelationType } from './relate.js';
 import { MEMORY_TYPES, type CodeAnchor, type EvidenceEntry, type MemoryItem, type MemoryType, type VerifiedWith } from '../lib/types.js';
 
 export interface RememberOptions {
@@ -565,6 +566,28 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     const edgeSources: Record<string, string> = {};
     for (const targetId of assertedConflicts) edgeSources[targetId] = 'asserted';
     itemData.ext = { ...(itemData.ext ?? {}), edge_sources: edgeSources };
+  }
+
+  // v0.13 — the relate rule for distinct_from, applied to every declared
+  // target with the target's own edge lists in view (either record carrying
+  // distinct_from next to another edge between the two is refused). For a
+  // brand-new id the target side cannot name it yet; the shared check keeps
+  // remember and relate on one rule.
+  const edgeInputs: Array<[RelationType, string[] | undefined]> = [
+    ['refines', itemData.refines],
+    ['supports', itemData.supports],
+    ['depends_on', itemData.depends_on],
+    ['derived_from', itemData.derived_from],
+    ['conflicts_with', itemData.conflicts_with],
+    ['distinct_from', itemData.distinct_from],
+  ];
+  for (const [edgeType, ids] of edgeInputs) {
+    for (const targetId of ids ?? []) {
+      const target = lookups.map((l) => l.findById(targetId)).find((t): t is MemoryItem => t !== null);
+      if (!target) continue;
+      const clash = distinctFromExclusion(itemData, target, edgeType);
+      if (clash) throw new Error(`remember refuses ${clash}`);
+    }
   }
 
   // v0.11 — evidence attachments: every input above has passed, so copying is

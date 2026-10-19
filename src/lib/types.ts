@@ -78,7 +78,7 @@ export interface MemoryFrontmatter {
    * neither contradicts, refines, supports nor depends on the other. Not a
    * retrieval edge (search expansion and lineage never follow it); it exists
    * so `memspec check` can tell an examined overlap from an unexamined one.
-   * Mutually exclusive with every other edge list on the same record.
+   * Mutually exclusive with every other edge between the same two records, whichever record carries it.
    */
   distinct_from?: string[];
   /**

@@ -1,4 +1,4 @@
-import matter from 'gray-matter';
+import { parseFrontMatter, stringifyFrontMatter } from './safe-matter.js';
 import type { MemoryFrontmatter, MemoryItem } from './types.js';
 import { assertValidFrontmatter, type NormalizeOptions } from './schema.js';
 
@@ -16,7 +16,7 @@ function coerceDates(data: Record<string, unknown>): Record<string, unknown> {
 }
 
 export function parseMemoryFile(content: string, filePath: string, options: NormalizeOptions = {}): MemoryItem {
-  const parsed = matter(content);
+  const parsed = parseFrontMatter(content);
   const data = assertValidFrontmatter(coerceDates(parsed.data as Record<string, unknown>), options);
   const body = parsed.content.trim();
 
@@ -111,5 +111,5 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   content = content.replace(headingPattern, '').trim();
 
   const body = [`# ${item.title}`, '', content].join('\n').trimEnd() + '\n';
-  return matter.stringify(body, frontmatter);
+  return stringifyFrontMatter(body, frontmatter);
 }

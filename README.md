@@ -111,7 +111,7 @@ memspec remember fact "The cache layer is the bottleneck" --source claude-code \
 
 ### Compared, independent (`distinct_from`, v0.13)
 
-`distinct_from` records that you compared two records and they are independent claims: neither contradicts, refines, supports nor depends on the other. It exists to acknowledge an overlap `memspec check` flagged (see below). It is not a retrieval edge, so search expansion and lineage never follow it, and it cannot share a target with any other edge list on the same record.
+`distinct_from` records that you compared two records and they are independent claims: neither contradicts, refines, supports nor depends on the other. It exists to acknowledge an overlap `memspec check` flagged (see below). It is not a retrieval edge, so search expansion and lineage never follow it, and it cannot sit next to any other edge between the same two records (whichever record carries either one).
 
 ```bash
 memspec relate --from ms_01AAA… --to ms_01BBB… --type distinct_from
@@ -127,10 +127,48 @@ memspec check --base main --json   # explicit base, JSON report
 memspec check --all                # audit every active claim (no git needed)
 ```
 
-- **What is checked:** records that are new at the merge-base or whose title, body or set of anchored files changed (working tree and untracked files included). Frontmatter-only edits (verify, tags, edges, anchor sha refresh) don't count, so a triage PR doesn't surface pre-existing pairs.
+- **What is checked:** records that are new at the merge-base, were not active claims there (a revived archive record), or whose title, body, set of anchored files, type, validity window or scope changed (working tree and untracked files included). Frontmatter-only edits (verify, tags, added edges, anchor sha refresh) don't count, so a triage PR doesn't surface pre-existing pairs. Removing an acknowledgement does count: an `unrelate`d edge, a question group that drops or loses an answer, a deleted copy of a record that carried the edge.
 - **What overlaps:** a shared anchored file, or one record's text naming a file the other is anchored to, plus 2+ shared distinctive title terms; or 3+ shared title terms with an overlap of at least 0.5. Any type against any type.
-- **What clears a finding:** either record lists the other in `supersedes`, `refines`, `supports`, `depends_on`, `derived_from` or `distinct_from`, or a question group lists both. A `conflicts_with` between two active records is itself a finding (`declared_conflict`): supersede one or file both in a question group.
-- **Exit codes:** 0 clean, 1 findings (overlaps, declared conflicts, unparsable record files), 2 usage or git error. The text output ends with the commands to resolve the first finding.
+- **What clears a finding:** either record lists the other in `refines`, `supports`, `depends_on`, `derived_from` or `distinct_from`, or a question group lists both. A `conflicts_with` between two active records is itself a finding (`declared_conflict`): supersede one or file both in a question group. So is a `supersedes` naming a record that is still active (`unapplied_supersede`): archive the target (`state: superseded`, `superseded_by`), or let `memspec supersede` do it in that store. In a team store that is the promote PR that copied a local survivor but not the target's retirement.
+- **Invalid files:** a changed record file that does not load (bad frontmatter, non-YAML front matter such as `---js`, which is refused and never evaluated), a duplicate record id, or a changed symlink. Git mode refuses outright (exit 2) a store with a symlink at its root or under `memory/`, `observations/` or `archive/`, and a store whose record files git does not track (gitignored, or the wrong `--store`).
+- **Exit codes:** 0 clean, 1 findings (overlaps, declared conflicts, unapplied supersedes, invalid files), 2 usage or git error. The text output ends with the commands to resolve the first finding.
+
+### Running the check in CI
+
+The check diffs against a merge-base, so the job needs the history: check out with full depth (`fetch-depth: 0`). The default GitHub checkout is depth 1; there the merge-base cannot be found and the check exits 2, failing closed rather than passing. Pass the base explicitly: `origin/<base branch>` on a pull request, and the previous tip of main on a push to main (so the push run checks exactly what the push added). Exit 0 passes the job; 1 (findings) and 2 (usage or git error) fail it.
+
+```yaml
+name: memspec-check
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Pin actions by commit SHA in a real workflow.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g memspec@0.13.0
+      - name: memspec check
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            memspec check --base "origin/$BASE_REF"
+          else
+            memspec check --base "$BEFORE"
+          fi
+```
+
+The check is only as strong as the branch protection around it: make it a required status check on main, and treat a PR that edits the workflow itself as a change to the gate.
 
 ## Actuation boundary (`requires_human`, v0.11)
 

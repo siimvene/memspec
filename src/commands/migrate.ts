@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
-import matter from 'gray-matter';
+import { parseFrontMatter, stringifyFrontMatter } from '../lib/safe-matter.js';
 import { canonicalSourceForBucketing, inferSourceKind, storageTierForSourceKind } from '../lib/source.js';
 import { legacyNeverCheckBy, normalizeLegacyFrontmatter } from '../lib/schema.js';
 import { decayDaysByType, loadConfig } from '../lib/config.js';
@@ -76,7 +76,7 @@ function computeFileChange(
 ): FileChange | null {
   let parsed;
   try {
-    parsed = matter(raw);
+    parsed = parseFrontMatter(raw);
   } catch {
     return null;
   }
@@ -220,7 +220,7 @@ function computeFileChange(
   const normalized = normalizeLegacyFrontmatter(data, { decayDays });
 
   const orderedFm = orderedFrontmatter(normalized);
-  const afterRaw = matter.stringify(parsed.content, orderedFm);
+  const afterRaw = stringifyFrontMatter(parsed.content, orderedFm);
 
   return {
     path: filePath,
@@ -398,7 +398,7 @@ export function runMigrate(options: MigrateOptions): MigrateResult {
     }
     let parsed;
     try {
-      parsed = matter(raw);
+      parsed = parseFrontMatter(raw);
     } catch {
       continue;
     }
@@ -516,7 +516,7 @@ function renderOperatorRelocations(storeRoot: string, changed: FileChange[]): st
   const relocations = changed
     .filter((c) => c.targetPath !== c.path && c.targetPath.includes(join('memory', 'operator')))
     .map((c) => {
-      const parsed = matter(c.beforeRaw);
+      const parsed = parseFrontMatter(c.beforeRaw);
       const data = parsed.data as Record<string, unknown>;
       return {
         id: String(data.id),

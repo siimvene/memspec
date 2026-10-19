@@ -7,7 +7,7 @@ import { parseMemoryFile, serializeMemoryFile } from './frontmatter.js';
 import { validateFrontmatter } from './schema.js';
 import { effectiveSourceKind, storageTierForSourceKind } from './source.js';
 import type { MemoryFrontmatter, MemoryItem, MemoryType } from './types.js';
-import matter from 'gray-matter';
+import { parseFrontMatter } from './safe-matter.js';
 
 /**
  * v0.3: items past check_by are stale at read time, even when the on-disk
@@ -66,6 +66,12 @@ export interface StoreSearchOptions {
 export interface LoadWarning {
   file: string;
   reason: string;
+}
+
+/** A record id loaded from more than one file (files sorted, so the set does not depend on readdir order). */
+export interface DuplicateId {
+  id: string;
+  files: string[];
 }
 
 /**
@@ -139,6 +145,14 @@ export function ensureStoreGitignore(storeRoot: string): string[] {
 export class MemspecStore {
   readonly root: string;
   readonly warnings: LoadWarning[] = [];
+  /**
+   * Ids that more than one record file carries, refreshed by every load. The
+   * loader keeps one copy (operator path wins, else the first file seen) and
+   * says so on stderr; `memspec check` reads this to fail a change set that
+   * adds a duplicate. Kept out of `warnings` so other commands' output is
+   * unchanged.
+   */
+  readonly duplicateIds: DuplicateId[] = [];
 
   /**
    * @param root  A store directory (`…/.memspec`) used as-is, or a working
@@ -291,14 +305,21 @@ export class MemspecStore {
    * onto disk as a side effect (`withLazyStale` is a read-time flag, not a
    * stored one). `loadAll()` layers the projection on top for read consumers.
    */
-  private loadAllRaw(): MemoryItem[] {
-    const files = [
+  /** Every markdown file the loader reads: `memory/`, `observations/`, `archive/`, in that order. */
+  recordFiles(): string[] {
+    return [
       ...walkMarkdownFiles(join(this.root, 'memory')),
       ...walkMarkdownFiles(join(this.root, 'observations')),
       ...walkMarkdownFiles(join(this.root, 'archive')),
     ];
+  }
+
+  private loadAllRaw(): MemoryItem[] {
+    const files = this.recordFiles();
 
     this.warnings.length = 0;
+    this.duplicateIds.length = 0;
+    const filesById = new Map<string, string[]>();
     // Phase 4: collision defence. Same id appearing in both standard and operator
     // paths shouldn't happen, but if it does the operator path wins (more
     // authoritative). Stderr warning so callers notice the drift; no throw.
@@ -311,7 +332,7 @@ export class MemspecStore {
     for (const file of files) {
       try {
         const raw = readFileSync(file, 'utf8');
-        const parsed = matter(raw);
+        const parsed = parseFrontMatter(raw);
         const data = parsed.data as Record<string, unknown>;
 
         // Coerce dates before validation (both legacy decay_after and v0.3 check_by)
@@ -328,6 +349,9 @@ export class MemspecStore {
         }
 
         const item = parseMemoryFile(raw, file, normalize);
+        const sameId = filesById.get(item.id);
+        if (sameId) sameId.push(file);
+        else filesById.set(item.id, [file]);
         const existing = byId.get(item.id);
         if (existing) {
           const incomingIsOperator = file.startsWith(operatorMemoryRoot);
@@ -355,6 +379,11 @@ export class MemspecStore {
         this.warnings.push({ file, reason: err instanceof Error ? err.message : String(err) });
       }
     }
+
+    for (const [id, idFiles] of filesById) {
+      if (idFiles.length > 1) this.duplicateIds.push({ id, files: [...idFiles].sort() });
+    }
+    this.duplicateIds.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
     return Array.from(byId.values());
   }
