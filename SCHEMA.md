@@ -176,6 +176,12 @@ field/state names into this v0.3+ shape before validation.
 - **Required:** no
 - **Description:** Ids of records this record was INFERRED from rather than observed directly; a record carrying any is `derived` (v0.11 named link).
 
+### `distinct_from`
+
+- **Type:** array of `string`
+- **Required:** no
+- **Description:** Ids of records the writer compared with this one and judged independent: neither contradicts, refines, supports nor depends on the other. Acknowledges an overlap for `memspec check`; not a retrieval edge, never followed by search expansion or lineage (v0.13).
+
 ## Actuation
 
 ### `requires_human`

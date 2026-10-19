@@ -63,6 +63,7 @@ const FIELD_GROUPS: Array<{ title: string; fields: string[] }> = [
       'supports',
       'depends_on',
       'derived_from',
+      'distinct_from',
     ],
   },
   {

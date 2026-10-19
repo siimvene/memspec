@@ -74,6 +74,14 @@ export interface MemoryFrontmatter {
   depends_on?: string[]; // ids this record presupposes (knowledge or chronological dependency)
   derived_from?: string[]; // v0.11 — ids this record was inferred FROM, not observed directly
   /**
+   * v0.13 — ids the writer COMPARED this record with and judged independent:
+   * neither contradicts, refines, supports nor depends on the other. Not a
+   * retrieval edge (search expansion and lineage never follow it); it exists
+   * so `memspec check` can tell an examined overlap from an unexamined one.
+   * Mutually exclusive with every other edge list on the same record.
+   */
+  distinct_from?: string[];
+  /**
    * v0.11 — procedures only. Step labels or short phrases a HUMAN must perform;
    * an unattended runner refuses these steps. Schema-rejected on non-procedures.
    */

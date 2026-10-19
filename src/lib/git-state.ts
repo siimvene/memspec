@@ -232,3 +232,33 @@ function isIgnored(repoRoot: string, relPath: string): boolean {
   ignoredCache.set(key, { at: Date.now(), value });
   return value;
 }
+
+/** Wall-clock cap for the one-shot git calls `memspec check` makes (diff, ls-tree, show). */
+export const CHECK_GIT_TIMEOUT_MS = 30_000;
+
+export type GitRawResult = { ok: true; out: string } | { ok: false; status: number | null };
+
+/**
+ * One uncached git call for `memspec check`, under the same rules as the rest
+ * of this module (no shell, cwd pinned, repo-locating `GIT_*` stripped,
+ * `GIT_OPTIONAL_LOCKS=0`, never throws) but with stdout returned UNTRIMMED, so
+ * `-z` output and file contents survive byte-for-byte, a longer timeout (a CI
+ * gate on a large checkout must not misread a slow diff as "no changes"), and
+ * a large output buffer. Callers fail closed on `ok: false`.
+ */
+export function gitRaw(cwd: string, args: string[], timeoutMs: number = CHECK_GIT_TIMEOUT_MS): GitRawResult {
+  try {
+    const out = execFileSync('git', args, {
+      cwd,
+      env: gitEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: timeoutMs,
+      maxBuffer: 256 * 1024 * 1024,
+    });
+    return { ok: true, out };
+  } catch (err) {
+    const status = (err as { status?: number | null }).status;
+    return { ok: false, status: typeof status === 'number' ? status : null };
+  }
+}

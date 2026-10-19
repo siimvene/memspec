@@ -48,6 +48,7 @@ Every field in the 2026-07-03 inventory (18 fields, 257 records) is mapped below
 | `depends_on` | `dcterms:requires` | Set of IRIs | Dublin Core's "the described resource requires the referenced resource" is a clean fit for "this claim/procedure builds on those." |
 | `supports` | `memspec:supports` | Set of IRIs | `prov:wasDerivedFrom` was considered (reverse direction) but the semantics don't match. Memspec-specific. |
 | `derived_from` | `prov:wasDerivedFrom` | Set of IRIs | v0.11. Exact PROV match — this record was inferred from those, not observed directly. A record with any `derived_from` is `derived`. |
+| `distinct_from` | `memspec:distinctFrom` | Set of IRIs | v0.13. The writer compared the records and judged them independent claims. `owl:differentFrom` is about individuals, not claims. Memspec-specific. |
 | `requires_human` | `memspec:requiresHuman` | Set of strings | v0.11. Procedures only: step labels a human must perform. No standard fit; the actuation boundary is memspec-specific. |
 | `evidence` | `memspec:evidence` | Set of nested objects | v0.11. Committed evidence attachments: a content-addressed file copy (`sha256`/`name`/`path`/`source`) or an http(s) `url` pointer, each with `captured_at`. |
 | `answers` | `memspec:answers` | Set of IRIs | v0.11. Questions only: the competing answer records for this question group. |

@@ -42,7 +42,7 @@ setProcessSessionLabel(`mcp:${process.pid}`);
 
 const server = new McpServer({
   name: 'memspec',
-  version: '0.12.3',
+  version: '0.13.0',
 });
 
 function renderSearchText(payload: SearchPayload): string {
@@ -192,6 +192,8 @@ server.tool(
         supports: item.supports ?? [],
         depends_on: item.depends_on ?? [],
         derived_from: item.derived_from ?? [],
+        // v0.13 — "compared, independent" acknowledgements; omitted when absent.
+        distinct_from: item.distinct_from,
         // v0.11 — computed: a record with any derived_from edge was inferred.
         derived: isDerived(item),
         requires_human: item.requires_human,
@@ -238,6 +240,7 @@ interface RememberArgs {
   supports?: string[];
   depends_on?: string[];
   derived_from?: string[];
+  distinct_from?: string[];
   conflicts_with?: string[];
   requires_human?: string[];
   evidence?: string[];
@@ -247,7 +250,7 @@ interface RememberArgs {
   scope?: string;
 }
 
-async function handleRemember({ type, title, body, source, tags, anchors, anchor_root, check_by, store: storeName, refines, supports, depends_on, derived_from, conflicts_with, requires_human, evidence, answers_question, valid_from, valid_to, scope }: RememberArgs) {
+async function handleRemember({ type, title, body, source, tags, anchors, anchor_root, check_by, store: storeName, refines, supports, depends_on, derived_from, distinct_from, conflicts_with, requires_human, evidence, answers_question, valid_from, valid_to, scope }: RememberArgs) {
   try {
     const resolvedSource = source ?? server.server.getClientVersion()?.name;
     const result = runRemember(type, title, {
@@ -267,6 +270,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
       supports,
       dependsOn: depends_on,
       derivedFrom: derived_from,
+      distinctFrom: distinct_from,
       conflictsWith: conflicts_with,
       requiresHuman: requires_human,
       evidence,
@@ -334,6 +338,7 @@ server.tool(
     supports: z.array(z.string()).optional().describe('Memory ids this record supports (forms a typed edge — evidence backing the target)'),
     depends_on: z.array(z.string()).optional().describe('Memory ids this record depends on (forms a typed edge — presupposes the target)'),
     derived_from: z.array(z.string()).optional().describe('Memory ids this record was INFERRED from rather than observed directly (forms a typed edge; the record is then marked derived). Use when the claim is a conclusion drawn from other records, not a direct observation.'),
+    distinct_from: z.array(z.string()).optional().describe('Memory ids you COMPARED this record with and judged independent: neither contradicts, refines, supports nor depends on the other. Acknowledges the overlap for `memspec check` (the merge-time contradiction gate); not followed by search expansion. Each target must exist and must not also appear in another edge list of this call.'),
     conflicts_with: z.array(z.string()).optional().describe('Memory ids this record explicitly contradicts. Caller-asserted only — each target must exist and is marked "asserted" in ext.edge_sources. Use when you have confirmed the contradiction; for mere topic overlap, act on the response\'s suggested_conflicts instead.'),
     requires_human: z.array(z.string()).optional().describe('Procedures only: step labels or short phrases a human must perform. An unattended runner refuses these steps. Rejected on fact/decision records.'),
     evidence: z.array(z.string()).optional().describe('Evidence attachments: local file paths (copied, content-addressed, into <store>/evidence/ — refused over 5 MB, from local/, from hidden dot-paths outside the store, or when the name/content looks like a credential) or http(s) URLs (recorded as pointers, never fetched). A file-backed entry witnesses an anchorless claim as `evidence`.'),
@@ -556,11 +561,11 @@ server.tool(
 
 server.tool(
   'memspec_relate',
-  'Wire a typed edge from one memory to another without rewriting either record. Edge types: refines (this elaborates the target; parent stays valid), supports (this is evidence for the target), depends_on (this presupposes the target), derived_from (this was INFERRED from the target rather than observed; marks the record derived), conflicts_with (declared contradiction). A target cannot carry both a conflicts_with and a positive edge. `from` must be a claim: a question group manages its answers through memspec_question, never through claim edges. Dedupes silently; replaying the same call is a no-op.',
+  'Wire a typed edge from one memory to another without rewriting either record. Edge types: refines (this elaborates the target; parent stays valid), supports (this is evidence for the target), depends_on (this presupposes the target), derived_from (this was INFERRED from the target rather than observed; marks the record derived), conflicts_with (declared contradiction), distinct_from (compared, and the two are independent claims: neither contradicts, refines, supports nor depends on the other; acknowledges an overlap that `memspec check` would otherwise flag, and is never followed by search expansion). A target cannot carry both a conflicts_with and a positive edge, and distinct_from cannot share a target with any other edge type. `from` must be a claim: a question group manages its answers through memspec_question, never through claim edges. Dedupes silently; replaying the same call is a no-op.',
   {
     from: z.string().describe('Memory id the edge originates from (the edge is written into this record; must be a claim, not a question)'),
     to: z.string().describe('Memory id the edge points at'),
-    type: relationTypeSchema.describe('Edge type: refines | supports | depends_on | derived_from | conflicts_with'),
+    type: relationTypeSchema.describe('Edge type: refines | supports | depends_on | derived_from | conflicts_with | distinct_from'),
   },
   async ({ from, to, type }) => {
     try {
@@ -583,11 +588,11 @@ server.tool(
 
 server.tool(
   'memspec_unrelate',
-  'Remove a typed edge from one memory — the inverse of memspec_relate, and the only way to retract an edge (edges were append-only before v0.10, so a wrong conflicts_with was permanent). Edge types: refines | supports | depends_on | derived_from | conflicts_with. Operator-sourced records are read-only over MCP: removing an edge from operator memory is refused here and must be done with `memspec unrelate --override-operator` at a terminal, where a human authorizes it. Every removal is logged durably into the record (who, when, why). Removing an edge that is not present is a reported no-op, not an error.',
+  'Remove a typed edge from one memory — the inverse of memspec_relate, and the only way to retract an edge (edges were append-only before v0.10, so a wrong conflicts_with was permanent). Edge types: refines | supports | depends_on | derived_from | conflicts_with | distinct_from. Operator-sourced records are read-only over MCP: removing an edge from operator memory is refused here and must be done with `memspec unrelate --override-operator` at a terminal, where a human authorizes it. Every removal is logged durably into the record (who, when, why). Removing an edge that is not present is a reported no-op, not an error.',
   {
     from: z.string().describe('Memory id the edge originates from (the edge is removed from this record)'),
     to: z.string().describe('Memory id the edge points at'),
-    type: relationTypeSchema.describe('Edge type to remove: refines | supports | depends_on | derived_from | conflicts_with'),
+    type: relationTypeSchema.describe('Edge type to remove: refines | supports | depends_on | derived_from | conflicts_with | distinct_from'),
     reason: z.string().describe('Why the edge is being removed. Persisted into ext.edge_removals on the record.'),
     source: z.string().optional().describe('Who is removing the edge'),
   },

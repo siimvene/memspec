@@ -45,6 +45,11 @@ export interface RememberOptions {
   dependsOn?: string[];
   /** v0.11 — ids this record was inferred FROM (positive edge; a record with any is `derived`). */
   derivedFrom?: string[];
+  /**
+   * v0.13 — ids the writer compared this record with and judged independent
+   * (acknowledges an overlap for `memspec check`; not a retrieval edge).
+   */
+  distinctFrom?: string[];
   /** v0.11 — procedures only: step labels/phrases a human must perform. Rejected on non-procedures. */
   requiresHuman?: string[];
   /** v0.11 — evidence attachments: local file paths (copied under evidence/) or http(s) URLs (recorded, not fetched). */
@@ -281,7 +286,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // Caller-asserted conflicts_with targets count as declared too (M2): they
     // are excluded from suggestions below, so widen the window by their count
     // as well or a genuine different conflict could be pushed out of it.
-    const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0) + (options.derivedFrom?.length ?? 0) + (options.conflictsWith?.length ?? 0);
+    const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0) + (options.derivedFrom?.length ?? 0) + (options.conflictsWith?.length ?? 0) + (options.distinctFrom?.length ?? 0);
     const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
 
     // High band — exact-title refusal. The v0.3 dedup-refusal promise lives
@@ -312,6 +317,8 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       // A target the caller is asserting a conflict with is already classified;
       // re-suggesting it as a conflict is noise (M2).
       ...(options.conflictsWith ?? []),
+      // v0.13 — "compared, independent" is a classification too.
+      ...(options.distinctFrom ?? []),
     ]);
 
     // Mid band — apply the lexical conflict-inference rule, but only SUGGEST
@@ -402,6 +409,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     ['--supports', options.supports],
     ['--depends-on', options.dependsOn],
     ['--derived-from', options.derivedFrom],
+    ['--distinct-from', options.distinctFrom],
   ];
   for (const [flag, ids] of positiveEdgeInputs) {
     for (const targetId of ids ?? []) {
@@ -486,6 +494,29 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const derivedFrom = dedupe(options.derivedFrom);
   if (derivedFrom) itemData.derived_from = derivedFrom;
 
+  // v0.13 — distinct_from ("compared, independent") contradicts every other
+  // relationship to the same target, the same rule `relate` enforces. Refuse
+  // a call that declares both instead of writing a self-contradicting record.
+  const distinctFrom = dedupe(options.distinctFrom);
+  if (distinctFrom) {
+    const otherEdges: Array<[string, string[] | undefined]> = [
+      ['refines', options.refines],
+      ['supports', options.supports],
+      ['depends_on', options.dependsOn],
+      ['derived_from', options.derivedFrom],
+      ['conflicts_with', options.conflictsWith],
+    ];
+    for (const targetId of distinctFrom) {
+      const hit = otherEdges.find(([, ids]) => (ids ?? []).includes(targetId));
+      if (hit) {
+        throw new Error(
+          `--distinct-from ${targetId} contradicts the ${hit[0]} edge to the same target; distinct_from means the records are independent. Declare one relationship, not both.`,
+        );
+      }
+    }
+    itemData.distinct_from = distinctFrom;
+  }
+
   // v0.11 — procedure-only human-actuation steps (validated above).
   const requiresHuman = dedupe(options.requiresHuman);
   if (requiresHuman) itemData.requires_human = requiresHuman;
@@ -563,6 +594,9 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   }
   if (derivedFrom) {
     lines.push(`Derived from: ${derivedFrom.join(', ')}`);
+  }
+  if (distinctFrom) {
+    lines.push(`Distinct from: ${distinctFrom.join(', ')}`);
   }
   if (evidenceEntries.length > 0) {
     lines.push(`Evidence (${evidenceEntries.length}):`);

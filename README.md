@@ -109,6 +109,29 @@ memspec remember fact "The cache layer is the bottleneck" --source claude-code \
   --derived-from ms_01AAA… --derived-from ms_01BBB…
 ```
 
+### Compared, independent (`distinct_from`, v0.13)
+
+`distinct_from` records that you compared two records and they are independent claims: neither contradicts, refines, supports nor depends on the other. It exists to acknowledge an overlap `memspec check` flagged (see below). It is not a retrieval edge, so search expansion and lineage never follow it, and it cannot share a target with any other edge list on the same record.
+
+```bash
+memspec relate --from ms_01AAA… --to ms_01BBB… --type distinct_from
+```
+
+## Merge-time contradiction check (`memspec check`, v0.13)
+
+A team store shared through pull requests never gets a git conflict (one file per record), so two records that contradict each other can merge a week apart. `memspec check` runs in CI on the PR branch and fails when the change set adds or edits an active claim that plausibly overlaps another active claim with no recorded relation between them:
+
+```bash
+memspec check                      # vs the merge-base with origin's default branch
+memspec check --base main --json   # explicit base, JSON report
+memspec check --all                # audit every active claim (no git needed)
+```
+
+- **What is checked:** records that are new at the merge-base or whose title, body or set of anchored files changed (working tree and untracked files included). Frontmatter-only edits (verify, tags, edges, anchor sha refresh) don't count, so a triage PR doesn't surface pre-existing pairs.
+- **What overlaps:** a shared anchored file, or one record's text naming a file the other is anchored to, plus 2+ shared distinctive title terms; or 3+ shared title terms with an overlap of at least 0.5. Any type against any type.
+- **What clears a finding:** either record lists the other in `supersedes`, `refines`, `supports`, `depends_on`, `derived_from` or `distinct_from`, or a question group lists both. A `conflicts_with` between two active records is itself a finding (`declared_conflict`): supersede one or file both in a question group.
+- **Exit codes:** 0 clean, 1 findings (overlaps, declared conflicts, unparsable record files), 2 usage or git error. The text output ends with the commands to resolve the first finding.
+
 ## Actuation boundary (`requires_human`, v0.11)
 
 A procedure can flag steps only a human may perform. An unattended runner reads `requires_human` and refuses those steps instead of executing them. It is a procedure-only field (a schema error elsewhere). A non-empty `requires_human` also carries through to search hits (JSON `requires_human`; CLI/MCP text prints a `requires human: …` line under the hit) and `memspec_get`, so a runner sees the constraint without a separate lookup.
@@ -348,7 +371,7 @@ Records written before scoping existed (or written since without a scope) can be
 
 The `.gitignore` is written by `init` and kept current on every write: a store created before 0.11 gets `outcomes.jsonl`, `local/` and `logs/` appended on its first 0.11 write (only the missing lines, under a short comment), so `git add -A` in a synced store never picks up per-machine telemetry.
 
-Frontmatter fields per record: `id`, `kind` (`claim | observation | question`), `type`, `state`, `source`, `source_kind`, `verified_with` (`anchor | operator | evidence | assertion`), `tags`, `check_by`, `anchors`, `supersedes`, `superseded_by`, `conflicts_with`, `refines`, `supports`, `depends_on`, `derived_from`, optional `requires_human` (procedures), `evidence`, `answers` / `closed` / `resolved_by` (questions), `valid_from` / `valid_to`. Human-readable, git-diffable, greppable.
+Frontmatter fields per record: `id`, `kind` (`claim | observation | question`), `type`, `state`, `source`, `source_kind`, `verified_with` (`anchor | operator | evidence | assertion`), `tags`, `check_by`, `anchors`, `supersedes`, `superseded_by`, `conflicts_with`, `refines`, `supports`, `depends_on`, `derived_from`, `distinct_from`, optional `requires_human` (procedures), `evidence`, `answers` / `closed` / `resolved_by` (questions), `valid_from` / `valid_to`. Human-readable, git-diffable, greppable.
 
 ## CLI reference
 
@@ -360,7 +383,8 @@ Frontmatter fields per record: `id`, `kind` (`claim | observation | question`), 
 | `memspec search <query> [--expand-edges] [--include-superseded] [--as-of <iso>]` | Search; optionally follow linked notes |
 | `memspec context [--query] [--limit]` | Token-budgeted memory dump for session-start hooks |
 | `memspec supersede <id> --reason "..." [--body] [--merge-from <ids>]` | Replace, retract, or merge records |
-| `memspec relate --from <id> --to <id> --type <kind>` | Wire a link between records after the fact (`refines\|supports\|depends_on\|derived_from\|conflicts_with`) |
+| `memspec relate --from <id> --to <id> --type <kind>` | Wire a link between records after the fact (`refines\|supports\|depends_on\|derived_from\|conflicts_with\|distinct_from`) |
+| `memspec check [--base <ref>] [--all] [--store <dir>] [--json]` | Merge-time contradiction check: fail when a change set adds or edits a claim that overlaps another with no recorded relation (exit 0/1/2) |
 | `memspec question <title\|id> [--answers <ids>] [--closed] [--add\|--close\|--open\|--resolve]` | Create or edit a question group (competing answers; closed questions resolve by elimination) |
 | `memspec verify <id> [--evidence "..."] [--check-by <iso\|never>]` | Mark a memory still true; checks anchors; `--check-by` pins the next review date explicitly instead of resetting to the type default |
 | `memspec outcome <id> <useful\|dead_end\|corrected> [--note] [--source]` | Record what happened after a retrieved memory was acted on (append-only; never mutates the record) |

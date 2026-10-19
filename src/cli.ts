@@ -3,6 +3,7 @@
 import { homedir } from 'node:os';
 import { Command } from 'commander';
 import { runAnchor } from './commands/anchor.js';
+import { CheckUsageError, renderCheckText, runCheck } from './commands/check.js';
 import { runContext } from './commands/context.js';
 import { runObserve } from './commands/observe.js';
 import { runOutcome } from './commands/outcome.js';
@@ -32,7 +33,7 @@ const program = new Command();
 program
   .name('memspec')
   .description('Structured memory for AI agents')
-  .version('0.12.3')
+  .version('0.13.0')
   .showHelpAfterError();
 
 program
@@ -76,6 +77,7 @@ program
   .option('--depends-on <id...>', 'memory id this record presupposes (knowledge or chronological dependency; repeatable)')
   .option('--conflicts-with <id...>', 'memory id this record explicitly contradicts (caller-asserted; marked asserted in ext.edge_sources; repeatable)')
   .option('--derived-from <id...>', 'memory id this record was inferred FROM, not observed directly (positive edge; marks the record derived; repeatable)')
+  .option('--distinct-from <id...>', 'memory id you compared this record with and judged independent (acknowledges the overlap for `memspec check`; not followed by search; repeatable)')
   .option('--requires-human <text...>', 'procedures only: a step label/phrase a human must perform (an unattended runner refuses it; repeatable)')
   .option('--evidence <path-or-url...>', 'attach committed evidence: a local file (copied into evidence/) or an http(s) URL (recorded, not fetched); repeatable')
   .option('--answers-question <qid>', 'register this new record as a competing answer to the given question id in the same call')
@@ -83,7 +85,7 @@ program
   .option('--valid-to <iso>', 'ISO 8601 timestamp — world-state truth window ends at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .action((type: string, title: string, options: {
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; anchorRoot?: string; store?: string; pin?: boolean;
-    refines?: string[]; supports?: string[]; dependsOn?: string[]; conflictsWith?: string[]; derivedFrom?: string[]; requiresHuman?: string[]; evidence?: string[]; answersQuestion?: string; validFrom?: string; validTo?: string; scope?: string;
+    refines?: string[]; supports?: string[]; dependsOn?: string[]; conflictsWith?: string[]; derivedFrom?: string[]; distinctFrom?: string[]; requiresHuman?: string[]; evidence?: string[]; answersQuestion?: string; validFrom?: string; validTo?: string; scope?: string;
   }) => {
     const result = runRemember(type, title, {
       cwd: options.cwd,
@@ -104,6 +106,7 @@ program
       dependsOn: options.dependsOn,
       conflictsWith: options.conflictsWith,
       derivedFrom: options.derivedFrom,
+      distinctFrom: options.distinctFrom,
       requiresHuman: options.requiresHuman,
       evidence: options.evidence,
       answersQuestion: options.answersQuestion,
@@ -152,10 +155,10 @@ program
 
 program
   .command('relate')
-  .description('Wire a typed edge from one memory to another (refines | supports | depends_on | derived_from | conflicts_with)')
+  .description('Wire a typed edge from one memory to another (refines | supports | depends_on | derived_from | conflicts_with | distinct_from)')
   .requiredOption('--from <id>', 'memory id the edge originates from (the edge is written into this record)')
   .requiredOption('--to <id>', 'memory id the edge points at')
-  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | derived_from | conflicts_with')
+  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | derived_from | conflicts_with | distinct_from (compared, independent)')
   .option('--cwd <path>', 'project root')
   .action((options: { cwd?: string; from: string; to: string; type: string }) => {
     if (!(RELATION_TYPES as readonly string[]).includes(options.type)) {
@@ -172,10 +175,10 @@ program
 
 program
   .command('unrelate')
-  .description('Remove a typed edge from one memory (refines | supports | depends_on | derived_from | conflicts_with); the inverse of relate')
+  .description('Remove a typed edge from one memory (refines | supports | depends_on | derived_from | conflicts_with | distinct_from); the inverse of relate')
   .requiredOption('--from <id>', 'memory id the edge originates from (the edge is removed from this record)')
   .requiredOption('--to <id>', 'memory id the edge points at')
-  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | derived_from | conflicts_with')
+  .requiredOption('--type <type>', 'edge type: refines | supports | depends_on | derived_from | conflicts_with | distinct_from')
   .requiredOption('--reason <text>', 'why the edge is being removed (logged durably into the record)')
   .option('--cwd <path>', 'project root')
   .option('--source <source>', 'who is removing the edge')
@@ -519,6 +522,31 @@ program
       types: parseTypesArg(options.types),
     });
     process.stdout.write(out);
+  });
+
+program
+  .command('check')
+  .description('Merge-time contradiction check: fail when a change set adds or edits an active claim that plausibly overlaps another active claim with no recorded relation between them (exit 0 ok, 1 findings, 2 usage/git error)')
+  .option('--base <ref>', 'git ref to compare against (default: the remote default branch, origin/HEAD → origin/main → origin/master); changes are taken against the merge-base, working tree and untracked files included')
+  .option('--all', 'audit every active claim in the store instead of a change set (no git needed)')
+  .option('--store <dir>', 'the .memspec directory to check, or its parent (default: resolved from the working directory)')
+  .option('--json', 'output the report as JSON')
+  .exitOverride((err) => {
+    // Usage errors (unknown option, missing value) are exit 2 here, never 1:
+    // a CI gate must not read a typo in its own invocation as "findings".
+    process.exit(err.exitCode === 0 ? 0 : 2);
+  })
+  .action((options: { base?: string; all?: boolean; store?: string; json?: boolean }) => {
+    try {
+      const report = runCheck({ base: options.base, all: options.all, store: options.store });
+      console.log(options.json ? JSON.stringify(report, null, 2) : renderCheckText(report));
+      process.exitCode = report.ok ? 0 : 1;
+    } catch (error) {
+      // Fail closed: any error (git, usage, an unexpected throw) is exit 2.
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(error instanceof CheckUsageError ? message : `memspec check: ${message}`);
+      process.exitCode = 2;
+    }
   });
 
 try {

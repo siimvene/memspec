@@ -96,6 +96,8 @@ export const memoryFrontmatterSchema = z.object({
     .describe('Ids of notes this record presupposes — a knowledge or chronological dependency (v0.4 named link).'),
   derived_from: z.array(z.string()).optional()
     .describe('Ids of records this record was INFERRED from rather than observed directly; a record carrying any is `derived` (v0.11 named link).'),
+  distinct_from: z.array(z.string()).optional()
+    .describe('Ids of records the writer compared with this one and judged independent: neither contradicts, refines, supports nor depends on the other. Acknowledges an overlap for `memspec check`; not a retrieval edge, never followed by search expansion or lineage (v0.13).'),
   requires_human: z.array(z.string()).optional()
     .describe('Procedures only: step labels or short phrases a human must perform; an unattended runner refuses these steps. Schema error on non-procedure records (v0.11 actuation boundary).'),
   evidence: z.array(evidenceEntrySchema).optional()
