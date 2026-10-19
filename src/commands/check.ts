@@ -421,8 +421,12 @@ function gitChangeSet(store: MemspecStore, base: string | undefined): GitChangeS
     if (!tree.ok) throw new CheckUsageError(`memspec check: git ls-tree ${mergeBase} failed in ${top}`);
     basePaths = new Set();
     baseByName = new Map();
+    // Only the directories the loader reads: a `<id>.md` elsewhere (an
+    // evidence attachment, notes) is not a base version of the record.
+    const prefix = storeRel === '.' ? '' : `${storeRel}/`;
     for (const path of splitZ(tree.out)) {
       if (!path.endsWith('.md')) continue;
+      if (!RECORD_DIRS.some((dir) => path.startsWith(`${prefix}${dir}/`))) continue;
       basePaths.add(path);
       const name = basename(path, '.md');
       const list = baseByName.get(name) ?? [];
@@ -472,12 +476,44 @@ function ackTargets(item: MemoryItem): Set<string> {
 }
 
 /**
+ * Targets a record names in `distinct_from` AND in another edge list
+ * (`refines`, `supports`, `depends_on`, `derived_from`, `conflicts_with`,
+ * `supersedes`), with the other edge kinds. Writers refuse the combination;
+ * a hand-edited or imported record can still carry it. Such a record's edges
+ * to that target acknowledge nothing, and `check` reports the file invalid.
+ */
+function contradictoryEdges(item: MemoryItem): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const distinct = new Set(item.distinct_from ?? []);
+  if (distinct.size === 0) return out;
+  const others: Array<[string, string[] | undefined]> = [
+    ['refines', item.refines],
+    ['supports', item.supports],
+    ['depends_on', item.depends_on],
+    ['derived_from', item.derived_from],
+    ['conflicts_with', item.conflicts_with],
+    ['supersedes', item.supersedes],
+  ];
+  for (const [kind, ids] of others) {
+    for (const id of ids ?? []) {
+      if (!distinct.has(id)) continue;
+      const kinds = out.get(id) ?? [];
+      if (!kinds.includes(kind)) kinds.push(kind);
+      out.set(id, kinds);
+    }
+  }
+  return out;
+}
+
+/**
  * A changed active claim may be skipped as "frontmatter-only" only when its
  * base version was an ACTIVE CLAIM (a reactivated archive record, a retired
  * one revived, or an observation turned claim is new content here), the claim
- * content is equal, and no acknowledgement the base version carried to a
- * still-active claim was removed (removing an edge is how a PR un-acknowledges
- * a pair; an edge to a record that is no longer active acknowledges nothing).
+ * content is equal, and no acknowledgement or declared conflict the base
+ * version carried to a still-active claim was removed (removing an edge is how
+ * a PR un-acknowledges a pair, and removing `conflicts_with` turns a declared
+ * conflict into a pair nobody re-examined; an edge to a record that is no
+ * longer active names nothing reportable).
  */
 function baseVouchesUnchanged(base: MemoryItem, item: MemoryItem, activeById: Map<string, MemoryItem>): boolean {
   if (base.kind !== 'claim' || base.state !== 'active') return false;
@@ -485,6 +521,10 @@ function baseVouchesUnchanged(base: MemoryItem, item: MemoryItem, activeById: Ma
   const now = ackTargets(item);
   for (const id of ackTargets(base)) {
     if (!now.has(id) && activeById.has(id)) return false;
+  }
+  const conflictsNow = new Set(item.conflicts_with ?? []);
+  for (const id of base.conflicts_with ?? []) {
+    if (!conflictsNow.has(id) && activeById.has(id)) return false;
   }
   return true;
 }
@@ -541,8 +581,30 @@ export function runCheck(options: CheckOptions = {}): CheckReport {
     for (const file of files) addInvalid(file, reason);
   };
 
-  const acknowledged = (x: MemoryItem, y: MemoryItem): boolean =>
-    ACK_EDGES.some((edge) => edgeList(x, edge).includes(y.id) || edgeList(y, edge).includes(x.id));
+  const contradictory = new Map<string, Map<string, string[]>>();
+  for (const item of all) {
+    const hits = contradictoryEdges(item);
+    if (hits.size > 0) contradictory.set(item.id, hits);
+  }
+  /** Does `x` acknowledge `y` through its own edges (none count when x lists y as distinct AND otherwise related)? */
+  const acknowledgesTo = (x: MemoryItem, y: MemoryItem): boolean =>
+    !contradictory.get(x.id)?.has(y.id) && ACK_EDGES.some((edge) => edgeList(x, edge).includes(y.id));
+  const acknowledged = (x: MemoryItem, y: MemoryItem): boolean => acknowledgesTo(x, y) || acknowledgesTo(y, x);
+  const reportContradictory = (item: MemoryItem, file: string): void => {
+    const hits = contradictory.get(item.id);
+    if (!hits) return;
+    for (const [target, kinds] of [...hits].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+      addInvalid(
+        file,
+        `${item.id} lists ${target} in distinct_from and in ${kinds.join(', ')}: distinct_from contradicts every other edge to the same record (remove one; the pair counts as unacknowledged meanwhile)`,
+      );
+    }
+  };
+
+  // Every duplicate-id set is invalid, in both modes: the copy the loader
+  // discards (an unchanged one included) could be the record a new claim
+  // overlaps, and which copy is kept depends on directory order.
+  for (const dup of store.duplicateIds) reportDuplicate(dup);
 
   /** Active claims whose FILE changed (any edit): feeds the declared-conflict and unapplied-supersede rules. */
   let changedFileClaims: MemoryItem[];
@@ -556,7 +618,7 @@ export function runCheck(options: CheckOptions = {}): CheckReport {
     for (const [real, reason] of warningByRealPath) {
       if (isRecordFile(real)) addInvalid(displayOf(real), reason);
     }
-    for (const dup of store.duplicateIds) reportDuplicate(dup);
+    for (const item of all) reportContradictory(item, displayOf(item.filePath));
   } else {
     const changedFiles: MemoryItem[] = [];
     const contentIds = new Set<string>();
@@ -570,7 +632,6 @@ export function runCheck(options: CheckOptions = {}): CheckReport {
       }
       const real = realpathSafe(abs);
       const dup = duplicateByRealPath.get(real);
-      if (dup) reportDuplicate(dup);
       const warning = warningByRealPath.get(real);
       if (warning !== undefined) {
         if (isRecordFile(real)) addInvalid(rel, warning);
@@ -581,6 +642,7 @@ export function runCheck(options: CheckOptions = {}): CheckReport {
         if (isRecordFile(real) && !dup) addInvalid(rel, 'not loaded by the store');
         continue;
       }
+      reportContradictory(item, rel);
       if (item.kind !== 'claim' || item.state !== 'active' || seen.has(item.id)) continue;
       seen.add(item.id);
       changedFiles.push(item);
@@ -613,6 +675,13 @@ export function runCheck(options: CheckOptions = {}): CheckReport {
         for (const id of ackTargets(base)) {
           const y = activeById.get(id);
           if (y && y.id !== x.id && !acknowledged(x, y)) contentIds.add(id);
+        }
+        // Same for a declared conflict the deleted copy carried.
+        for (const id of base.conflicts_with ?? []) {
+          const y = activeById.get(id);
+          if (y && y.id !== x.id && !(x.conflicts_with ?? []).includes(y.id) && !(y.conflicts_with ?? []).includes(x.id)) {
+            contentIds.add(id);
+          }
         }
       }
     }
@@ -676,10 +745,23 @@ export function runCheck(options: CheckOptions = {}): CheckReport {
   // carries conflicts_with to another ACTIVE record is a known contradiction
   // about to sit in the store, signal or no signal. Only a question group
   // filing both answers (or retiring one side) clears it.
+  // Incoming edges count too: an unchanged active record whose conflicts_with
+  // names the changed one is the same known contradiction.
+  const conflictedBy = new Map<string, MemoryItem[]>();
+  for (const item of activeClaims) {
+    for (const targetId of item.conflicts_with ?? []) {
+      const list = conflictedBy.get(targetId) ?? [];
+      list.push(item);
+      conflictedBy.set(targetId, list);
+    }
+  }
   for (const x of changedFileClaims) {
-    for (const targetId of x.conflicts_with ?? []) {
-      const y = activeById.get(targetId);
-      if (!y || y.id === x.id) continue;
+    const others = [
+      ...(x.conflicts_with ?? []).map((id) => activeById.get(id)).filter((y): y is MemoryItem => y !== undefined),
+      ...(conflictedBy.get(x.id) ?? []),
+    ];
+    for (const y of others) {
+      if (y.id === x.id) continue;
       if (inQuestionTogether(x.id, y.id)) continue;
       const key = keyOf(x.id, y.id);
       if (pairKeys.has(key)) continue;
