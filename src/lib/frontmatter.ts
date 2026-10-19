@@ -1,4 +1,4 @@
-import matter from 'gray-matter';
+import { parseFrontMatter, stringifyFrontMatter } from './safe-matter.js';
 import type { MemoryFrontmatter, MemoryItem } from './types.js';
 import { assertValidFrontmatter, type NormalizeOptions } from './schema.js';
 
@@ -16,7 +16,7 @@ function coerceDates(data: Record<string, unknown>): Record<string, unknown> {
 }
 
 export function parseMemoryFile(content: string, filePath: string, options: NormalizeOptions = {}): MemoryItem {
-  const parsed = matter(content);
+  const parsed = parseFrontMatter(content);
   const data = assertValidFrontmatter(coerceDates(parsed.data as Record<string, unknown>), options);
   const body = parsed.content.trim();
 
@@ -49,6 +49,7 @@ export function parseMemoryFile(content: string, filePath: string, options: Norm
     supports: data.supports,
     depends_on: data.depends_on,
     derived_from: data.derived_from,
+    distinct_from: data.distinct_from,
     requires_human: data.requires_human,
     evidence: data.evidence,
     answers: data.answers,
@@ -93,6 +94,7 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   if (item.supports && item.supports.length > 0) frontmatter.supports = item.supports;
   if (item.depends_on && item.depends_on.length > 0) frontmatter.depends_on = item.depends_on;
   if (item.derived_from && item.derived_from.length > 0) frontmatter.derived_from = item.derived_from;
+  if (item.distinct_from && item.distinct_from.length > 0) frontmatter.distinct_from = item.distinct_from;
   if (item.requires_human && item.requires_human.length > 0) frontmatter.requires_human = item.requires_human;
   if (item.evidence && item.evidence.length > 0) frontmatter.evidence = item.evidence;
   if (item.answers && item.answers.length > 0) frontmatter.answers = item.answers;
@@ -109,5 +111,5 @@ export function serializeMemoryFile(item: MemoryFrontmatter & { title: string; b
   content = content.replace(headingPattern, '').trim();
 
   const body = [`# ${item.title}`, '', content].join('\n').trimEnd() + '\n';
-  return matter.stringify(body, frontmatter);
+  return stringifyFrontMatter(body, frontmatter);
 }

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import matter from 'gray-matter';
+import { parseYamlDocument } from './safe-matter.js';
 import type { StoreLayerConfig } from './config.js';
 
 /**
@@ -165,8 +165,7 @@ export function findPointer(cwd?: string): PointerResolution | null {
 function parsePointer(file: string): StoreLayerConfig[] {
   try {
     const raw = readFileSync(file, 'utf8');
-    const parsed = matter(`---\n${raw}\n---\n`);
-    const data = parsed.data as Record<string, unknown>;
+    const data = parseYamlDocument(raw);
     if (!Array.isArray(data.stores)) return [];
     return (data.stores as StoreLayerConfig[]).filter(
       (s) => typeof s?.name === 'string' && typeof s?.path === 'string'
@@ -214,8 +213,7 @@ export function matchesClaim(patterns: string[], path: string): boolean {
 export function claimsOf(storeRoot: string): string[] {
   try {
     const raw = readFileSync(join(storeRoot, 'config.yaml'), 'utf8');
-    const parsed = matter(`---\n${raw}\n---\n`);
-    const claims = (parsed.data as Record<string, unknown>).claims;
+    const claims = parseYamlDocument(raw).claims;
     return Array.isArray(claims) ? claims.filter((c): c is string => typeof c === 'string') : [];
   } catch {
     return [];

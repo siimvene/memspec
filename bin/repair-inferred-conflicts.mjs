@@ -34,6 +34,38 @@ import { readdirSync, readFileSync, renameSync, statSync, writeFileSync } from '
 import { basename, join, relative, resolve } from 'node:path';
 import matter from 'gray-matter';
 
+// --- safe front matter: parity with src/lib/safe-matter.ts (memspec 0.13) ----
+// gray-matter's defaults eval `---js` / `---javascript` front matter. This .mjs
+// cannot import the TS module, so the rule is replicated: YAML only (an empty,
+// `yaml` or `yml` language tag), every other tag refused, and the eval-capable
+// engines replaced with ones that throw. Keep in lockstep with safe-matter.ts.
+const SAFE_MATTER_LANGUAGES = new Set(['', 'yaml', 'yml']);
+function refusedEngine(name) {
+  const fail = () => {
+    throw new Error(`front matter engine "${name}" is disabled: memspec reads YAML front matter only`);
+  };
+  return { parse: fail, stringify: fail };
+}
+const SAFE_MATTER_OPTIONS = {
+  language: 'yaml',
+  engines: Object.fromEntries(['javascript', 'js', 'coffee', 'coffeescript', 'cson', 'json'].map((n) => [n, refusedEngine(n)])),
+};
+function parseFrontMatter(content) {
+  const str = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  if (str.startsWith('---') && str.charAt(3) !== '-') {
+    const rest = str.slice(3);
+    const language = rest.slice(0, rest.search(/\r?\n/)).trim();
+    if (!SAFE_MATTER_LANGUAGES.has(language.toLowerCase())) {
+      throw new Error(`front matter language ${JSON.stringify(language.slice(0, 40))} refused: memspec reads YAML front matter only`);
+    }
+  }
+  return matter(content, SAFE_MATTER_OPTIONS);
+}
+// A file object, never a string: matter.stringify(str) parses str with the default engines first.
+function stringifyFrontMatter(content, data) {
+  return matter.stringify({ content: content.charCodeAt(0) === 0xfeff ? content.slice(1) : content }, data);
+}
+
 const POSITIVE_EDGES = ['refines', 'supports', 'depends_on'];
 
 // --- source-tier detection: EXACT parity with src/lib/source.ts (S3) --------
@@ -209,7 +241,7 @@ function applyDrop(parsed, dropped, kept) {
     if (Object.keys(data.ext.edge_sources).length === 0) delete data.ext.edge_sources;
     if (Object.keys(data.ext).length === 0) delete data.ext;
   }
-  return matter.stringify(parsed.content, data);
+  return stringifyFrontMatter(parsed.content, data);
 }
 
 function journalPath(storeRoot) {
@@ -252,7 +284,7 @@ function main() {
   for (const file of files) {
     let parsed;
     try {
-      parsed = matter(readFileSync(file, 'utf8'));
+      parsed = parseFrontMatter(readFileSync(file, 'utf8'));
     } catch {
       continue; // non-memspec or unparseable markdown — skip
     }

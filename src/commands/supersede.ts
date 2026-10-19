@@ -430,6 +430,10 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     for (const id of collapsedIds) {
       if (!merged.includes(id)) merged.push(id);
     }
+    // A survivor cannot both supersede a record and call it distinct
+    // ("compared, independent"): drop distinct_from edges to every id it now
+    // supersedes.
+    const distinctFrom = (target.distinct_from ?? []).filter((id) => !merged.includes(id));
     store.updateItem({
       ...target,
       // The survivor absorbs records from possibly-different scopes, so its own
@@ -438,6 +442,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       scope: survivorScope,
       supersedes: merged,
       supersede_reason: baseReason,
+      distinct_from: distinctFrom.length > 0 ? distinctFrom : undefined,
     });
 
     for (const collapsedId of collapsedIds) {

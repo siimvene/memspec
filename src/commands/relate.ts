@@ -19,8 +19,10 @@ function writableStoreFor(cwd: string | undefined, id: string): { store: Memspec
 /**
  * v0.4: typed edge kinds writable via `memspec_relate`. Mirrors the
  * MemoryFrontmatter relation fields exactly; keep in sync.
+ * v0.13 adds `distinct_from` ("compared, independent"), which acknowledges an
+ * overlap for `memspec check` but is not a retrieval edge.
  */
-export const RELATION_TYPES = ['refines', 'supports', 'depends_on', 'derived_from', 'conflicts_with'] as const;
+export const RELATION_TYPES = ['refines', 'supports', 'depends_on', 'derived_from', 'conflicts_with', 'distinct_from'] as const;
 export type RelationType = typeof RELATION_TYPES[number];
 
 export const relationTypeSchema = z.enum(RELATION_TYPES);
@@ -56,7 +58,7 @@ function unmarkEdgeSource(item: MemoryItem, targetId: string): Record<string, un
 /**
  * Claim edges live on claims. A question group relates to its answers through
  * `answers:` (managed by `memspec question --add`), never through
- * refines/supports/depends_on/derived_from/conflicts_with — the other in-place
+ * refines/supports/depends_on/derived_from/conflicts_with/distinct_from — the other in-place
  * mutators (anchor, verify, supersede) already refuse non-active records, and
  * a question is never `active`.
  */
@@ -120,7 +122,14 @@ export function runRelate(options: RelateOptions): RelateResult {
   // target (S2a): that contradiction is exactly what let overlap-repair strand
   // a deliberately-asserted conflict. Refuse before writing, both directions.
   const POSITIVE_TYPES: RelationType[] = ['refines', 'supports', 'depends_on', 'derived_from'];
-  if (type === 'conflicts_with') {
+  // v0.13 — `distinct_from` says "compared, and they are independent", which
+  // contradicts every other relationship between the two records. Refused
+  // whichever record carries either edge (from→to and to→from).
+  const distinctClash = distinctFromExclusion(from, to, type);
+  if (distinctClash) throw new Error(`relate refuses ${distinctClash}`);
+  if (type === 'distinct_from') {
+    // Fully covered by distinctFromExclusion.
+  } else if (type === 'conflicts_with') {
     const positiveHit = POSITIVE_TYPES.find((t) => readEdges(from, t).includes(options.to));
     if (positiveHit) {
       throw new Error(
@@ -163,6 +172,56 @@ export function runRelate(options: RelateOptions): RelateResult {
   };
 }
 
+/** The edge lists a record can carry to another record, `supersedes` included. */
+type EdgeHolder = Pick<MemoryItem, 'id' | 'refines' | 'supports' | 'depends_on' | 'derived_from' | 'conflicts_with' | 'distinct_from' | 'supersedes'>;
+
+function edgeTypesTo(holder: EdgeHolder, targetId: string): Array<RelationType | 'supersedes'> {
+  const hits: Array<RelationType | 'supersedes'> = RELATION_TYPES.filter((t) => readEdges(holder as MemoryItem, t).includes(targetId));
+  if ((holder.supersedes ?? []).includes(targetId)) hits.push('supersedes');
+  return hits;
+}
+
+/**
+ * v0.13 — `distinct_from` ("compared, independent") contradicts every other
+ * relationship between the same two records, whichever record carries it.
+ * Returns the refusal (without the verb) when adding a `type` edge from
+ * `from` to `to` would put distinct_from and another edge between them, in
+ * either direction; null when the edge is allowed. Shared by `relate` and
+ * `remember`.
+ */
+export function distinctFromExclusion(from: EdgeHolder, to: EdgeHolder, type: RelationType): string | null {
+  if (type === 'distinct_from') {
+    const forward = edgeTypesTo(from, to.id).find((t) => t !== 'distinct_from');
+    if (forward) {
+      return (
+        `distinct_from → ${to.id}: ${from.id} already declares ${forward} to that target. ` +
+        `distinct_from means the records are independent; remove the ${forward} edge first (memspec unrelate) if that is correct.`
+      );
+    }
+    const reverse = edgeTypesTo(to, from.id).find((t) => t !== 'distinct_from');
+    if (reverse) {
+      return (
+        `distinct_from → ${to.id}: ${to.id} already declares ${reverse} to ${from.id}. ` +
+        `distinct_from means the records are independent; remove that ${reverse} edge first (memspec unrelate) if that is correct.`
+      );
+    }
+    return null;
+  }
+  if ((from.distinct_from ?? []).includes(to.id)) {
+    return (
+      `${type} → ${to.id}: ${from.id} already declares distinct_from that target (compared, independent). ` +
+      `Declare one relationship, not both — remove the distinct_from edge first (memspec unrelate) if the ${type} is correct.`
+    );
+  }
+  if ((to.distinct_from ?? []).includes(from.id)) {
+    return (
+      `${type} → ${to.id}: ${to.id} already declares distinct_from ${from.id} (compared, independent). ` +
+      `Declare one relationship, not both — remove that distinct_from edge first (memspec unrelate) if the ${type} is correct.`
+    );
+  }
+  return null;
+}
+
 function readEdges(item: MemoryItem, type: RelationType): string[] {
   switch (type) {
     case 'refines': return item.refines ?? [];
@@ -170,6 +229,7 @@ function readEdges(item: MemoryItem, type: RelationType): string[] {
     case 'depends_on': return item.depends_on ?? [];
     case 'derived_from': return item.derived_from ?? [];
     case 'conflicts_with': return item.conflicts_with ?? [];
+    case 'distinct_from': return item.distinct_from ?? [];
   }
 }
 
@@ -180,6 +240,7 @@ function writeEdges(item: MemoryItem, type: RelationType, edges: string[]): Memo
     case 'depends_on': return { ...item, depends_on: edges };
     case 'derived_from': return { ...item, derived_from: edges };
     case 'conflicts_with': return { ...item, conflicts_with: edges };
+    case 'distinct_from': return { ...item, distinct_from: edges };
   }
 }
 

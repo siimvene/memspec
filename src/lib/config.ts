@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import matter from 'gray-matter';
+import { parseYamlDocument } from './safe-matter.js';
 import type { MemoryType } from './types.js';
 import { DEFAULT_DECAY_DAYS } from './types.js';
 
@@ -190,9 +190,8 @@ export function loadConfig(root: string): MemspecConfig {
 
   try {
     const raw = readFileSync(configPath, 'utf8');
-    // Use gray-matter's engine to parse bare YAML (wrap in fake frontmatter)
-    const parsed = matter(`---\n${raw}\n---\n`);
-    const data = parsed.data as Record<string, unknown> | null;
+    // Bare YAML through the shared safe front-matter parser (YAML engine only).
+    const data = parseYamlDocument(raw) as Record<string, unknown> | null;
     if (!data) return DEFAULT_CONFIG;
 
     if (data.search !== undefined && !warnedAboutLegacySearchBlock) {

@@ -21,6 +21,7 @@
  *   supports        → green
  *   depends_on      → purple
  *   derived_from    → brown, dashed (v0.11; inferred-from, not observed)
+ *   distinct_from   → gray, dotted  (v0.13; compared, independent)
  *   answers         → purple, dotted (v0.11; question → answer record)
  *   anchors_to      → gray, thin    (memory → file synthetic node)
  *
@@ -78,7 +79,7 @@ interface GraphEdge {
   kind: 'edge';
   from: string;
   to: string;
-  type: 'supersedes' | 'conflicts_with' | 'refines' | 'supports' | 'depends_on' | 'derived_from' | 'anchors_to' | 'answers';
+  type: 'supersedes' | 'conflicts_with' | 'refines' | 'supports' | 'depends_on' | 'derived_from' | 'distinct_from' | 'anchors_to' | 'answers';
 }
 
 interface GraphProjection {
@@ -164,6 +165,9 @@ function project(items: MemoryItem[], includeSuperseded: boolean, typesFilter: M
     }
     for (const target of item.conflicts_with ?? []) {
       if (includedById.has(target)) addEdge({ kind: 'edge', from: item.id, to: target, type: 'conflicts_with' });
+    }
+    for (const target of item.distinct_from ?? []) {
+      if (includedById.has(target)) addEdge({ kind: 'edge', from: item.id, to: target, type: 'distinct_from' });
     }
 
     // Supersedes edges only appear when superseded records are included —
@@ -387,6 +391,7 @@ function dotEdgeStyle(type: GraphEdge['type']): DotEdgeStyle {
     case 'supports': return { color: 'green' };
     case 'depends_on': return { color: 'purple' };
     case 'derived_from': return { color: 'brown', style: 'dashed' };
+    case 'distinct_from': return { color: 'gray', style: 'dotted' };
     case 'answers': return { color: 'purple', style: 'dotted' };
     case 'anchors_to': return { color: 'gray', penwidth: '0.5' };
   }

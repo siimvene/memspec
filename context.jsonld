@@ -84,6 +84,12 @@
             "@type": "@id"
         },
 
+        "distinct_from": {
+            "@id": "memspec:distinctFrom",
+            "@container": "@set",
+            "@type": "@id"
+        },
+
         "requires_human": {
             "@id": "memspec:requiresHuman",
             "@container": "@set"

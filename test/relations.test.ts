@@ -6,6 +6,13 @@ import matter from 'gray-matter';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
 import { makeTempProject, readText, REPO_ROOT, runCli } from './helpers.js';
+import { runExport } from '../src/commands/export.js';
+import { runRelate } from '../src/commands/relate.js';
+import { runRemember } from '../src/commands/remember.js';
+import { EDGE_TYPES, expandGraph } from '../src/lib/graph-walk.js';
+import { buildLineage } from '../src/lib/lineage.js';
+import { MemspecStore } from '../src/lib/store.js';
+import type { MemoryFrontmatter } from '../src/lib/types.js';
 
 interface JsonRpcResponse {
   jsonrpc: '2.0';
@@ -427,6 +434,132 @@ test('mcp memspec_relate writes an edge and reports added flag', async () => {
     });
     const secondRes = second.result as { structuredContent: { added: boolean } };
     assert.equal(secondRes.structuredContent.added, false);
+  } finally {
+    await session.close();
+  }
+});
+
+// --- v0.13 distinct_from ---
+
+async function initDistinctProject(): Promise<{ target: string; ids: string[] }> {
+  const target = await makeTempProject();
+  new MemspecStore(target).init();
+  const ids = ['Invoice numbering', 'Meter import cadence', 'Tariff table layout'].map(
+    (title) => runRemember('fact', title, { cwd: target, source: 'test', body: `${title}.` }).id,
+  );
+  return { target, ids };
+}
+
+test('relate distinct_from writes the edge and dedupes on replay', async () => {
+  const { target, ids: [a, b] } = await initDistinctProject();
+  const first = runRelate({ cwd: target, from: a, to: b, type: 'distinct_from' });
+  assert.equal(first.added, true);
+  assert.match(first.message, /-\[distinct_from\]->/);
+  assert.equal(runRelate({ cwd: target, from: a, to: b, type: 'distinct_from' }).added, false);
+  const raw = await readText(join(target, '.memspec', 'memory', 'facts', `${a}.md`));
+  assert.deepEqual(matter(raw).data.distinct_from, [b]);
+});
+
+test('relate refuses distinct_from to a target already on any other edge list, and every other edge to a distinct_from target', async () => {
+  const { target, ids: [a, b, c] } = await initDistinctProject();
+  for (const type of ['refines', 'supports', 'depends_on', 'derived_from', 'conflicts_with'] as const) {
+    const fresh = await initDistinctProject();
+    const [x, y] = fresh.ids;
+    runRelate({ cwd: fresh.target, from: x, to: y, type });
+    assert.throws(
+      () => runRelate({ cwd: fresh.target, from: x, to: y, type: 'distinct_from' }),
+      new RegExp(`relate refuses distinct_from .*already declares ${type}`),
+      `distinct_from after ${type}`,
+    );
+  }
+  runRelate({ cwd: target, from: a, to: b, type: 'distinct_from' });
+  for (const type of ['refines', 'supports', 'depends_on', 'derived_from', 'conflicts_with'] as const) {
+    assert.throws(
+      () => runRelate({ cwd: target, from: a, to: b, type }),
+      /already declares distinct_from that target/,
+      `${type} after distinct_from`,
+    );
+  }
+  // A different target is unaffected.
+  assert.equal(runRelate({ cwd: target, from: a, to: c, type: 'refines' }).added, true);
+});
+
+test('relate --type distinct_from works through the CLI and appears in --help', async () => {
+  const { target, ids: [a, b] } = await initDistinctProject();
+  const out = await runCli(['relate', '--cwd', target, '--from', a, '--to', b, '--type', 'distinct_from']);
+  assert.match(out.stdout, /-\[distinct_from\]->/);
+  const help = await runCli(['relate', '--help']);
+  assert.match(help.stdout, /distinct_from/);
+  const rememberHelp = await runCli(['remember', '--help']);
+  assert.match(rememberHelp.stdout, /--distinct-from/);
+});
+
+test('remember --distinct-from validates the target, writes the edge, excludes it from suggestions, and refuses a contradicting edge', async () => {
+  const { target, ids: [a] } = await initDistinctProject();
+  assert.throws(
+    () => runRemember('fact', 'Invoice numbering per year', { cwd: target, source: 'test', distinctFrom: ['ms_00000000000000000000000000'] }),
+    /--distinct-from target not found/,
+  );
+  assert.throws(
+    () => runRemember('fact', 'Invoice numbering per year', { cwd: target, source: 'test', distinctFrom: [a], refines: [a] }),
+    /--distinct-from .* contradicts the refines edge/,
+  );
+  const r = runRemember('fact', 'Invoice numbering per year', { cwd: target, source: 'test', distinctFrom: [a, a] });
+  assert.match(r.message, /Distinct from: /);
+  assert.equal((r.suggestedConflicts ?? []).some((s) => s.id === a), false);
+  const stored = new MemspecStore(target).findById(r.id)!;
+  assert.deepEqual(stored.distinct_from, [a]);
+});
+
+test('distinct_from is not a retrieval edge: graph-walk and lineage ignore it; export emits it', async () => {
+  assert.equal((EDGE_TYPES as readonly string[]).includes('distinct_from'), false);
+  const A = 'ms_01AAAAAAAAAAAAAAAAAAAAAAAA';
+  const B = 'ms_01BBBBBBBBBBBBBBBBBBBBBBBB';
+  const records = new Map<string, MemoryFrontmatter>([
+    [A, { id: A, kind: 'claim', type: 'fact', state: 'active', created: '2026-01-01T00:00:00Z', source: 't', tags: [], check_by: 'never', distinct_from: [B] }],
+    [B, { id: B, kind: 'claim', type: 'fact', state: 'active', created: '2026-01-01T00:00:00Z', source: 't', tags: [], check_by: 'never' }],
+  ]);
+  assert.deepEqual(expandGraph([A], records, { maxDepth: 3 }), []);
+
+  const { target, ids: [a, b] } = await initDistinctProject();
+  runRelate({ cwd: target, from: a, to: b, type: 'distinct_from' });
+  const store = new MemspecStore(target);
+  const lineage = buildLineage(store.findById(a)!, store.loadAll());
+  assert.deepEqual(
+    [lineage.refines_chain, lineage.supports_chain, lineage.depends_on_chain, lineage.derived_from_chain],
+    [[], [], [], []],
+  );
+  const lines = runExport({ cwd: target, format: 'jsonl' }).trim().split('\n').map((l) => JSON.parse(l));
+  assert.ok(lines.some((e) => e.kind === 'edge' && e.type === 'distinct_from' && e.from === a && e.to === b));
+  const dot = runExport({ cwd: target, format: 'dot' });
+  assert.match(dot, /label="distinct_from"[^\]]*color="gray"[^\]]*style="dotted"/);
+});
+
+test('mcp memspec_relate / memspec_remember accept distinct_from and memspec_get echoes it', async () => {
+  const { target, ids: [a, b] } = await initDistinctProject();
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', target]);
+  try {
+    await session.init();
+    const list = await session.request('tools/list');
+    const tools = (list.result as { tools: Array<{ name: string; description?: string; inputSchema?: { properties?: Record<string, { description?: string; enum?: string[] }> } }> }).tools;
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    for (const name of ['memspec_relate', 'memspec_unrelate']) {
+      const tool = byName.get(name)!;
+      assert.ok(tool.description?.includes('distinct_from'), `${name} description`);
+      assert.ok(tool.inputSchema?.properties?.type?.enum?.includes('distinct_from'), `${name} type enum`);
+    }
+    assert.ok(byName.get('memspec_remember')!.inputSchema?.properties?.distinct_from, 'remember distinct_from param');
+
+    const rel = await session.request('tools/call', { name: 'memspec_relate', arguments: { from: a, to: b, type: 'distinct_from' } });
+    assert.equal((rel.result as { structuredContent: { added: boolean } }).structuredContent.added, true);
+
+    const rem = await session.request('tools/call', {
+      name: 'memspec_remember',
+      arguments: { type: 'fact', title: 'Meter import window', body: 'B', source: 'mcp-test', distinct_from: [b] },
+    });
+    const newId = (rem.result as { structuredContent: { id: string } }).structuredContent.id;
+    const got = await session.request('tools/call', { name: 'memspec_get', arguments: { id: newId } });
+    assert.deepEqual((got.result as { structuredContent: { distinct_from?: string[] } }).structuredContent.distinct_from, [b]);
   } finally {
     await session.close();
   }

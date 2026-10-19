@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import matter from 'gray-matter';
+import { parseFrontMatter } from '../lib/safe-matter.js';
 import { projectRootForStore } from '../lib/anchors.js';
 import { MemspecStore } from '../lib/store.js';
 import { CompositeStore, describeStaleLayer, type PendingPromotion, type StaleLayer } from '../lib/composite-store.js';
@@ -137,9 +137,9 @@ function scanSchemaViolations(root: string): SchemaViolation[] {
 
   const violations: SchemaViolation[] = [];
   for (const file of files) {
-    let parsed: ReturnType<typeof matter>;
+    let parsed: ReturnType<typeof parseFrontMatter>;
     try {
-      parsed = matter(readFileSync(file, 'utf8'));
+      parsed = parseFrontMatter(readFileSync(file, 'utf8'));
     } catch (err) {
       violations.push({ file, errors: [err instanceof Error ? err.message : String(err)] });
       continue;

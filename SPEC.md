@@ -343,7 +343,7 @@ The `.memspec/` directory lives in the project repository. It is committed to gi
 
 ### 6.2 File Format
 
-Each memory item is a markdown file with YAML frontmatter:
+Each memory item is a markdown file with YAML frontmatter. The opening `---` carries no language tag (or `yaml`/`yml`); readers MUST refuse any other front-matter language (`---js`, `---json`, ...) without evaluating it (v0.13: some front-matter parsers `eval` JavaScript front matter by default):
 
 ```markdown
 ---
@@ -368,6 +368,7 @@ conflicts_with: [{id}, ...]               # explicit conflict edges to other mem
 refines: [{id}, ...]                      # v0.4 — this record elaborates on the parent (parent stays valid)
 supports: [{id}, ...]                     # v0.4 — this record is evidence for the target
 depends_on: [{id}, ...]                   # v0.4 — knowledge or chronological dependency
+distinct_from: [{id}, ...]                # v0.13 — compared, independent claims; acknowledges an overlap, never followed by retrieval
 expires: {ISO 8601}                       # observations only — hard expiry
 ---
 
@@ -416,6 +417,16 @@ If two agents write conflicting memories simultaneously:
 - Git merge conflicts are resolved by keeping both and flagging for correction
 - The self-correction protocol handles semantic conflicts asynchronously
 
+### 7.2.1 Merge-time contradiction check (v0.13)
+
+One file per record means two contradicting records never produce a git conflict. `memspec check` closes that gap at PR time:
+
+- **Changed set.** Git mode: files under the store that differ between `git merge-base <base> HEAD` and the working tree (renames off), plus untracked files; deleted files are read separately. `<base>` defaults to the remote default branch (`origin/HEAD`, else `origin/main`, else `origin/master`). A changed active claim is checked unless its base version (located by record id) was an active claim with equal claim content (normalised title, body, set of anchored `repo`+`file` keys, `type`, `valid_from`, `valid_to`, `scope`) and every acknowledging or `conflicts_with` id it listed that is still an active claim is still listed. Base versions are looked up under `memory/`, `observations/` and `archive/` only. A question group changed or deleted adds each still-active answer it filed at the base and no longer files; a deleted claim file whose id still loads (from another copy) adds each still-active target it acknowledged that the loaded copy no longer acknowledges. `--all` checks every active claim. Only `kind: claim`, `state: active` records are checked, against every other active claim of any type in the same store (one store, never the layered view).
+- **Signal.** Per active claim: anchor keys, anchored paths of 5+ characters, and title terms (lowercased words of 3+ characters minus stopwords, tokenised like the index, minus tokens with digits, and, with 40+ active claims, minus tokens in more than 5% of titles). A pair is flagged iff (a shared anchor, or one record's title/body containing an anchored path of the other) and 2+ shared terms, or 3+ shared terms with shared / min(|terms|) >= 0.5.
+- **Acknowledgement.** Either record listing the other in `refines`, `supports`, `depends_on`, `derived_from` or `distinct_from`, or a question group listing both in `answers`. `conflicts_with` is not an acknowledgement: a changed record file (any edit) carrying `conflicts_with` to an active record, or named in an active record's `conflicts_with`, or a flagged pair with a conflict edge either way, is a `declared_conflict` finding, cleared by superseding one side or filing both in a question group. Nor is `supersedes`: a changed record file whose `supersedes` names a still-active record (or an active record whose `supersedes` names the changed one) is an `unapplied_supersede` finding, cleared by archiving the target (`state: superseded`, `superseded_by`). In a team store both records sit in the same store, so this is the promote PR that copies a survivor without retiring its target.
+- **Invalid files.** A changed `.md` file under `memory/`, `observations/` or `archive/` that fails to load (including non-YAML front matter, refused unevaluated, §6.2), every file of every duplicate-id set in the store, a changed symlink under the store, and a record (changed, or any with `--all`) that names one target in `distinct_from` and in another edge list (those edges acknowledge nothing). Git mode refuses (exit 2) a symlink at the store root or under the three record directories, and a store with record files of which git tracks none.
+- **Result.** Exit 0 clean, 1 findings (unacknowledged pairs, declared conflicts, unapplied supersedes, invalid files), 2 usage or git error. The check writes nothing.
+
 ### 7.3 Source Attribution
 
 Every memory item records its `source` — which agent or human created it. This enables tracing knowledge provenance without requiring a coordination protocol.
@@ -449,8 +460,9 @@ Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate
   `merge_from` collapses N duplicates into one survivor atomically. Reason is
   persisted on every record involved.
 - `memspec_relate` — wire a named link from one memory to another after the
-  fact: `refines`, `supports`, `depends_on`, `derived_from` (v0.11), or
-  `conflicts_with`
+  fact: `refines`, `supports`, `depends_on`, `derived_from` (v0.11),
+  `conflicts_with`, or `distinct_from` (v0.13: compared, independent;
+  exclusive with every other edge to the same target)
 - `memspec_observe` — point-in-time observation with hard expiry (default 7d)
 - `memspec_verify` — re-witness a claim; anchorless verification requires
   evidence. `check_by` (v0.11) optionally pins the next review date explicitly
@@ -494,7 +506,8 @@ Optional command-line interface (primary commands):
 - `memspec verify {id} [--evidence "{what you checked}"] [--check-by {iso|never}]` (v0.11: `--check-by`)
 - `memspec outcome {id} {useful|dead_end|corrected} [--note "{text}"] [--source {who}]` (v0.11)
 - `memspec anchor {id} {files...}` / `memspec reconcile [--since {ref}]`
-- `memspec relate --from {id} --to {id} --type {refines|supports|depends_on|derived_from|conflicts_with}` (v0.4+; `derived_from` v0.11; `--from` must be a claim, not a question group)
+- `memspec relate --from {id} --to {id} --type {refines|supports|depends_on|derived_from|conflicts_with|distinct_from}` (v0.4+; `derived_from` v0.11; `distinct_from` v0.13; `--from` must be a claim, not a question group)
+- `memspec check [--base {ref}] [--all] [--store {dir}] [--json]` (v0.13) — merge-time contradiction check, §7.2.1
 - `memspec search "{query}" [--expand-edges] [--include-superseded] [--as-of {iso}]` / `memspec context [--query] [--budget]`
 - `memspec status` — the single maintenance readout
 - `memspec export --format {jsonl|graphml|dot}` (v0.4+)

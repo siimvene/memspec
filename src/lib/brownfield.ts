@@ -4,7 +4,7 @@ import { ulid } from 'ulid';
 import { getDecayDays, loadConfig } from './config.js';
 import { MemspecStore } from './store.js';
 import type { LifecycleState, MemoryFrontmatter, MemoryType } from './types.js';
-import matter from 'gray-matter';
+import { parseFrontMatter } from './safe-matter.js';
 
 interface DraftItem extends MemoryFrontmatter {
   title: string;
@@ -188,7 +188,14 @@ function importMemoryDir(dirPath: string, storeRoot: string): DraftItem[] {
     const name = entry.name.replace(/\.md$/, '');
 
     // Check if file has frontmatter with type info
-    const parsed = matter(content);
+    let parsed: ReturnType<typeof parseFrontMatter>;
+    try {
+      parsed = parseFrontMatter(content);
+    } catch (err) {
+      // Non-YAML front matter (`---js` and friends) is refused, never evaluated.
+      process.stderr.write(`memspec: skipped ${filePath}: ${err instanceof Error ? err.message : String(err)}\n`);
+      continue;
+    }
     const fmType = parsed.data?.type as string | undefined;
 
     const isDaily = /^\d{4}-\d{2}-\d{2}$/.test(name);
