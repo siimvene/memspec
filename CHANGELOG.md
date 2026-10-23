@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`memspec init` now wires every agent harness, not only Claude Code.** Hook installation was the one surface that never got the adapter treatment that `normalize`'s transcript ingestion already had ("adding a harness = one adapter"), so every non-Claude agent got a memory store it had no way to read at session start. `src/lib/harness.ts` adds a harness registry with the same shape, and `--harness <auto|none|id[,id]>` selects it (`auto` detects, the default).
+  - `cursor` — `.cursor/mcp.json` server entry plus `.cursor/rules/memspec.mdc` with `alwaysApply: true` (Cursor has no session-start hook, so the rule file carries the doctrine).
+  - `gemini` — `.gemini/settings.json` server entry plus a `GEMINI.md` instruction block.
+  - `codex` — a marked block appended to `~/.codex/config.toml` when that file exists, else a snippet at `.memspec/harnesses/codex.toml`; `AGENTS.md` carries the doctrine.
+  - `hermes` — `AGENTS.md` instruction block, plus the MCP block written to `.memspec/harnesses/hermes.yaml` to paste into `~/.hermes/config.yaml`.
+  - `generic` — `.memspec/harnesses/generic.md`, the three-surface integration contract (MCP, `memspec context`, instruction block) for a harness memspec does not know.
+  - An unknown harness id is an error rather than a silent skip: a typo that quietly installs nothing is the failure worth refusing.
+- **`upsertMarkedBlock` is exported from `lib/agent-addon.js`**, so an adapter can put the memory doctrine in its own instruction file (`GEMINI.md`, a Cursor `.mdc`) instead of only `AGENTS.md`/`CLAUDE.md`. `patchAgentInstructions` now delegates to it and behaves identically.
+
+### Safety
+
+- **JSON configs are merged, never regenerated.** Cursor's and Gemini's configs are read, one key is added, and every other key and server is preserved.
+- **TOML and YAML are never round-tripped.** `~/.codex/config.toml` gets a block appended only when the marker is absent, so comments and ordering survive; `~/.hermes/config.yaml` is never written at all.
+- **No config directory is created for a harness that is not installed.** Detection requires the directory to exist, so a test run — or a machine without that agent — cannot sprout one.
+- `--no-install-hooks` now skips all harness wiring, not just Claude's.
+
 ## 0.13.0 — 2026-10-19
 
 ### Security

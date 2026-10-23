@@ -44,7 +44,8 @@ program
   .option('--no-interactive', 'disable setup prompts')
   .option('--skip-import', 'skip brownfield memory import')
   .option('--skip-patch', 'skip AGENTS.md/CLAUDE.md patching')
-  .option('--no-install-hooks', 'skip installing Claude Code hooks into $CLAUDE_CONFIG_DIR (default ~/.claude/)')
+  .option('--no-install-hooks', 'skip wiring memspec into any agent harness (hooks, rules, MCP config)')
+  .option('--harness <spec>', 'agent harnesses to wire: "auto" (detect, default), "none", or a comma-separated list of claude, codex, cursor, gemini, hermes, generic')
   .option('--force', 'create a store here even though a parent directory already has one; without it init refuses to nest stores')
   .action(async (path: string | undefined, options: {
     cwd?: string;
@@ -52,6 +53,7 @@ program
     skipImport?: boolean;
     skipPatch?: boolean;
     installHooks?: boolean;
+    harness?: string;
     force?: boolean;
   }) => {
     console.log(await runInit({ ...options, path }));
