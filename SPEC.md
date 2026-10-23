@@ -637,6 +637,20 @@ consolidation:
 
 The hook is implementation-specific (Claude Code PostToolUse) but the consolidation config key is part of the spec. Other implementations MAY use different hook mechanisms tied to the same config.
 
+### 10.2.1 Harness Adapters
+
+`init` MUST NOT assume one agent runtime. An implementation that installs hooks or writes harness configuration SHOULD route it through a per-harness adapter — one adapter per harness, each declaring how to detect its harness and how to wire itself — so that adding a harness is one adapter and no core change. The reference implementation's registry is `src/lib/harness.ts`, selected at install time by `--harness <auto|none|id[,id]>` where `auto` (the default) detects what is present.
+
+Three constraints are normative, because each one protects an operator's real machine:
+
+1. **A JSON config is merged, never regenerated.** Read the file, add the memspec key, preserve every other key and server.
+2. **A TOML or YAML config is never re-serialised.** A hand-maintained file carries comments and ordering that a programmatic round-trip destroys. Append a marked block when the marker is absent, or write the block out for the operator to paste.
+3. **No configuration is written into a directory that does not exist.** Detection requires the directory to already be present, so an install cannot sprout a config directory for an agent that is not installed on the machine.
+
+An unknown harness id MUST be an error rather than a silent skip: an install that quietly wires nothing is worse than one that fails.
+
+Session-start context injection is the harness-neutral primitive behind any hook. An implementation SHOULD expose it as a command that prints the same budgeted context the hook would inject (`memspec context --format markdown|json` in the reference implementation), MUST exit 0 with empty output on an empty store so it is safe to call unconditionally, and MUST NOT require any particular harness to exist.
+
 ### 10.3 Design Rationale
 
 Agents don't reliably perform deferred tasks. A generic "review memories before ending" instruction is easy to ignore. Tying memory writes to specific completed actions (fixed a bug, made a decision, committed code) is more reliable because:

@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 const ADDON_MARKER_START = '<!-- memspec:init:start -->';
 const ADDON_MARKER_END = '<!-- memspec:init:end -->';
@@ -16,10 +16,10 @@ export const AGENT_ADDON_BLOCK = [
   'Memspec is agent-operated, not human-curated with agent access.',
   '',
   '### On session start',
-  'In Claude Code (and any harness supporting `SessionStart` hooks), the relevant active memories',
-  'are auto-injected at session start via `memspec context` — you should already see them.',
-  'As a fallback, run `memspec search` for context relevant to the task. Prefer active memories',
-  'over stale assumptions.',
+  'Where the harness has a session-start hook (Claude Code does, via `SessionStart`), the relevant',
+  'active memories are auto-injected through `memspec context` — you should already see them.',
+  'Otherwise run `memspec context` yourself — as a fallback, run `memspec search` for context relevant to the task.',
+  'Prefer active memories over stale assumptions.',
   '',
   'If the `memspec` command is not found (not on PATH) and no `memspec_*` MCP tools are available,',
   'the CLI is still usable: it is a Node tool — run `npm link` in the memspec checkout to expose',
@@ -80,36 +80,45 @@ export interface AgentInstructionPatchResult {
   created: boolean;
 }
 
+/**
+ * Insert or replace the marked memspec block in an arbitrary file, creating
+ * parent directories as needed. Idempotent: a file already carrying the block
+ * with identical content is left untouched. Used by `patchAgentInstructions`
+ * and by the per-harness adapters, which write their own instruction file
+ * (`GEMINI.md`, `.cursor/rules/memspec.mdc`, ...).
+ */
+export function upsertMarkedBlock(filePath: string, block: string): { changed: boolean; created: boolean } {
+  const created = !existsSync(filePath);
+  const current = created ? '' : readFileSync(filePath, 'utf8');
+
+  if (current.includes(ADDON_MARKER_START) && current.includes(ADDON_MARKER_END)) {
+    const updated = current.replace(
+      new RegExp(`${escapeRegExp(ADDON_MARKER_START)}[\\s\\S]*?${escapeRegExp(ADDON_MARKER_END)}`),
+      block,
+    );
+    if (updated === current) return { changed: false, created };
+    writeFileSync(filePath, updated, 'utf8');
+    return { changed: true, created };
+  }
+
+  const next = current.trimEnd().length > 0
+    ? `${current.trimEnd()}\n\n${block}\n`
+    : `${block}\n`;
+
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, next, 'utf8');
+
+  return { changed: true, created };
+}
+
 export function patchAgentInstructions(projectRoot: string): AgentInstructionPatchResult {
   const existingCandidate = AGENT_FILE_CANDIDATES
     .map((name) => join(projectRoot, name))
     .find((path) => existsSync(path));
 
   const targetPath = existingCandidate ?? join(projectRoot, 'AGENTS.md');
-  const created = !existsSync(targetPath);
-  const current = created ? '' : readFileSync(targetPath, 'utf8');
 
-  if (current.includes(ADDON_MARKER_START) && current.includes(ADDON_MARKER_END)) {
-    const updated = current.replace(
-      new RegExp(`${escapeRegExp(ADDON_MARKER_START)}[\\s\\S]*?${escapeRegExp(ADDON_MARKER_END)}`),
-      AGENT_ADDON_BLOCK,
-    );
-    if (updated === current) {
-      return { path: targetPath, changed: false, created };
-    }
-    writeFileSync(targetPath, updated, 'utf8');
-    return { path: targetPath, changed: true, created };
-  }
+  const { changed, created } = upsertMarkedBlock(targetPath, AGENT_ADDON_BLOCK);
 
-  const next = current.trimEnd().length > 0
-    ? `${current.trimEnd()}\n\n${AGENT_ADDON_BLOCK}\n`
-    : `${AGENT_ADDON_BLOCK}\n`;
-
-  writeFileSync(targetPath, next, 'utf8');
-
-  return {
-    path: targetPath,
-    changed: true,
-    created,
-  };
+  return { path: targetPath, changed, created };
 }
