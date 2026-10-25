@@ -157,6 +157,9 @@ async function loadMemspec() {
  */
 function replay(api, bare, work, facts, policy, answer, { searchAt }) {
   const tree = join(work, `tree-${policy}`);
+  // A crashed earlier run can leave the tree behind; `worktree add` needs it gone.
+  rmSync(tree, { recursive: true, force: true });
+  git(bare, ['worktree', 'prune']);
   git(bare, ['worktree', 'add', '--detach', '--force', tree, START]);
   // The drift rule also accepts a match on the remote default branch; this
   // replay has none (the bare clone's remote was removed), so the working

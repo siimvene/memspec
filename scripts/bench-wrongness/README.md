@@ -31,7 +31,10 @@ with no code link 90-100% stale-served. The post points to `BENCHMARKS.md` in
 the mex repository for the method and raw data. As of 2026-10-25 that file is
 404 on `main` and absent from every branch of `mex-memory/mex`, and no fact
 set, answer key or replay script is in the repository (searched the full tree
-of all 46 branches and GitHub code search). The facts were written with AI and
+of all 46 branches and GitHub code search). The repository does ship Hono
+suites (`evaluate/compare/suites/hono.json`, `evaluate/suites/native/graph/hono.json`),
+but those are graph-retrieval tasks at one pinned revision (`0293343d`), with no
+facts, checkpoints or answer key. The staleness facts were written with AI and
 audited by AI, so they cannot be regenerated.
 
 So this benchmark rebuilds the equivalent on the same repository and the same

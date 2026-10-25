@@ -94,7 +94,9 @@ function compatibleTitle(fact) {
 
 export function runContradictionBench(api, { work, facts, factsC5, blobShas, start, pairs }) {
   const repo = join(work, 'contra');
-  git(work, ['init', '-q', '-b', 'main', repo]);
+  // A kept --work dir from an earlier run would leave nothing to commit below.
+  rmSync(repo, { recursive: true, force: true });
+  git(work,['init', '-q', '-b', 'main', repo]);
   for (const [k, v] of [['user.email', 'bench@example.invalid'], ['user.name', 'bench'], ['commit.gpgsign', 'false']]) git(repo, ['config', k, v]);
   const store = new api.MemspecStore(repo, { walk: false });
   store.init();
