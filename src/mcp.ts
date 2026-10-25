@@ -278,6 +278,8 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
       validFrom: valid_from,
       validTo: valid_to,
       scope,
+      // A tombstone refusal is final here: the override exists only on the CLI.
+      channel: 'mcp',
     });
 
     let text = result.message;
@@ -323,7 +325,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
 
 server.tool(
   'memspec_remember',
-  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Prefer ABSOLUTE file paths in anchors (e.g. /Users/you/git/repo/src/x.ts): this server may run against a personal/global store whose project root is your home directory, so a bare repo-relative path like "src/x.ts" resolves nowhere and the claim silently degrades to an unanchored assertion. If you must pass repo-relative paths, also pass anchor_root pointing at that repo\'s checkout. A file inside a git repo other than the store\'s own is recorded as {repo, file} and resolved on read as a sibling of the project root or under anchors.repo_search_paths (default ~/git). An anchor that resolves nowhere comes back in anchor_warnings telling you what to pass; an anchor recorded against a repo this store cannot resolve on read also warns, naming the directory to add to repo_search_paths. Search first to avoid duplicates. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
+  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Prefer ABSOLUTE file paths in anchors (e.g. /Users/you/git/repo/src/x.ts): this server may run against a personal/global store whose project root is your home directory, so a bare repo-relative path like "src/x.ts" resolves nowhere and the claim silently degrades to an unanchored assertion. If you must pass repo-relative paths, also pass anchor_root pointing at that repo\'s checkout. A file inside a git repo other than the store\'s own is recorded as {repo, file} and resolved on read as a sibling of the project root or under anchors.repo_search_paths (default ~/git). An anchor that resolves nowhere comes back in anchor_warnings telling you what to pass; an anchor recorded against a repo this store cannot resolve on read also warns, naming the directory to add to repo_search_paths. Search first to avoid duplicates: a claim whose title + body near-matches an active same-type record in scope is refused with a pointer to it (use memspec_supersede instead), and a claim that near-matches a value a supersede or retraction rejected (and not its live survivor) is refused with the rejected record, its persisted reason and the survivor; over MCP that refusal is final. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
   {
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
@@ -356,12 +358,11 @@ interface SupersedeArgs {
   title?: string;
   body?: string;
   merge_from?: string[];
-  override_operator?: boolean;
   source?: string;
   scope?: string;
 }
 
-async function handleSupersede({ id, reason, title, body, merge_from, override_operator, source, scope }: SupersedeArgs) {
+async function handleSupersede({ id, reason, title, body, merge_from, source, scope }: SupersedeArgs) {
   try {
     const result = runSupersede(id, {
       cwd: defaultCwd,
@@ -369,9 +370,11 @@ async function handleSupersede({ id, reason, title, body, merge_from, override_o
       title,
       body,
       mergeFrom: merge_from,
-      overrideOperator: override_operator,
       source,
       scope,
+      // Write authority derives from the channel: operator records refuse here
+      // on every branch, and there is no override parameter to pass.
+      channel: 'mcp',
     });
     return {
       content: [{ type: 'text' as const, text: result.message }],
@@ -390,14 +393,13 @@ async function handleSupersede({ id, reason, title, body, merge_from, override_o
 
 server.tool(
   'memspec_supersede',
-  'Replace, retract, or merge memory. Body filled = replacement (new active record supersedes the old). Body empty = retraction. merge_from collapses N duplicates into one survivor atomically (use to consolidate near-duplicates surfaced by status). Reason is persisted durably on every record involved. A replacement for a record in a read-only layer (e.g. a team store) is written to the one writable layer instead, with `supersedes` pointing at the original; the original file is untouched, it drops out of this view\'s active results, and the result carries `pending_promotion: { layer, target_id }` (promote the replacement to that layer to make it stick for everyone; memspec_status lists pending promotions).',
+  'Replace, retract, or merge memory. Body filled = replacement (new active record supersedes the old). Body empty = retraction. merge_from collapses N duplicates into one survivor atomically (use to consolidate near-duplicates surfaced by status). Reason is persisted durably on every record involved. A replacement for a record in a read-only layer (e.g. a team store) is written to the one writable layer instead, with `supersedes` pointing at the original; the original file is untouched, it drops out of this view\'s active results, and the result carries `pending_promotion: { layer, target_id }` (promote the replacement to that layer to make it stick for everyone; memspec_status lists pending promotions). Operator-sourced records are read-only over MCP: replacing, retracting or merging one (or merging into an operator survivor) is refused here and must be done with `memspec supersede --override-operator` at a terminal, where a human authorizes it.',
   {
     id: z.string().describe('Memory ID to supersede (or the survivor id when merging without a replacement body)'),
     reason: z.string().describe('Why the target is wrong, stale, or being merged. Persisted on every record involved.'),
     title: z.string().optional().describe('Fresh title for the replacement (only used when body is provided; defaults to the old title)'),
     body: z.string().optional().describe('Replacement content. If omitted with no merge_from, the target is retracted.'),
     merge_from: z.array(z.string()).optional().describe('Additional memory ids to collapse into the survivor in a single atomic operation.'),
-    override_operator: z.boolean().optional().describe('Required to supersede operator-sourced records; logged into the persisted reason.'),
     source: z.string().optional().describe('Who is performing the supersede'),
     scope: z.string().optional().describe('Project scope for the surviving record, e.g. "kleidia"; "universal" marks it visible from every scope. Omit it and the survivor inherits the scope of the records it replaces (and stays unscoped when they disagree or carry none). State it explicitly when you are reclassifying the knowledge: this server may have been started with a working directory unrelated to that project, so nothing else here can infer the right answer.'),
   },
@@ -433,17 +435,18 @@ server.tool(
 
 server.tool(
   'memspec_verify',
-  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock to the type default — or to check_by if you pass one explicitly (pass "never" to pin an identity/event-shaped fact so it never comes up for review again).',
+  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock to the type default — or to check_by if you pass one explicitly (pass "never" to pin an identity/event-shaped fact so it never comes up for review again). Pass reanchor=true when you have checked that the claim still holds against the CHANGED code: each changed anchor is re-baselined to the file\'s current blob (previous shas are kept in ext.anchor_history), evidence text stating what you checked is required, and missing files or unavailable repos still return needs_review.',
   {
     id: z.string().describe('Memory ID to verify'),
     evidence: z.string().optional().describe('What you checked to confirm this is still true — required when the memory has no code anchors'),
     evidence_file: z.string().optional().describe('A local file path or http(s) URL attached as committed evidence of the check (same copy path as remember; files copied under <store>/evidence/, URLs recorded as pointers). Satisfies the anchorless-witness requirement on its own.'),
     source: z.string().optional().describe('Who is verifying'),
     check_by: z.string().optional().describe('ISO 8601 timestamp or "never" — set check_by explicitly on this clean verification instead of resetting to the type default'),
+    reanchor: z.boolean().optional().describe('You assert the claim still holds against the changed code: re-baseline each changed anchor to the current file blob (previous shas recorded in ext.anchor_history). Requires evidence. Without it, a drifted anchor returns needs_review and nothing changes.'),
   },
-  async ({ id, evidence, evidence_file, source, check_by }) => {
+  async ({ id, evidence, evidence_file, source, check_by, reanchor }) => {
     try {
-      const result = runVerify(id, { cwd: defaultCwd, evidence, evidenceFile: evidence_file, source, checkBy: check_by });
+      const result = runVerify(id, { cwd: defaultCwd, evidence, evidenceFile: evidence_file, source, checkBy: check_by, reanchor });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
@@ -452,6 +455,7 @@ server.tool(
           last_verified: result.last_verified,
           verified_with: result.verified_with,
           anchors: result.anchors,
+          ...(result.reanchored ? { reanchored: result.reanchored } : {}),
         },
       };
     } catch (err) {

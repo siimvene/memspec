@@ -5,7 +5,7 @@ import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { effectiveSourceKind } from '../lib/source.js';
-import { DEFAULT_DECAY_DAYS, type EvidenceEntry, type VerifiedWith } from '../lib/types.js';
+import { DEFAULT_DECAY_DAYS, type CodeAnchor, type EvidenceEntry, type VerifiedWith } from '../lib/types.js';
 
 export interface VerifyOptions {
   cwd?: string;
@@ -21,6 +21,23 @@ export interface VerifyOptions {
    * mutated on that path).
    */
   checkBy?: string;
+  /**
+   * The caller asserts the claim still holds against the CHANGED code: each
+   * anchor whose file changed is re-baselined to the current blob instead of
+   * returning needs_review, and the previous shas are appended to
+   * `ext.anchor_history`. Requires evidence (what was checked). Missing files
+   * and unavailable repos still return needs_review: there is no current blob
+   * to baseline to.
+   */
+  reanchor?: boolean;
+}
+
+/** One anchor re-baselined by `verify --reanchor`. */
+export interface ReanchoredAnchor {
+  file: string;
+  repo?: string;
+  previous_sha: string;
+  sha: string;
 }
 
 export interface VerifyResult {
@@ -29,6 +46,8 @@ export interface VerifyResult {
   last_verified: string | null;
   verified_with: VerifiedWith;
   anchors: AnchorStatus[];
+  /** Anchors re-baselined by `reanchor`; absent when none were. */
+  reanchored?: ReanchoredAnchor[];
   message: string;
 }
 
@@ -87,6 +106,18 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   });
   const unavailable = statuses.filter((a) => a.status === 'repo_unavailable');
   const drifted = statuses.filter((a) => a.status === 'changed' || a.status === 'missing');
+  // --reanchor: a changed anchor with a current blob can be re-baselined on
+  // the caller's word; a missing one cannot (nothing to baseline to).
+  const reanchorable = options.reanchor
+    ? drifted.filter((a) => a.status === 'changed' && a.currentSha !== null)
+    : [];
+  const blocking = drifted.filter((a) => !reanchorable.includes(a));
+  if (reanchorable.length > 0 && !options.evidence?.trim() && !options.evidenceFile) {
+    throw new Error(
+      `verify --reanchor would re-baseline ${reanchorable.length} changed anchor(s) of ${id} (${reanchorable.map((a) => a.file).join(', ')}): ` +
+        'state what you checked against the changed code with --evidence "...", or supersede the memory if it is now wrong.',
+    );
+  }
 
   // verify NEVER executes probes. A stored probe.cmd is untrusted content
   // (records sync via git and arrive through MCP writes); shelling it out on
@@ -95,7 +126,7 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   // entry point, gated by the machine-local trustfile (src/lib/probe.ts).
   // Here a probe only counts as a witness the caller must exercise separately.
 
-  if (drifted.length > 0 || unavailable.length > 0) {
+  if (blocking.length > 0 || unavailable.length > 0) {
     const anchorFailures = drifted.length + unavailable.length;
     const lines = [`${id} NEEDS REVIEW — ${anchorFailures} of ${statuses.length} anchored file(s) could not be verified:`];
     for (const a of unavailable) {
@@ -109,8 +140,11 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
       lines.push(
         'Review the changed files, then either:',
         `  memspec supersede ${id} --reason "..." --body "..."   # if the memory is now wrong`,
-        `  memspec anchor ${id} ${drifted.map((a) => a.file).join(' ')}   # if still true, re-baseline the anchors`,
+        `  memspec verify ${id} --reanchor --evidence "..."   # if still true, re-baseline changed anchors (history kept)`,
       );
+      if (options.reanchor) {
+        lines.push('--reanchor re-baselines changed files only; a missing file or an unavailable repo still needs review.');
+      }
     }
     if (unavailable.length > 0) {
       lines.push(
@@ -152,6 +186,33 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   if (options.evidence) lastVerification.evidence = options.evidence;
   ext.last_verification = lastVerification;
 
+  // --reanchor: move each re-baselined anchor to its current blob and keep
+  // the old sha in ext.anchor_history (who, when, what was checked), so a
+  // re-baseline is an auditable event rather than a silent overwrite.
+  // `statuses` is index-aligned with `anchors` (checkAnchors maps in order).
+  let updatedAnchors: CodeAnchor[] | undefined;
+  const reanchored: ReanchoredAnchor[] = [];
+  if (reanchorable.length > 0) {
+    updatedAnchors = anchors.map((anchor, i) => {
+      const status = statuses[i];
+      if (!reanchorable.includes(status) || status.currentSha === null) return anchor;
+      reanchored.push({
+        file: anchor.file,
+        ...(anchor.repo ? { repo: anchor.repo } : {}),
+        previous_sha: anchor.sha,
+        sha: status.currentSha,
+      });
+      return { ...anchor, sha: status.currentSha };
+    });
+    const entry: Record<string, unknown> = { at: now, anchors: reanchored };
+    if (options.source) entry.source = options.source;
+    if (options.evidence) entry.evidence = options.evidence;
+    const history = Array.isArray(ext.anchor_history) ? [...(ext.anchor_history as unknown[])] : [];
+    ext.anchor_history = [...history, entry];
+    // v0.3 stores anchors at the top level; ext.code_anchors is dropped on touch (as `anchor` does).
+    delete ext.code_anchors;
+  }
+
   // Witness class: anchors win, then operator-stated evidence, else generic
   // evidence. `probe` as a witness class is written only by `memspec probe`
   // itself — the entry point that actually executed the command.
@@ -178,6 +239,7 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     // A successful verify re-witnesses the claim: the stale flag is resolved.
     stale: undefined,
     evidence,
+    ...(updatedAnchors ? { anchors: updatedAnchors } : {}),
     ext,
   });
 
@@ -187,11 +249,15 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   // default branch is NOT unchanged in this checkout, and `reconcile` will list
   // it, so the note must not read as a clean working tree.
   const refOnly = statuses.filter((a) => a.status === 'unchanged' && a.compared_to !== undefined && a.compared_to !== 'worktree');
-  const anchorNote = anchors.length > 0
+  let anchorNote = anchors.length > 0
     ? refOnly.length > 0
       ? `${anchors.length} anchor(s) hold; ${refOnly.length} matched ${refOnly[0].compared_to} only (this checkout's copy differs): ${refOnly.map((a) => a.file).join(', ')}`
       : `${anchors.length} anchor(s) unchanged`
     : 'no code anchors — verification asserted by caller';
+  if (reanchored.length > 0) {
+    anchorNote = `${anchors.length} anchor(s) hold, ${reanchored.length} re-anchored on the caller's word: ` +
+      reanchored.map((a) => `${a.file} ${a.previous_sha.substring(0, 12)} -> ${a.sha.substring(0, 12)}`).join(', ');
+  }
   const probeNote = probe ? `; probe present, not exercised (memspec probe ${id})` : '';
 
   return {
@@ -200,6 +266,7 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     last_verified: now,
     verified_with: verifiedWith,
     anchors: statuses,
+    ...(reanchored.length > 0 ? { reanchored } : {}),
     message: `Verified ${id} (${anchorNote}, verified_with: ${verifiedWith}, next check: ${checkBy === 'never' ? 'never' : checkBy.substring(0, 10)}${probeNote})`,
   };
 }

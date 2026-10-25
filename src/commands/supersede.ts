@@ -24,7 +24,17 @@ export interface SupersedeOptions {
    * replacement.
    */
   mergeFrom?: string[];
+  /** Required to supersede an operator-sourced record. Honoured only on the CLI channel. */
   overrideOperator?: boolean;
+  /**
+   * Which surface invoked this. Write authority over operator memory derives
+   * from the channel, never from a caller flag: on `mcp` every branch
+   * (replace, retract, merge_from, and a merge INTO an operator survivor)
+   * refuses operator-sourced records whatever `overrideOperator` says, so an
+   * agent cannot self-authorize. The MCP tool does not expose the override.
+   * Same rule as `unrelate`.
+   */
+  channel?: 'cli' | 'mcp';
   source?: string;
   /**
    * Scope for the survivor. Overrides inheritance entirely, and is the answer
@@ -56,9 +66,21 @@ function decayDaysFor(type: MemoryType | undefined, root: string): number {
   return getDecayDays(loadConfig(root), type);
 }
 
-function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason: string): string {
+/** The refusal for operator memory reached over MCP: names the terminal command a human runs instead. */
+function operatorOverMcpError(item: MemoryItem): Error {
+  return new Error(
+    `"${item.id}" is operator-sourced (source: ${item.source}). ` +
+      'Superseding operator memory is not available over MCP; a human runs ' +
+      `\`memspec supersede ${item.id} --override-operator --reason "..."\` from a terminal (add --body for a replacement, --merge-from for a merge).`,
+  );
+}
+
+function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason: string, channel?: 'cli' | 'mcp'): string {
   if (item.state !== 'active') {
     throw new Error(`Item "${item.id}" is ${item.state}, not active`);
+  }
+  if (effectiveSourceKind(item) === 'operator' && channel === 'mcp') {
+    throw operatorOverMcpError(item);
   }
   if (effectiveSourceKind(item) === 'operator' && !overrideOperator) {
     throw new Error(
@@ -233,7 +255,7 @@ function writeCrossLayerReplacement(
         `supersede ${existing.id} instead`,
     );
   }
-  const reason = assertSupersedable(target, options.overrideOperator ?? false, options.reason);
+  const reason = assertSupersedable(target, options.overrideOperator ?? false, options.reason, options.channel);
 
   // Scope is validated against the store the record is written to.
   const explicitScope = options.scope !== undefined
@@ -333,8 +355,8 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   // Replacement branch: mint a fresh record. Everything in mergeFrom plus the
   // target collapse into the new survivor.
   if (options.body !== undefined && options.body !== null) {
-    const targetReason = assertSupersedable(target, overrideOperator, baseReason);
-    const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason));
+    const targetReason = assertSupersedable(target, overrideOperator, baseReason, options.channel);
+    const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason, options.channel));
 
     const newId = `ms_${ulid()}`;
     const now = new Date().toISOString();
@@ -411,8 +433,13 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     if (target.state !== 'active') {
       throw new Error(`Survivor "${targetId}" is ${target.state}, not active`);
     }
+    // The survivor is rewritten too (supersedes, supersede_reason, scope), so
+    // over MCP an operator survivor is as read-only as an operator target.
+    if (options.channel === 'mcp' && effectiveSourceKind(target) === 'operator') {
+      throw operatorOverMcpError(target);
+    }
 
-    const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason));
+    const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason, options.channel));
 
     const collapsedIds: string[] = [];
     for (let i = 0; i < mergeItems.length; i++) {
@@ -458,7 +485,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   }
 
   // Retraction branch: no body, no merge. Target moves to superseded with reason.
-  const targetReason = assertSupersedable(target, overrideOperator, baseReason);
+  const targetReason = assertSupersedable(target, overrideOperator, baseReason, options.channel);
   target.state = 'superseded';
   target.supersede_reason = targetReason;
   store.moveToArchive(target, 'superseded');

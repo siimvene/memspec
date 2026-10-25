@@ -8,7 +8,9 @@ import {
   rankByLexicalCloseness,
 } from '../lib/inference.js';
 import { effectiveSourceKind, inferSourceKind } from '../lib/source.js';
-import { assertKnownScope, assertScopeRequired, resolveScopeForCwd } from '../lib/scope.js';
+import { assertKnownScope, assertScopeRequired, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
+import { CLAIM_SIMILARITY_THRESHOLD, claimTokens, tokenWeight, weightedSimilarity } from '../lib/similarity.js';
+import { loadClaimIndex, type ClaimIndexEntry } from '../lib/claim-index.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
 import { addAnswers, loadQuestion } from '../lib/questions.js';
@@ -74,6 +76,18 @@ export interface RememberOptions {
    * record as visible everywhere; omit both and no `scope` field is written.
    */
   scope?: string;
+  /**
+   * Write even though the claim near-matches a value that was superseded or
+   * retracted (the tombstone refusal). Honoured only on the CLI channel; the
+   * override is logged into the new record's `ext.rejected_value_overrides`.
+   */
+  allowRejected?: boolean;
+  /**
+   * Which surface invoked this. On `mcp` a tombstone refusal is final:
+   * `allowRejected` is ignored, so an agent cannot re-assert a value a
+   * supersede rejected by flipping a flag. Same rule as `unrelate`.
+   */
+  channel?: 'cli' | 'mcp';
 }
 
 export interface DuplicateMatch {
@@ -144,6 +158,39 @@ const NEIGHBOUR_CANDIDATE_LIMIT = 5;
  */
 function isHighBand(existingTitle: string, incomingTitle: string): boolean {
   return normaliseTitle(existingTitle) === normaliseTitle(incomingTitle);
+}
+
+/** An archived record whose value the incoming claim re-asserts (tombstone hit). */
+interface RejectedValueMatch {
+  id: string;
+  reason: string;
+  /** Direct `superseded_by`; absent for a retraction. */
+  supersededBy?: string;
+  /** The live end of the `superseded_by` chain, when one is still active. */
+  survivor?: string;
+  similarity: number;
+}
+
+/** Follow `superseded_by` from an archived record to the active record that now holds its place, if any. */
+function activeSurvivor(item: ClaimIndexEntry, byId: Map<string, ClaimIndexEntry>): ClaimIndexEntry | undefined {
+  const seen = new Set<string>();
+  let cur: ClaimIndexEntry | undefined = item;
+  while (cur && cur.state !== 'active' && cur.superseded_by && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    cur = byId.get(cur.superseded_by);
+  }
+  return cur && cur.state === 'active' ? cur : undefined;
+}
+
+function describeRejection(m: RejectedValueMatch): string {
+  const fate = m.supersededBy === undefined
+    ? 'retracted with no replacement'
+    : m.survivor === undefined
+      ? `superseded by ${m.supersededBy} (no longer active)`
+      : m.survivor === m.supersededBy
+        ? `superseded by ${m.supersededBy}`
+        : `superseded by ${m.supersededBy} (now ${m.survivor})`;
+  return `this value was rejected in ${m.id} (reason: ${m.reason}), ${fate}`;
 }
 
 function assertMemoryType(input: string): MemoryType {
@@ -278,6 +325,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   // from inference.ts to decide refusal vs. auto-attach.
   let duplicates: DuplicateMatch[] | undefined;
   let suggestedConflicts: SuggestedConflict[] | undefined;
+  const viaMcp = options.channel === 'mcp';
+  // MCP can never override a tombstone; the flag is honoured only on the CLI.
+  const allowRejected = !viaMcp && (options.allowRejected ?? false);
+  const rejectedValues: RejectedValueMatch[] = [];
   try {
     // Scoped so a same-titled record in another project isn't treated as a
     // duplicate of this one. Unscoped and universal records stay visible.
@@ -310,6 +361,9 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // Drop caller-declared targets before choosing the closest neighbour, so
     // the inference is skipped for them but can still fire on a genuinely
     // unrelated one. See fact ms_01KZJXHBZT6YXY9P500JFCE4SX.
+    // The same set is exempt from the near-duplicate refusal below: a refines
+    // child restates its parent by design, and distinct_from is how a caller
+    // records that a lexically close record is a different claim.
     const callerDeclared = new Set<string>([
       ...(options.refines ?? []),
       ...(options.supports ?? []),
@@ -321,6 +375,70 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       // v0.13 — "compared, independent" is a classification too.
       ...(options.distinctFrom ?? []),
     ]);
+
+    // Near-duplicate band — the same claim under a different title. Title +
+    // body similarity (lib/similarity.ts) against EVERY same-type record
+    // visible from this scope, not just the BM25 window above: a paraphrase
+    // ranks poorly on a title query by construction. Records come from the
+    // mtime-keyed claim index (lib/claim-index.ts), not a second full parse.
+    const all = loadClaimIndex(store);
+    const incoming = claimTokens(title, options.body ?? '');
+    const incomingWeight = tokenWeight(incoming);
+    const comparable = all.filter((item) =>
+      item.kind === 'claim' && item.type === type && isVisibleFromScope(item.scope, scope),
+    );
+    const similarityTo = (item: ClaimIndexEntry): number =>
+      weightedSimilarity(incoming, incomingWeight, item.tokens, item.weight, CLAIM_SIMILARITY_THRESHOLD);
+    const nearMatches = comparable
+      .filter((item) => item.state === 'active' && !callerDeclared.has(item.id))
+      .map((item) => ({ item, similarity: similarityTo(item) }))
+      .filter((m) => m.similarity >= CLAIM_SIMILARITY_THRESHOLD)
+      .sort((a, b) => b.similarity - a.similarity);
+    if (nearMatches.length > 0) {
+      const survivorList = nearMatches
+        .map((m) => `${m.item.id} "${m.item.title}" (similarity ${m.similarity.toFixed(2)})`)
+        .join(', ');
+      throw new Error(
+        `remember refuses near-duplicate: an active ${type} making the same claim already exists (${survivorList}). ` +
+          `Use \`memspec supersede\` to replace, merge, or retract it instead of writing a twin. ` +
+          `If you compared them and this is a different claim, declare it with distinct_from (--distinct-from <id>).`,
+      );
+    }
+
+    // Tombstone — a value that a supersede or retraction rejected must not
+    // come back through a fresh remember. Derived from the archive records
+    // themselves (the claim index only caches them by mtime). An archived record counts
+    // only while its live successor says something else: when the incoming
+    // claim also matches the survivor, the old value was rewritten rather
+    // than rejected (a merge, a wording fix), and the near-duplicate band
+    // above already pointed the caller at that survivor. Declared edges do
+    // not exempt an archived record: over MCP this refusal is final, and a
+    // distinct_from to the rejected id must not become the way around it.
+    const byId = new Map(all.map((item) => [item.id, item]));
+    for (const old of comparable) {
+      if (old.state !== 'superseded') continue;
+      const similarity = similarityTo(old);
+      if (similarity < CLAIM_SIMILARITY_THRESHOLD) continue;
+      const survivor = activeSurvivor(old, byId);
+      if (survivor && similarityTo(survivor) >= CLAIM_SIMILARITY_THRESHOLD) continue;
+      rejectedValues.push({
+        id: old.id,
+        reason: old.supersede_reason ?? '(no reason recorded)',
+        supersededBy: old.superseded_by,
+        survivor: survivor?.id,
+        similarity,
+      });
+    }
+    rejectedValues.sort((a, b) => b.similarity - a.similarity);
+    if (rejectedValues.length > 0 && !allowRejected) {
+      const detail = rejectedValues.map(describeRejection).join('; ');
+      throw new Error(
+        `remember refuses rejected value: ${detail}. ` +
+          (viaMcp
+            ? 'This refusal is final over MCP. If new evidence shows the rejection was wrong, supersede the record that replaced it, or have a human run `memspec remember ... --allow-rejected` at a terminal.'
+            : 'If new evidence shows the rejection was wrong, supersede the record that replaced it, or pass --allow-rejected to write it anyway (the override is logged into the new record).'),
+      );
+    }
 
     // Mid band — apply the lexical conflict-inference rule, but only SUGGEST
     // the matches. The rule is purely lexical (same type, one shared tag, two
@@ -568,6 +686,22 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     itemData.ext = { ...(itemData.ext ?? {}), edge_sources: edgeSources };
   }
 
+  // Tombstone override (CLI --allow-rejected): the record carries which
+  // rejected values it re-asserts, who overrode, and when.
+  if (rejectedValues.length > 0) {
+    itemData.ext = {
+      ...(itemData.ext ?? {}),
+      rejected_value_overrides: rejectedValues.map((m) => ({
+        id: m.id,
+        reason: m.reason,
+        ...(m.supersededBy ? { superseded_by: m.supersededBy } : {}),
+        similarity: Number(m.similarity.toFixed(2)),
+        overridden_at: created,
+        overridden_by: source,
+      })),
+    };
+  }
+
   // v0.13 — the relate rule for distinct_from, applied to every declared
   // target with the target's own edge lists in view (either record carrying
   // distinct_from next to another edge between the two is refused). For a
@@ -645,6 +779,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   }
   if (assertedConflicts) {
     lines.push(`Asserted conflicts_with: ${assertedConflicts.join(', ')}`);
+  }
+  if (rejectedValues.length > 0) {
+    lines.push(`⚠ --allow-rejected: written over ${rejectedValues.length} rejected value(s), logged in ext.rejected_value_overrides:`);
+    for (const m of rejectedValues) lines.push(`  ${describeRejection(m)}`);
   }
   if (suggestedConflicts && suggestedConflicts.length > 0) {
     lines.push(

@@ -117,6 +117,10 @@ export interface MemoryFrontmatter {
    *   than one the removed lexical auto-attach inferred; the drain script keeps asserted, drops the rest.
    * - ext.edge_removals: Array<{ type, to, removed_at, removed_by, reason }> — v0.10 audit log of edges
    *   dropped via `unrelate`, so a retraction is itself traceable.
+   * - ext.anchor_history: Array<{ at, source?, evidence?, anchors: Array<{ file, repo?, previous_sha, sha }> }> —
+   *   one entry per `verify --reanchor` that re-baselined changed anchors; the old shas are kept, never overwritten.
+   * - ext.rejected_value_overrides: Array<{ id, reason, superseded_by?, similarity, overridden_at, overridden_by }> —
+   *   written by `remember --allow-rejected` (CLI only): the archived records whose rejected value this record re-asserts.
    */
   ext?: Record<string, unknown>;
 }
