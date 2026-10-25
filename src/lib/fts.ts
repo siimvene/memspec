@@ -18,7 +18,6 @@ import type { MemoryItem } from './types.js';
 export interface FtsSearchOptions {
   limit?: number;
   types?: string[];
-  minConfidence?: number;
   /**
    * Active scope. When set, the candidate set is constrained inside SQL to
    * records that are unscoped, `universal`, or scoped to this name. This has
@@ -34,9 +33,18 @@ export interface FtsSearchOptions {
   };
 }
 
+/**
+ * How a hit matched the query. 1 = every query term (the AND pass, exact or
+ * prefix); 2 = only some terms (the OR top-up). Every rerank downstream
+ * (store scoring, layer fusion) sorts by tier first, so a partial match can
+ * fill a short result set but never outranks a full one.
+ */
+export type MatchTier = 1 | 2;
+
 export interface FtsScoredResult {
   id: string;
   bm25Score: number;
+  tier: MatchTier;
 }
 
 export class FtsIndex {
@@ -102,10 +110,12 @@ export class FtsIndex {
    * Open an on-disk FTS cache if it's still valid (cache mtime newer than every
    * source file mtime, schema matching this version). Stale caches are unlinked
    * or recreated and rebuilt. Returns a populated FtsIndex the caller can search
-   * against directly.
+   * against directly. `sources` is either the source file list, or the newest
+   * source mtime when the caller already stat-ed every file (the store's load
+   * pass does).
    */
-  static openOrBuild(cachePath: string, sourceFiles: string[], items: MemoryItem[]): FtsIndex {
-    if (existsSync(cachePath) && isCacheFresh(cachePath, sourceFiles)) {
+  static openOrBuild(cachePath: string, sources: string[] | number, items: MemoryItem[]): FtsIndex {
+    if (existsSync(cachePath) && isCacheFresh(cachePath, sources)) {
       const cached = new FtsIndex(cachePath);
       // `fresh` here means the constructor had to recreate the schema, i.e. the
       // file was written by an older version — the rows are gone with it.
@@ -148,10 +158,12 @@ export class FtsIndex {
   /**
    * Search using FTS5 with BM25 ranking.
    *
-   * Fallback chain: exact-AND → prefix-AND → exact-OR → prefix-OR.
-   * AND-first keeps precision when every term matches; the OR fallback keeps
-   * multi-term natural-language queries from returning zero results just
-   * because one term is absent (BM25 still ranks the best match first).
+   * Full-term pass: exact-AND, else prefix-AND (tier 1). When that leaves the
+   * page short of `limit`, it is topped up with partial matches: exact-OR,
+   * else prefix-OR, minus the rows already returned (tier 2). Topping up only
+   * on ZERO full-term rows used to drop the target of a natural query with
+   * one term the target lacks: AND returned one to three other records and
+   * the OR pass never ran. Tier-1 rows always come first.
    */
   search(query: string, options: FtsSearchOptions = {}): FtsScoredResult[] {
     const {
@@ -167,11 +179,14 @@ export class FtsIndex {
     if (results.length === 0) {
       results = this.runFtsQuery(terms, true, 'AND', types, scope, limit);
     }
-    if (results.length === 0 && terms.length > 1) {
-      results = this.runFtsQuery(terms, false, 'OR', types, scope, limit);
-      if (results.length === 0) {
-        results = this.runFtsQuery(terms, true, 'OR', types, scope, limit);
-      }
+    if (results.length < limit && terms.length > 1) {
+      const full = new Set(results.map((r) => r.id));
+      // Over-fetch by the full-term count: those rows match OR too and are dropped here.
+      const partialOf = (prefix: boolean) => this.runFtsQuery(terms, prefix, 'OR', types, scope, limit + full.size)
+        .filter((r) => !full.has(r.id));
+      let partial = partialOf(false);
+      if (partial.length === 0) partial = partialOf(true);
+      results = [...results, ...partial.slice(0, limit - results.length).map((r) => ({ ...r, tier: 2 as const }))];
     }
 
     return results;
@@ -221,7 +236,7 @@ export class FtsIndex {
 
     try {
       const rows = this.db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>;
-      return rows.map((r) => ({ id: r.id, bm25Score: r.rank }));
+      return rows.map((r) => ({ id: r.id, bm25Score: r.rank, tier: 1 }));
     } catch {
       // If FTS5 query syntax fails, return empty
       return [];
@@ -263,11 +278,53 @@ export function tokenizeLikeIndex(texts: string[]): string[][] {
   }
 }
 
+/**
+ * `tokenizeLikeIndex` for the coverage classifier, which only ever asks
+ * whether a QUERY token occurs in a hit: the query words come back as full
+ * ordered token lists, each text only as the set of query tokens it contains.
+ * Same tokenizer, same answers to `has(queryToken)`, but the hit bodies are
+ * never read back token by token — on long bodies that readback, not the
+ * indexing, was most of a query's coverage cost.
+ */
+export function queryTokenPresence(queryWords: string[], texts: string[]): { queryTokens: string[][]; present: Set<string>[] } {
+  const queryTokens: string[][] = queryWords.map(() => []);
+  const present: Set<string>[] = texts.map(() => new Set<string>());
+  if (queryWords.length === 0) return { queryTokens, present };
+  const db = new Database(':memory:');
+  try {
+    // Two tables, so reading the query's tokens never walks the texts' instances.
+    db.exec(`
+      CREATE VIRTUAL TABLE q USING fts5(text, tokenize = 'porter unicode61');
+      CREATE VIRTUAL TABLE q_vocab USING fts5vocab(q, 'instance');
+      CREATE VIRTUAL TABLE tok USING fts5(text, tokenize = 'porter unicode61');
+      CREATE VIRTUAL TABLE tok_vocab USING fts5vocab(tok, 'instance');
+    `);
+    const insertQuery = db.prepare('INSERT INTO q (rowid, text) VALUES (?, ?)');
+    const insertText = db.prepare('INSERT INTO tok (rowid, text) VALUES (?, ?)');
+    db.transaction(() => {
+      queryWords.forEach((text, i) => insertQuery.run(i + 1, text));
+      texts.forEach((text, i) => insertText.run(i + 1, text));
+    })();
+    const rows = db.prepare('SELECT doc, term FROM q_vocab ORDER BY doc, "offset"').all() as Array<{ doc: number; term: string }>;
+    for (const row of rows) queryTokens[row.doc - 1].push(row.term);
+    if (texts.length > 0) {
+      const docsWith = db.prepare('SELECT DISTINCT doc FROM tok_vocab WHERE term = ?');
+      for (const term of new Set(rows.map((r) => r.term))) {
+        for (const { doc } of docsWith.all(term) as Array<{ doc: number }>) present[doc - 1].add(term);
+      }
+    }
+    return { queryTokens, present };
+  } finally {
+    db.close();
+  }
+}
+
 /** Cache is fresh iff every source file mtime <= cache mtime. */
-function isCacheFresh(cachePath: string, sourceFiles: string[]): boolean {
+function isCacheFresh(cachePath: string, sources: string[] | number): boolean {
   try {
     const cacheMtime = statSync(cachePath).mtimeMs;
-    for (const file of sourceFiles) {
+    if (typeof sources === 'number') return sources <= cacheMtime;
+    for (const file of sources) {
       if (!existsSync(file)) continue;
       const mtime = statSync(file).mtimeMs;
       if (mtime > cacheMtime) return false;

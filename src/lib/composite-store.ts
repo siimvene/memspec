@@ -7,6 +7,7 @@ import { findPointer, POINTER_FILENAME } from './registry.js';
 import { getCodeAnchors, projectRootForStore } from './anchors.js';
 import { computeDrift, type DriftInfo } from './drift.js';
 import { checkoutStateOf } from './git-state.js';
+import type { MatchTier } from './fts.js';
 import type { MemoryItem, MemoryFrontmatter } from './types.js';
 
 /**
@@ -610,7 +611,10 @@ export class CompositeStore {
    */
   search(query: string, options: StoreSearchOptions = {}, meta?: SearchRelevanceMeta): MemoryItem[] {
     const limit = options.limit ?? 10;
-    if (meta) meta.topBm25 = null;
+    if (meta) {
+      meta.topBm25 = null;
+      meta.tiers = new Map();
+    }
     const active = this.layers.filter((layer) => layer.store.exists);
 
     if (active.length === 0) return [];
@@ -620,7 +624,7 @@ export class CompositeStore {
     // `forCwd` promises byte-identical behaviour to a bare MemspecStore here.
     // The BM25 meta is only meaningful for a single corpus, so it is forwarded
     // here and left null across a rank-fused multi-layer query (coverage then
-    // falls back to the body-match signal).
+    // falls back to the body-match signal). Match tiers are fused below.
     if (active.length === 1) {
       return active[0].store.search(query, options, meta).map((item) => this.stampLayer(item, active[0]));
     }
@@ -636,6 +640,8 @@ export class CompositeStore {
       priority: number;
       bestRank: number;
       score: number;
+      /** Best match tier anywhere (1 = every query term); sorts before the RRF score. */
+      tier: MatchTier;
     }
     const fused = new Map<string, FusedEntry>();
 
@@ -643,8 +649,9 @@ export class CompositeStore {
     // is the authoritative copy.
     for (const layer of active) {
       let results: MemoryItem[];
+      const layerMeta: SearchRelevanceMeta = { topBm25: null };
       try {
-        results = layer.store.search(query, { ...options, limit: perLayerLimit });
+        results = layer.store.search(query, { ...options, limit: perLayerLimit }, layerMeta);
       } catch {
         // A broken layer (corrupt index, unreadable file) must not fail the
         // whole query — the remaining layers still have answers.
@@ -655,8 +662,10 @@ export class CompositeStore {
         if (!layer.writable && pending.has(item.id)) return;
         const rank = index + 1;
         const contribution = 1 / (RRF_K + rank);
+        const tier = layerMeta.tiers?.get(item.id) ?? 1;
         const existing = fused.get(item.id);
         if (existing) {
+          existing.tier = Math.min(existing.tier, tier) as MatchTier;
           // `max`, not `sum`. Duplication across layers is a migration
           // artefact, not corroboration, so a record is scored on its best
           // showing anywhere rather than boosted for existing twice. Without
@@ -670,20 +679,25 @@ export class CompositeStore {
             priority: layer.priority,
             bestRank: rank,
             score: contribution,
+            tier,
           });
         }
       });
     }
 
-    return Array.from(fused.values())
+    // Tier first: a full-term match in one layer outranks a partial-term
+    // top-up row in another, whatever their in-layer ranks.
+    const ranked = Array.from(fused.values())
       .sort((a, b) => {
+        if (a.tier !== b.tier) return a.tier - b.tier;
         if (b.score !== a.score) return b.score - a.score;
         if (b.priority !== a.priority) return b.priority - a.priority;
         if (a.bestRank !== b.bestRank) return a.bestRank - b.bestRank;
         return a.item.id < b.item.id ? -1 : a.item.id > b.item.id ? 1 : 0;
       })
-      .slice(0, limit)
-      .map((entry) => entry.item);
+      .slice(0, limit);
+    if (meta) meta.tiers = new Map(ranked.map((entry) => [entry.item.id, entry.tier]));
+    return ranked.map((entry) => entry.item);
   }
 
   /**

@@ -90,7 +90,7 @@ test('FTS5: multi-word query with absent terms still finds the best match', asyn
   assert.equal(parsed[0].title, 'Kleidia ICP');
 });
 
-test('FTS5: OR fallback does not dilute exact AND matches', async () => {
+test('FTS5: OR top-up never outranks exact AND matches', async () => {
   const target = await makeTempProject();
   await runCli(['init', '--cwd', target]);
 
@@ -99,11 +99,12 @@ test('FTS5: OR fallback does not dilute exact AND matches', async () => {
   await runCli(['remember','fact', 'JWT logging', '--cwd', target,
     '--body', 'Log token ids only', '--source', 'test']);
 
-  // Both terms present in one item: AND must win, the partial match stays out
+  // Both terms present in one item: the full match ranks first; the partial
+  // match only tops up the short page below it (the OR pass runs
+  // whenever AND leaves the page short, not only when AND finds nothing).
   const result = await runCli(['search', 'JWT auth', '--cwd', target, '--json']);
   const parsed = JSON.parse(result.stdout).results;
-  assert.equal(parsed.length, 1, 'AND should be tried before falling back to OR');
-  assert.equal(parsed[0].title, 'JWT auth tokens');
+  assert.deepEqual(parsed.map((r: { title: string }) => r.title), ['JWT auth tokens', 'JWT logging']);
 });
 
 test('FTS5: type filtering works with FTS backend', async () => {
