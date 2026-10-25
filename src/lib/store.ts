@@ -117,11 +117,6 @@ export interface StoreSearchOptions {
   limit?: number;
   types?: MemoryType[];
   /**
-   * @deprecated Ignored. Numeric confidence was retired in v0.3 and nothing
-   * reads this; it stays optional only so existing callers still type-check.
-   */
-  minConfidence?: number;
-  /**
    * Active scope. Records are returned when their own `scope` is absent,
    * `universal`, or equal to this value. Undefined disables scope filtering
    * entirely (the state every store without a `scopes:` config is in).
