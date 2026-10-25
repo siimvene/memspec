@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -200,6 +201,53 @@ export function findRepoRoot(startDir: string): string | null {
   }
 }
 
+/** Variables that would point git at a repository other than the cwd's (mirrors git-state.ts). */
+const REPO_LOCATING_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_NAMESPACE',
+];
+
+/**
+ * The checkout that names `repoRoot`'s repository. A linked worktree
+ * (`git worktree add`, `.git` is a FILE) maps to its main checkout, found via
+ * `git rev-parse --git-common-dir` (`<main>/.git`); anything else maps to
+ * itself. Anchors record a repository by directory name, and a worktree's
+ * folder name (`~/git/<repo>.worktrees/<branch>`) names a directory that is
+ * deleted with the worktree: every anchor written from it read
+ * `repo_unavailable` afterwards. Same tree, same paths, so only the name
+ * changes. Submodules and bare-repo worktrees (common dir not named `.git`)
+ * keep their own root, as does any git failure: never throws.
+ */
+export function repoIdentityRoot(repoRoot: string): string {
+  try {
+    if (statSync(join(repoRoot, '.git')).isDirectory()) return repoRoot;
+  } catch {
+    return repoRoot;
+  }
+  try {
+    const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
+    for (const name of REPO_LOCATING_VARS) delete env[name];
+    const out = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: repoRoot,
+      env,
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const common = resolve(repoRoot, out);
+    if (basename(common) !== '.git') return repoRoot;
+    const main = dirname(common);
+    return statSync(main).isDirectory() ? main : repoRoot;
+  } catch {
+    return repoRoot;
+  }
+}
+
 /**
  * Resolve an anchor to the git repo that actually contains it, plus the file's
  * path relative to THAT repo root. For a home-rooted store `projectRoot` is the
@@ -374,6 +422,8 @@ function toPosix(p: string): string {
  * recorded (another machine may resolve it), but the caller is told exactly
  * which directory to add to `anchors.repo_search_paths`; otherwise the write
  * says "Anchored" and every later verify says `repo_unavailable`.
+ * A linked worktree is recorded under its main checkout's name
+ * (`repoIdentityRoot`), so the anchor outlives the worktree.
  */
 function crossRepoAnchor(
   projectRoot: string,
@@ -386,17 +436,18 @@ function crossRepoAnchor(
   if (relToRepo === '' || relToRepo.startsWith('..') || !anchorWithinBase(repoRoot, relToRepo)) {
     return { error: `Skipped ${abs}: resolves outside its git repository (${repoRoot})` };
   }
-  const repo = basename(repoRoot);
+  const identityRoot = repoIdentityRoot(repoRoot);
+  const repo = basename(identityRoot);
   const anchor: CodeAnchor = { file: toPosix(relToRepo), sha, repo };
   const resolved = resolveRepoRoot(projectRoot, repo, searchPaths);
-  if (resolved && canonicalize(resolved) === canonicalize(repoRoot)) return { anchor };
+  if (resolved && canonicalize(resolved) === canonicalize(identityRoot)) return { anchor };
   const tried = repoCandidateBases(projectRoot, searchPaths).map((b) => join(b, repo));
   const hint = resolved
     ? `resolves to a different checkout (${resolved})`
     : `is not found under ${tried.join(', ')}`;
   return {
     anchor,
-    warning: `Anchor ${anchor.file} recorded against repo ${repo}, but from this store that repo ${hint}; add ${dirname(repoRoot)} to anchors.repo_search_paths in config.yaml or verify will report repo_unavailable`,
+    warning: `Anchor ${anchor.file} recorded against repo ${repo}, but from this store that repo ${hint}; add ${dirname(identityRoot)} to anchors.repo_search_paths in config.yaml or verify will report repo_unavailable`,
   };
 }
 
@@ -512,8 +563,11 @@ export function resolveAnchorForWrite(
     rootsTried.push(...repoCandidateBases(projectRoot, searchPaths).map((b) => resolve(b, rq.repo)));
     const repoRoot = resolveRepoRoot(projectRoot, rq.repo, searchPaths);
     if (repoRoot && anchorWithinBase(repoRoot, rq.sub)) {
-      const sha = blobSha(resolve(repoRoot, rq.sub));
-      if (sha !== null) return { anchor: { file: toPosix(rq.sub), sha, repo: basename(repoRoot) } };
+      const abs = resolve(repoRoot, rq.sub);
+      const sha = blobSha(abs);
+      // Through crossRepoAnchor so a sibling that is a linked worktree is
+      // recorded under its main checkout's name, like every other branch.
+      if (sha !== null) return crossRepoAnchor(projectRoot, repoRoot, abs, sha, searchPaths);
     }
   }
 
