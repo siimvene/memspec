@@ -162,6 +162,8 @@ export function claimSimilarity(
  *
  * An identifier is (raw text, before tokenizing):
  *   - a backticked span or a quoted literal ('...', "...", curly quotes);
+ *     a multi-word span also names each identifier inside it (`Postgres
+ *     16.2` names 16.2), and a code-marked single capital is a label (`B`);
  *   - a code symbol: camelCase / PascalCase (a lower-or-digit to upper
  *     transition: useState, HttpClient, mTLS), snake_case / UPPER_CASE (an
  *     underscore), a dotted or path-like token (session.ttl, src/a/b.ts);
@@ -170,7 +172,8 @@ export function claimSimilarity(
  *   - a single-capital label ("Option B"), as in `isIdentifierToken`, except
  *     a sentence-initial "A" and the pronoun "I".
  * Not identifiers: prose slash pairs ("and/or") and provenance pointers (an
- * ISO date or date range, a hex hash of 7+ characters, a memspec id or ULID):
+ * ISO date, timestamp (Z or numeric offset) or date range, a hex hash of 7+
+ * characters, a memspec id or ULID):
  * a later session restating a fact carries a new date or commit, which does
  * not make it a different claim.
  *
@@ -183,13 +186,16 @@ export function claimSimilarity(
  *     inside it;
  *   - loose (`LOOSE_PREFIX`: a plain word or phrase in backticks or quotes,
  *     a number with no `_ . /`): also matched when each of its words
- *     stands alone, same case, in the other claim (`main` vs main). A word
- *     inside a path or a symbol does not count: `css` is not mentioned by
- *     'hono/css', `SELECTORS` not by PSEUDO_GLOBAL_SELECTOR.
+ *     stands alone, same case (numbers in any case: S3 / `s3`), in the
+ *     other claim (`main` vs main), or, in a phrase, names an identifier the
+ *     other claim mentions. A word inside a path or a symbol does not count:
+ *     `css` is not mentioned by 'hono/css', `SELECTORS` not by
+ *     PSEUDO_GLOBAL_SELECTOR.
  *
  * Wording: the similarity tokens of what is left once identifiers, labels and
  * provenance pointers are taken out ("is set to", "takes parameters",
- * "exports ... as a runtime value").
+ * "exports ... as a runtime value"). Plain words either claim puts in
+ * backticks or quotes are left out of both sides' wording when comparing.
  */
 
 /** Prefix of a loose identifier (see above); never produced by the tokenizer. */
@@ -203,18 +209,49 @@ const MIN_WORDING_WEIGHT = 3;
 
 const FILE_EXT = /\.(?:[cm]?[jt]sx?|json5?|ya?ml|toml|md|mdx|py|go|rs|java|kt|rb|php|cs|swift|sh|sql|css|scss|html?|txt|lock|cfg|ini|conf|xml|csv|env)$/;
 const CODE_SYMBOL = /[\p{Ll}\p{N}]\p{Lu}|_|[\p{L}\p{N}][./][\p{L}\p{N}]/u;
+/*
+ * Every regex below runs on caller text (MCP bodies) under the store lock and
+ * on every claim-index rebuild, so none may backtrack superlinearly: anchored
+ * or single-character classes only, and the trailing trims are loops (an
+ * end-anchored `[...]+$` retries from every position of a punctuation run,
+ * O(n^2) on a whitespace-free run that ends in a letter).
+ */
 const LEAD_PUNCT = /^[([{<"'`“‘^~=>!*]+/u;
-const TRAIL_PUNCT = /[)\]}>"'`”’.,;:!?*…]+$/u;
+const TRAIL_PUNCT = new Set([...')]}>"\'`”’.,;:!?*…']);
+const SENTENCE_CLOSERS = new Set([...'"\')]']);
+const SENTENCE_ENDS = new Set([...'.!?:']);
 const BACKTICK_SPAN = /`([^`\n]+)`/g;
 const QUOTED_SPAN = /(?<![\p{L}\p{N}])(?:"([^"\n]{1,120})"|'([^'\n]{1,120})'|“([^”\n]{1,120})”|‘([^’\n]{1,120})’)(?![\p{L}\p{N}])/gu;
 const STANDALONE = /^[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*$/u;
 const NO_SIGNAL_DOTTED = new Set(['e.g', 'i.e', 'etc', 'vs']);
 const PROSE_SLASH = /^\p{L}+\/\p{L}+$/u;
-/** ISO date (timestamp, or range: 2026-09-21/22), hex hash of 7+ characters, memspec id or bare ULID: where a claim came from, not what it is about. */
-const PROVENANCE = /^(?:\d{4}-\d{2}-\d{2}(?:t[\d:.]+z?)?(?:(?:\/|\.\.|–)\d{1,4}(?:-\d{2}){0,2})?|(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}|ms_[0-9a-z]{20,}|(?=[0-9a-z]*\d)[0-9a-hjkmnp-tv-z]{26})$/;
+const SINGLE_CAPITAL = /^\p{Lu}$/u;
+/**
+ * ISO date (timestamp in Z or with a numeric offset, or range: 2026-09-21/22),
+ * hex hash of 7+ characters, memspec id or bare ULID: where a claim came from,
+ * not what it is about.
+ */
+const PROVENANCE = /^(?:\d{4}-\d{2}-\d{2}(?:t[\d:.]+(?:z|[+-]\d{2}(?::?\d{2})?)?)?(?:(?:\/|\.\.|–)\d{1,4}(?:-\d{2}){0,2})?|(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}|ms_[0-9a-z]{20,}|(?=[0-9a-z]*\d)[0-9a-hjkmnp-tv-z]{26})$/;
 
-const strip = (chunk: string): string => chunk.replace(LEAD_PUNCT, '').replace(TRAIL_PUNCT, '');
+/** `s` without trailing characters of `set` (a loop: linear on any input). */
+function trimEnd(s: string, set: ReadonlySet<string>): string {
+  let end = s.length;
+  while (end > 0 && set.has(s[end - 1])) end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
+const strip = (chunk: string): string => trimEnd(chunk.replace(LEAD_PUNCT, ''), TRAIL_PUNCT);
 const alnumRuns = (s: string): string[] => s.match(WORD) ?? [];
+/** Whether a chunk ends a sentence ("set.", "value:", 'it."'). */
+const endsSentence = (chunk: string): boolean => {
+  const t = trimEnd(chunk, SENTENCE_CLOSERS);
+  return t.length > 0 && SENTENCE_ENDS.has(t[t.length - 1]);
+};
+/**
+ * Key of a standalone word for loose mentions: numbers are lowercased with a
+ * leading "v" dropped, as `chunkIdentifier` stores them (S3 / `s3`, v2 / 2).
+ */
+const wordKey = (w: string): string => (HAS_DIGIT.test(w) ? w.toLowerCase().replace(/^v(?=\d)/, '') : w);
 
 /**
  * Classify one whitespace-free chunk: an identifier, provenance (not one, not
@@ -224,6 +261,8 @@ const alnumRuns = (s: string): string[] => s.match(WORD) ?? [];
 function chunkIdentifier(chunk: string, markup: boolean): string | 'provenance' | null {
   const c = strip(chunk);
   if (!c || !/[\p{L}\p{N}]/u.test(c)) return null;
+  // A code-marked single capital is the label it names in prose (`B` is Option B).
+  if (markup && SINGLE_CAPITAL.test(c)) return LABEL_PREFIX + c.toLowerCase();
   const lower = c.toLowerCase();
   if (PROVENANCE.test(lower)) return 'provenance';
   if (NO_SIGNAL_DOTTED.has(lower)) return null;
@@ -260,27 +299,43 @@ function scanText(text: string, ids: Set<string>, words: Set<string>, residual: 
   for (const raw of spans) {
     const span = raw.trim();
     if (!span) continue;
-    if (/\s/.test(span)) add(LOOSE_PREFIX + span.replace(/\s+/g, ' '));
-    else add(chunkIdentifier(span, true));
+    if (/\s/.test(span)) {
+      // A phrase is an identifier whole, and so is each identifier inside it
+      // (`Postgres 16.2` names 16.2, `STASH_CALLBACK = 2` names STASH_CALLBACK).
+      const parts = span.split(/\s+/);
+      add(LOOSE_PREFIX + parts.join(' '));
+      parts.forEach((part, i) => add(partIdentifier(part, i === 0)));
+    } else add(chunkIdentifier(span, true));
   }
   const prose = text.replace(BACKTICK_SPAN, ' ').replace(QUOTED_SPAN, ' ');
   for (const chunk of text.split(/\s+/)) {
     const bare = strip(chunk);
-    if (STANDALONE.test(bare)) for (const w of alnumRuns(bare)) words.add(w);
+    if (STANDALONE.test(bare)) for (const w of alnumRuns(bare)) words.add(wordKey(w));
   }
   let sentenceStart = true;
   for (const chunk of prose.split(/\s+/)) {
     if (!chunk) continue;
     const bare = strip(chunk);
-    if (/^\p{Lu}$/u.test(bare)) {
-      if (bare !== 'I' && !(bare === 'A' && sentenceStart)) ids.add(LABEL_PREFIX + bare.toLowerCase());
+    if (SINGLE_CAPITAL.test(bare)) {
+      add(partIdentifier(bare, sentenceStart));
     } else {
       const id = chunkIdentifier(chunk, false);
       add(id);
       if (id === null) residual.push(bare);
     }
-    sentenceStart = /[.!?:]["')\]]*$/.test(chunk);
+    sentenceStart = endsSentence(chunk);
   }
+}
+
+/**
+ * The identifier one word of prose (or of a code phrase) names: a single
+ * capital is a label, except the pronoun "I" and an "A" that starts a
+ * sentence (or a phrase); anything else as `chunkIdentifier` reads prose.
+ */
+function partIdentifier(part: string, first: boolean): string | 'provenance' | null {
+  const bare = strip(part);
+  if (SINGLE_CAPITAL.test(bare)) return bare === 'I' || (bare === 'A' && first) ? null : LABEL_PREFIX + bare.toLowerCase();
+  return chunkIdentifier(part, false);
 }
 
 /** The shape of a claim (title + body); see the section note. */
@@ -342,22 +397,44 @@ export interface IdentifierContext {
 const asSet = (v: readonly string[] | ReadonlySet<string> | undefined): ReadonlySet<string> =>
   v instanceof Set ? v : new Set(v ?? []);
 
+type FileRef = { segments: string[]; ext: string | null };
+
+/** The other claim as `mentionsIdentifier` reads it, built once per comparison. */
+interface MentionContext {
+  ids: ReadonlySet<string>;
+  words: ReadonlySet<string>;
+  /** File-like identifiers of `ids`, parsed on first use. */
+  files?: FileRef[];
+}
+
+function mentionContext(other: IdentifierContext): MentionContext {
+  return { ids: asSet(other.ids), words: asSet(other.words) };
+}
+
+/** Whether every alphanumeric run of `s` stands alone in the other claim. */
+function wordsMentioned(s: string, other: MentionContext): boolean {
+  const runs = alnumRuns(s);
+  return runs.length > 0 && runs.every((w) => other.words.has(wordKey(w)));
+}
+
 /** Whether `other` mentions identifier `id` (see the section note for strict vs loose). */
-function mentionsIdentifier(id: string, other: IdentifierContext): boolean {
-  const ids = asSet(other.ids);
-  if (ids.has(id)) return true;
+function mentionsIdentifier(id: string, other: MentionContext): boolean {
+  if (other.ids.has(id)) return true;
   if (id.startsWith(LOOSE_PREFIX)) {
-    const words = asSet(other.words);
-    const runs = alnumRuns(id.slice(LOOSE_PREFIX.length));
-    return runs.length > 0 && runs.every((w) => words.has(w));
+    const phrase = id.slice(LOOSE_PREFIX.length);
+    if (!phrase.includes(' ')) return wordsMentioned(phrase, other);
+    // A phrase: each of its words stands alone in the other claim, or names
+    // an identifier the other claim mentions (`Postgres 16.2` vs Postgres 16.2).
+    return phrase.split(' ').every((part, i) => {
+      if (alnumRuns(part).length === 0 || wordsMentioned(part, other)) return true;
+      const inner = partIdentifier(part, i === 0);
+      return inner !== null && inner !== 'provenance' && !inner.startsWith(LOOSE_PREFIX) && mentionsIdentifier(inner, other);
+    });
   }
   const file = fileRef(id);
   if (!file) return false;
-  for (const o of ids) {
-    const f = fileRef(o);
-    if (f && (sameFile(file, f) || containsPath(file, f))) return true;
-  }
-  return false;
+  other.files ??= [...other.ids].map(fileRef).filter((f): f is FileRef => f !== null);
+  return other.files.some((f) => sameFile(file, f) || containsPath(file, f));
 }
 
 /**
@@ -367,8 +444,9 @@ function mentionsIdentifier(id: string, other: IdentifierContext): boolean {
  */
 export function newIdentifiers(ids: Iterable<string>, other: IdentifierContext): string[] {
   if (other.ids === undefined) return [];
+  const ctx = mentionContext(other);
   const out: string[] = [];
-  for (const id of ids) if (!mentionsIdentifier(id, other)) out.push(displayIdentifier(id));
+  for (const id of ids) if (!mentionsIdentifier(id, ctx)) out.push(displayIdentifier(id));
   return out;
 }
 
@@ -382,13 +460,33 @@ export function displayIdentifier(id: string): string {
  * Jaccard at or above CLAIM_SIMILARITY_THRESHOLD, or either side too thin
  * (< MIN_WORDING_WEIGHT tokens) to say anything beyond its identifiers.
  */
-export function wordingAgrees(a: ReadonlySet<string> | readonly string[], b: ReadonlySet<string> | readonly string[]): boolean {
-  const sa = asSet(a);
-  const sb = asSet(b);
-  if (sa.size < MIN_WORDING_WEIGHT || sb.size < MIN_WORDING_WEIGHT) return true;
+export function wordingAgrees(
+  a: ReadonlySet<string> | readonly string[],
+  b: ReadonlySet<string> | readonly string[],
+  ignore: ReadonlySet<string> = new Set(),
+): boolean {
+  const sa = [...asSet(a)].filter((t) => !ignore.has(t));
+  const sb = new Set([...asSet(b)].filter((t) => !ignore.has(t)));
+  if (sa.length < MIN_WORDING_WEIGHT || sb.size < MIN_WORDING_WEIGHT) return true;
   let shared = 0;
-  for (const t of sb) if (sa.has(t)) shared++;
-  return shared / (sa.size + sb.size - shared) >= CLAIM_SIMILARITY_THRESHOLD;
+  for (const t of sa) if (sb.has(t)) shared++;
+  return shared / (sa.length + sb.size - shared) >= CLAIM_SIMILARITY_THRESHOLD;
+}
+
+/**
+ * Wording tokens of the plain words a claim puts in backticks or quotes
+ * (`main`, `release branch`). Its own wording leaves them out (they are
+ * identifiers there); the other claim's wording, where the same words may be
+ * plain prose, must leave them out too, or the markup alone reads as a
+ * difference in what the claims say.
+ */
+function markupWording(ids: Iterable<string>): Set<string> {
+  const out = new Set<string>();
+  for (const id of ids) {
+    if (!id.startsWith(LOOSE_PREFIX)) continue;
+    for (const t of claimTokens(id.slice(LOOSE_PREFIX.length))) if (!isIdentifierToken(t)) out.add(t);
+  }
+  return out;
 }
 
 /** A claim's shape as `sameClaim` reads it: a `ClaimShape`, or a claim-index entry (fields absent before shapes were indexed). */
@@ -408,7 +506,8 @@ export interface ShapeContext extends IdentifierContext {
  */
 export function sameClaim(incoming: ClaimShape, record: ShapeContext): boolean {
   if (record.ids === undefined || record.titleIds === undefined || record.wording === undefined) return true;
-  return newIdentifiers(incoming.titleIds, record).length === 0 &&
-    newIdentifiers(record.titleIds, incoming).length === 0 &&
-    wordingAgrees(incoming.wording, record.wording);
+  if (newIdentifiers(incoming.titleIds, record).length > 0 || newIdentifiers(record.titleIds, incoming).length > 0) return false;
+  const ignore = markupWording(incoming.ids);
+  for (const t of markupWording(record.ids)) ignore.add(t);
+  return wordingAgrees(incoming.wording, record.wording, ignore);
 }

@@ -52,7 +52,7 @@ type CachedEntry = (ClaimIndexEntry & { invalid?: undefined } | { invalid: true 
 };
 
 /** Bump when the token rules or the entry shape change: an old cache is then discarded whole. */
-const CLAIM_INDEX_VERSION = 3;
+const CLAIM_INDEX_VERSION = 4;
 
 export function claimIndexPath(storeRoot: string): string {
   return join(storeRoot, 'local', 'cache', 'claim-index.json');
