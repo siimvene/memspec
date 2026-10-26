@@ -345,7 +345,6 @@ export function runContext(options: ContextOptions): string {
     const results = store.search(options.query, {
       limit,
       types: explicitType ? [explicitType] : undefined,
-      minConfidence: 0,
       scope: activeScope,
       ranking: profile?.ranking,
     });

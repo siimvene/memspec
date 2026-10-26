@@ -75,10 +75,13 @@ export interface MemspecConfig {
   aging_days?: number;
 }
 
+/**
+ * A search profile. A pre-0.3 `min_confidence:` key in an existing config.yaml
+ * still loads (profiles pass through as-is) but nothing reads it.
+ */
 export interface MemspecProfile {
   max_tokens?: number;
   types?: string[];
-  min_confidence?: number;
   ranking?: Record<string, number>;
 }
 
@@ -93,7 +96,6 @@ const DEFAULT_CONFIG: MemspecConfig = {
     default: {
       max_tokens: 2000,
       types: ['fact', 'decision', 'procedure'],
-      min_confidence: 0.7,
       ranking: { relevance: 0.4, confidence: 0.3, recency: 0.3 },
     },
   },
@@ -322,7 +324,6 @@ profiles:
   default:
     max_tokens: 2000
     types: [fact, decision, procedure]
-    min_confidence: 0.7
     ranking:
       relevance: 0.4
       confidence: 0.3

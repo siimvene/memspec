@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve, sep } from 'node:path';
 import { decayDaysByType, defaultConfigYaml, loadConfig } from './config.js';
 import { findStoreDirUpward } from './registry.js';
-import { FtsIndex } from './fts.js';
+import { FtsIndex, type MatchTier } from './fts.js';
 import { parseMemoryFile, serializeMemoryFile } from './frontmatter.js';
-import { validateFrontmatter } from './schema.js';
+import { validateFrontmatter, type NormalizeOptions } from './schema.js';
 import { effectiveSourceKind, storageTierForSourceKind } from './source.js';
 import type { MemoryFrontmatter, MemoryItem, MemoryType } from './types.js';
 import { parseFrontMatter } from './safe-matter.js';
@@ -28,6 +28,80 @@ function withLazyStale(item: MemoryItem): MemoryItem {
   return { ...item, stale: true };
 }
 
+/**
+ * Parsed-record cache for long-lived processes (the MCP server). Re-reading
+ * and YAML-parsing every record file was ~85% of a warm query on a
+ * 2k-record store. Entries are keyed by absolute path and invalidated on any
+ * change of (mtime, ctime, size, inode), so an edited, replaced, added or
+ * deleted file is picked up by the next load. The stat is taken BEFORE the
+ * read: a write racing the read leaves an entry whose key no longer matches,
+ * so it is re-read next time rather than cached stale.
+ *
+ * Cached items are never handed out: every load returns a deep copy, so a
+ * caller that mutates a returned record (read-modify-write commands do)
+ * cannot corrupt the next load. One map per store root, rebuilt on every
+ * load from the files actually present, so deleted files drop out.
+ */
+interface ParsedRecordEntry {
+  mtimeMs: number;
+  ctimeMs: number;
+  size: number;
+  ino: number;
+  /** The decay table the record was normalised with; a config edit invalidates. */
+  normalizeKey: string;
+  /** Parsed record, or the load-warning reason for a file that failed validation/parsing. */
+  result: { item: MemoryItem } | { reason: string };
+}
+
+const parsedRecordCache = new Map<string, Map<string, ParsedRecordEntry>>();
+
+/**
+ * Deep copy of a parsed record. Frontmatter values are YAML scalars, arrays,
+ * plain mappings and (inside `ext`) possibly Dates — a hand-rolled walk is
+ * several times cheaper than `structuredClone` on the hot path.
+ */
+function cloneValue<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(cloneValue) as T;
+  if (value instanceof Date) return new Date(value.getTime()) as T;
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return structuredClone(value);
+  const out: Record<string, unknown> = {};
+  // defineProperty, not assignment: a parsed `__proto__` key must stay an own
+  // property instead of becoming the copy's prototype.
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(out, key, {
+      value: cloneValue((value as Record<string, unknown>)[key]),
+      enumerable: true, writable: true, configurable: true,
+    });
+  }
+  return out as T;
+}
+
+/** Parse one record file: the item, or the load-warning reason. Pure in (raw, file, normalize). */
+function parseRecordFile(raw: string, file: string, normalize: NormalizeOptions): ParsedRecordEntry['result'] {
+  try {
+    const parsed = parseFrontMatter(raw);
+    const data = parsed.data as Record<string, unknown>;
+
+    // Coerce dates before validation (both legacy decay_after and v0.3 check_by)
+    for (const key of ['created', 'decay_after', 'check_by', 'last_verified', 'expires']) {
+      if (data[key] instanceof Date) {
+        data[key] = (data[key] as Date).toISOString();
+      }
+    }
+
+    const result = validateFrontmatter(data, normalize);
+    if (!result.success) {
+      return { reason: `Invalid frontmatter: ${result.errors.join('; ')}` };
+    }
+
+    return { item: parseMemoryFile(raw, file, normalize) };
+  } catch (err) {
+    return { reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 function walkMarkdownFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
 
@@ -49,7 +123,6 @@ function walkMarkdownFiles(dir: string): string[] {
 export interface StoreSearchOptions {
   limit?: number;
   types?: MemoryType[];
-  minConfidence?: number;
   /**
    * Active scope. Records are returned when their own `scope` is absent,
    * `universal`, or equal to this value. Undefined disables scope filtering
@@ -81,6 +154,12 @@ export interface DuplicateId {
  */
 export interface SearchRelevanceMeta {
   topBm25: number | null;
+  /**
+   * Match tier of every returned hit, by id (1 = every query term, 2 =
+   * partial-term top-up; see `MatchTier`). Set by every search that returns
+   * hits; coverage reads it to tell a full match from a page of partials.
+   */
+  tiers?: Map<string, MatchTier>;
 }
 
 /**
@@ -153,6 +232,12 @@ export class MemspecStore {
    * unchanged.
    */
   readonly duplicateIds: DuplicateId[] = [];
+  /**
+   * Newest mtime among the `memory/` + `observations/` files seen by the last
+   * load (0 when none). Lets `search` judge the FTS cache's freshness from the
+   * stats the load already took instead of stat-ing every source file again.
+   */
+  private activeSourceMaxMtimeMs = 0;
 
   /**
    * @param root  A store directory (`…/.memspec`) used as-is, or a working
@@ -328,27 +413,45 @@ export class MemspecStore {
     // The store's own `decay:` TTLs, so a legacy `decay_after: never` reads
     // with the TTL this store configured (see `legacyNeverCheckBy`).
     const normalize = { decayDays: this.configuredDecayDays() };
+    const normalizeKey = JSON.stringify(normalize.decayDays ?? null);
+    const previous = parsedRecordCache.get(this.root);
+    const cache = new Map<string, ParsedRecordEntry>();
+    parsedRecordCache.set(this.root, cache);
+    const activePrefixes = [join(this.root, 'memory') + sep, join(this.root, 'observations') + sep];
+    let activeMaxMtimeMs = 0;
 
     for (const file of files) {
       try {
-        const raw = readFileSync(file, 'utf8');
-        const parsed = parseFrontMatter(raw);
-        const data = parsed.data as Record<string, unknown>;
-
-        // Coerce dates before validation (both legacy decay_after and v0.3 check_by)
-        for (const key of ['created', 'decay_after', 'check_by', 'last_verified', 'expires']) {
-          if (data[key] instanceof Date) {
-            data[key] = (data[key] as Date).toISOString();
-          }
+        const st = statSync(file, { throwIfNoEntry: false });
+        if (!st) continue; // deleted between the walk and now
+        if (st.mtimeMs > activeMaxMtimeMs && activePrefixes.some((p) => file.startsWith(p))) {
+          activeMaxMtimeMs = st.mtimeMs;
         }
-
-        const result = validateFrontmatter(data, normalize);
-        if (!result.success) {
-          this.warnings.push({ file, reason: `Invalid frontmatter: ${result.errors.join('; ')}` });
+        let entry = previous?.get(file);
+        if (
+          !entry ||
+          entry.mtimeMs !== st.mtimeMs ||
+          entry.ctimeMs !== st.ctimeMs ||
+          entry.size !== st.size ||
+          entry.ino !== st.ino ||
+          entry.normalizeKey !== normalizeKey
+        ) {
+          entry = {
+            mtimeMs: st.mtimeMs,
+            ctimeMs: st.ctimeMs,
+            size: st.size,
+            ino: st.ino,
+            normalizeKey,
+            result: parseRecordFile(readFileSync(file, 'utf8'), file, normalize),
+          };
+        }
+        cache.set(file, entry);
+        if ('reason' in entry.result) {
+          this.warnings.push({ file, reason: entry.result.reason });
           continue;
         }
 
-        const item = parseMemoryFile(raw, file, normalize);
+        const item = cloneValue(entry.result.item);
         const sameId = filesById.get(item.id);
         if (sameId) sameId.push(file);
         else filesById.set(item.id, [file]);
@@ -384,6 +487,7 @@ export class MemspecStore {
       if (idFiles.length > 1) this.duplicateIds.push({ id, files: [...idFiles].sort() });
     }
     this.duplicateIds.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    this.activeSourceMaxMtimeMs = activeMaxMtimeMs;
 
     return Array.from(byId.values());
   }
@@ -461,13 +565,15 @@ export class MemspecStore {
 
   search(query: string, options: StoreSearchOptions = {}, meta?: SearchRelevanceMeta): MemoryItem[] {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    if (meta) meta.topBm25 = null;
+    if (meta) {
+      meta.topBm25 = null;
+      meta.tiers = new Map();
+    }
     if (terms.length === 0) return [];
 
     const {
       limit = 10,
       types,
-      minConfidence = 0,
       scope,
       ranking,
     } = options;
@@ -476,15 +582,16 @@ export class MemspecStore {
 
     // mtime-cached on-disk FTS index. Rebuild only when a source file's mtime
     // is newer than the cache — at 200 items the win is invisible, at 5k it's
-    // 250ms → 5ms. Canonical truth still lives in markdown files.
+    // 250ms → 5ms. Canonical truth still lives in markdown files. The load
+    // above already stat-ed every source file; its newest mtime decides.
     const cachePath = join(this.root, '.fts.db');
-    const fts = FtsIndex.openOrBuild(cachePath, this.activeSourceFiles(), activeItems);
+    const fts = FtsIndex.openOrBuild(cachePath, this.activeSourceMaxMtimeMs, activeItems);
     try {
       // `scope` is handed to FTS rather than applied to `matches` on purpose:
       // the candidate pool is `limit * 2` rows wide, so a post-filter would
       // return nothing for a scope whose records rank below the out-of-scope
       // majority.
-      const matches = fts.search(query, { limit: limit * 2, types, minConfidence, scope });
+      const matches = fts.search(query, { limit: limit * 2, types, scope });
 
       if (matches.length === 0) return [];
       const bm25ById = new Map(matches.map((m) => [m.id, m.bm25Score]));
@@ -501,7 +608,7 @@ export class MemspecStore {
       // unbounded; without normalization the relevance weight is the only
       // dial that ever moves the ranking. Per-set normalization makes the
       // profile ranking ratios (relevance vs recency) actually apply.
-      const rawScored = matches.map(({ id, bm25Score }) => {
+      const rawScored = matches.map(({ id, bm25Score, tier, prefix }) => {
         const item = itemMap.get(id);
         if (!item) return null;
 
@@ -521,28 +628,41 @@ export class MemspecStore {
         const ageDays = ageMs / (24 * 60 * 60 * 1000);
         const recency = 1 / (1 + ageDays);
 
-        return { item, rawRelevance, recency };
-      }).filter((entry): entry is { item: MemoryItem; rawRelevance: number; recency: number } => entry !== null);
+        return { item, rawRelevance, recency, tier, prefix: prefix === true };
+      }).filter((entry): entry is { item: MemoryItem; rawRelevance: number; recency: number; tier: MatchTier; prefix: boolean } => entry !== null);
 
-      // Per-set relevance normalization → [0, 1]. recency is already in [0, 1].
-      const maxRelevance = rawScored.reduce((m, r) => Math.max(m, r.rawRelevance), 0);
-      const denom = maxRelevance > 0 ? maxRelevance : 1;
+      // Per-tier relevance normalization → [0, 1]. recency is already in [0, 1].
+      // Per TIER, not per set: a partial-match top-up row with a rare term can
+      // out-score every full match on raw BM25, and dividing the full matches
+      // by it would reshuffle their order against recency.
+      const maxRelevance = new Map<MatchTier, number>();
+      for (const r of rawScored) maxRelevance.set(r.tier, Math.max(maxRelevance.get(r.tier) ?? 0, r.rawRelevance));
 
-      const scored = rawScored.map(({ item, rawRelevance, recency }) => ({
-        item,
-        score: (rawRelevance / denom) * relevanceWeight + recency * recencyWeight,
-      }));
+      const scored = rawScored.map(({ item, rawRelevance, recency, tier, prefix }) => {
+        const max = maxRelevance.get(tier) ?? 0;
+        const denom = max > 0 ? max : 1;
+        return { item, tier, prefix, score: (rawRelevance / denom) * relevanceWeight + recency * recencyWeight };
+      });
 
-      const ranked = scored
-        .sort((a, b) => b.score - a.score)
-        .slice(0, limit)
-        .map(({ item }) => item);
+      // Full-term matches always rank above partial ones, and within the full
+      // tier exact matches above prefix-only ones (the order FTS returned them
+      // in); scoring orders within each group.
+      const rankedScored = scored
+        .sort((a, b) => a.tier - b.tier || Number(a.prefix) - Number(b.prefix) || b.score - a.score)
+        .slice(0, limit);
+      const ranked = rankedScored.map(({ item }) => item);
 
       if (meta) {
-        // Strongest lexical match among the returned hits: the min (most
-        // negative) raw BM25. If even the best hit is weak, coverage is weak.
+        meta.tiers = new Map(rankedScored.map(({ item, tier }) => [item.id, tier]));
+        // Strongest lexical match among the returned hits of the best tier:
+        // the min (most negative) raw BM25. If even the best hit is weak,
+        // coverage is weak. A partial top-up row's score says nothing about
+        // how well the full matches cover the query, so it only counts when
+        // the page holds no full match.
+        const topTier = rankedScored.length > 0 ? rankedScored[0].tier : undefined;
         let best: number | null = null;
-        for (const item of ranked) {
+        for (const { item, tier } of rankedScored) {
+          if (tier !== topTier) continue;
           const raw = bm25ById.get(item.id);
           if (raw === undefined) continue;
           if (best === null || raw < best) best = raw;

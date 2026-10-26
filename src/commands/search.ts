@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { CompositeStore, describeStaleLayer, type StaleLayer } from '../lib/composite-store.js';
 import { getAgingDays, getProfile, loadConfig } from '../lib/config.js';
 import { agingOf } from '../lib/decay.js';
-import { tokenizeLikeIndex } from '../lib/fts.js';
+import { queryTokenPresence } from '../lib/fts.js';
 import { COVERAGE_STOPWORDS } from '../lib/stopwords.js';
 import { EDGE_TYPES, expandGraph, isDerived, type EdgeType, type ExpansionHit } from '../lib/graph-walk.js';
 import { sharedTagCount, titleTokenOverlap } from '../lib/inference.js';
@@ -180,9 +180,11 @@ export interface SearchResult {
  * `none`  = zero active records match the query in scope.
  * `weak`  = matches exist but are low-signal: fewer than half of the distinct
  *           content-bearing query terms occur (whole-token, index-tokenised) in
- *           the best-covered hit, or the top BM25 is above the weak threshold,
- *           or the best-covered hit matched only via title/tags with no query
- *           term in its body. Do not infer from rank.
+ *           the best-covered hit, or no hit carries every query term and the
+ *           best-covered one carries under three quarters of the content terms,
+ *           or the top BM25 is above the weak threshold, or the best-covered hit
+ *           matched only via title/tags with no query term in its body. Do not
+ *           infer from rank.
  * `ok`    = a genuine match exists.
  */
 export type Coverage = 'none' | 'weak' | 'ok';
@@ -240,6 +242,16 @@ const WEAK_BM25_THRESHOLD = -0.7;
  * a strong title hit. The body-match test decides those cases instead.
  */
 const BM25_NEGLIGIBLE = -1e-3;
+
+/**
+ * Share of the distinct content terms the best hit must carry for a page of
+ * partial-term (OR top-up) matches to read `ok`. Calibrated on a 2.4k-record
+ * real store with 100 natural and 100 paraphrased queries (one known target
+ * each, 50-row pages): at 0.75 every natural query whose target made the top
+ * 10 stayed `ok`, while 32 of the 41 paraphrases whose target did not read
+ * `weak` (all 41 read `ok` before match tiers existed).
+ */
+const PARTIAL_MATCH_OK_RATIO = 0.75;
 
 /** Witness strength order for coverage_witness (lower index = stronger). */
 const WITNESS_STRENGTH: Record<VerifiedWith, number> = {
@@ -527,7 +539,6 @@ export function searchPayload(query: string, options: SearchOptions): SearchPayl
   const storeOptions: StoreSearchOptions = {
     limit,
     types,
-    minConfidence: profile.min_confidence ?? 0,
     scope: activeScope,
     ranking: profile.ranking,
   };
@@ -813,7 +824,7 @@ function coverageTerms(rawWords: string[], rawTokens: string[][]): CoverageTerm[
   return out;
 }
 
-/** Per-seed token sets, tokenised by the index tokenizer. */
+/** Per-seed sets of the query tokens each seed contains, tokenised by the index tokenizer. */
 interface SeedTokens {
   item: MemoryItem;
   /** title + tags + body */
@@ -845,15 +856,16 @@ function classifyCoverage(
   // term test below is a whole-token comparison that agrees with what FTS5
   // matched: `remootio,` ≡ `remootio`, `tariffs` ≡ `tariff`, and `gate` does not
   // match inside `gateway`.
+  // Only query tokens are ever looked up in a seed, so the seeds come back as
+  // the set of query tokens they contain (`queryTokenPresence`).
   const rawWords = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const tokenised = tokenizeLikeIndex([
-    ...rawWords,
-    ...seeds.flatMap((s) => [`${s.title} ${s.tags.join(' ')}`, s.body]),
-  ]);
-  const rawTokens = tokenised.slice(0, rawWords.length);
+  const { queryTokens: rawTokens, present } = queryTokenPresence(
+    rawWords,
+    seeds.flatMap((s) => [`${s.title} ${s.tags.join(' ')}`, s.body]),
+  );
   const seedTokens: SeedTokens[] = seeds.map((item, i) => {
-    const titleTags = tokenised[rawWords.length + i * 2];
-    const body = new Set(tokenised[rawWords.length + i * 2 + 1]);
+    const titleTags = present[i * 2];
+    const body = present[i * 2 + 1];
     return { item, all: new Set([...titleTags, ...body]), body };
   });
 
@@ -868,11 +880,13 @@ function classifyCoverage(
   // priority); in a single store BM25 can rank a one-term title hit above a
   // record carrying every term. The question is "does the store cover this
   // query", so the strongest witness among the returned set answers it.
+  // Ties go to the better match tier, so a full match is never judged as a partial.
+  const tierOf = (s: SeedTokens) => meta.tiers?.get(s.item.id) ?? 1;
   let best = seedTokens[0];
   let bestMatched = -1;
   for (const s of seedTokens) {
     const matched = distinct.filter((t) => s.all.has(t.token)).length;
-    if (matched > bestMatched) {
+    if (matched > bestMatched || (matched === bestMatched && tierOf(s) < tierOf(best))) {
       best = s;
       bestMatched = matched;
     }
@@ -892,6 +906,23 @@ function classifyCoverage(
         coverage_note: `${bestMatched} of ${distinct.length} query terms matched${inScope} (unmatched: ${unmatched.map((t) => t.label).join(', ')})`,
       };
     }
+  }
+
+  // Match-tier signal. When the best-covered hit is a partial (OR top-up) row,
+  // no hit carries more of the query's whole tokens than a record sharing SOME
+  // words with it, which is exactly what a query about something the store
+  // does not hold returns. That is a genuine match only when that hit still
+  // carries most of the content terms (PARTIAL_MATCH_OK_RATIO); otherwise it
+  // reads weak, naming the gap. Judged on the best-covered hit, not on "any
+  // full match on the page": a prefix-only full match carrying fewer whole
+  // tokens must not vouch for a partial row it did not out-cover.
+  const fullMatch = tierOf(best) === 1;
+  if (!fullMatch && distinct.length > 0 && bestMatched / distinct.length < PARTIAL_MATCH_OK_RATIO) {
+    const unmatched = distinct.filter((t) => !best.all.has(t.token));
+    return {
+      coverage: 'weak',
+      coverage_note: `only partial-term matches${inScope}: best hit carries ${bestMatched} of ${distinct.length} query terms (unmatched: ${unmatched.map((t) => t.label).join(', ')}); do not infer from rank`,
+    };
   }
 
   // BM25 tail signal, corpus-size-guarded. bm25() is negative (lower = better);
