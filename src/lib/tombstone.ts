@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { loadClaimIndex, type ClaimIndexEntry } from './claim-index.js';
 import type { CompositeStore } from './composite-store.js';
-import { CLAIM_SIMILARITY_THRESHOLD, displayToken, isIdentifierToken, isPathIdentifier, mentionsIdentifier, sameClaim, weightedSimilarity, type ClaimShape } from './similarity.js';
+import { CLAIM_SIMILARITY_THRESHOLD, displayToken, isIdentifierToken, sameClaim, weightedSimilarity, type ClaimShape } from './similarity.js';
 import type { MemspecStore } from './store.js';
 
 /**
@@ -54,13 +54,18 @@ import type { MemspecStore } from './store.js';
  *       write supersedes S): measurably closer to the current value, and
  *     - sim(claim, S) >= sim(claim, R) (implied by the margin when S' = S).
  *   A retraction (no survivor) always refuses. Caller-declared edges
- *   (distinct_from, refines, ...) exempt nothing. R is set aside, before
- *   any of that, when the claim is about another subject: its title names an
- *   identifier neither R nor S mentions AND it drops a non-path identifier
- *   R's title and S's title both name (`aboutOtherSubject`; a templated
- *   "`B` in a.ts is set to 2" next to a rejected "`A` in a.ts is set to 2"). A merged piece is likewise not
- *   restated by a claim that is not the same claim as the piece (the
- *   near-duplicate band's rule, similarity.ts `sameClaim`).
+ *   (distinct_from, refines, ...) exempt nothing, and neither does naming
+ *   another subject: a templated "`B` in a.ts is set to 2" near a rejected
+ *   "`A` in a.ts is set to 2" is judged like any other claim (fail closed).
+ *   The near-duplicate band's identifier rule (similarity.ts `sameClaim`)
+ *   never sets a rejection aside: lexical tests for "another subject" (a new
+ *   title identifier, a dropped title subject) were bypassed by respelling
+ *   the subject (`stash_callback`, STASH-CALLBACK) or by restating R in the
+ *   body under a bland title. Accepted cost: an MCP write of a
+ *   different-subject claim lexically near a rejected value is refused; a
+ *   human writes it with `--allow-rejected`. A merged piece (consolidated,
+ *   not rejected) is refused as a near-duplicate, so the band's rule applies
+ *   there: a claim that is not the same claim as the piece does not restate it.
  *
  * Why more than the margin: when the write is itself the supersede of S the
  * claim is its own survivor and scores 1.0 against it, so the margin alone
@@ -110,44 +115,11 @@ export interface IncomingClaim {
   tokens: ReadonlySet<string>;
   weight: number;
   /**
-   * `claimShape` of the claim (similarity.ts). Without it no record is set
-   * aside as another claim or another subject (`aboutOtherSubject`, the
-   * merged-piece check): similarity alone decides, as before claim shapes.
+   * `claimShape` of the claim (similarity.ts), read only for merged pieces
+   * (`sameClaim`, the near-duplicate band's rule); without it similarity
+   * alone decides. Rejections never read it.
    */
   shape?: ClaimShape;
-}
-
-/**
- * Whether the incoming claim is about a different subject than rejection R:
- * its title names an identifier neither R nor R's current survivor S
- * mentions, AND it drops R's subject: a non-path identifier in R's title
- * (and, when R has a survivor, in S's title too: the subject the correction
- * kept, e.g. the constant or the key; with no survivor, any of R's title).
- * "`B` in a.ts is set to 2" against R "`A` in a.ts is set to 2" (corrected to
- * 3, or retracted) drops A and is about B, not a re-assertion of A's
- * rejected value.
- *
- * Both halves are required so the guardrail keeps its bite: a claim that
- * keeps R's subject and only adds a new identifier ("A is set to 2, per
- * config.yaml") is still judged, and so is one that names nothing new.
- * Dropping a path (the file the subject lives in) or an identifier only R's
- * body names is not dropping the subject: "`A` is set to 2 (read by `f`)"
- * with a.ts left out still restates A's rejected value. When R's title (or
- * R's and S's titles together) names no non-path identifier (a prose claim,
- * or one whose only identifier is the value), nothing is set aside.
- */
-function aboutOtherSubject(incoming: IncomingClaim, r: ClaimIndexEntry, current: ClaimIndexEntry | undefined): boolean {
-  const shape = incoming.shape;
-  if (!shape || r.ids === undefined || r.titleIds === undefined) return false;
-  if (current && (current.ids === undefined || current.titleIds === undefined)) return false;
-  const named = [...shape.titleIds].some((id) => !mentionsIdentifier(id, r) && !(current && mentionsIdentifier(id, current)));
-  if (!named) return false;
-  // Title against title only, no loose word matches: a narrower subject means
-  // fewer records set aside (fail closed).
-  const subject = r.titleIds.filter(
-    (id) => !isPathIdentifier(id) && (!current || mentionsIdentifier(id, { ids: current.titleIds })),
-  );
-  return subject.some((id) => !mentionsIdentifier(id, shape));
 }
 
 /** An archived record whose rejected value the incoming claim re-asserts. */
@@ -309,10 +281,6 @@ export function scanArchive(
       if (holder.id !== pending?.newId && !otherClaim) merged.push({ piece: r, survivor: holder, similarity });
       continue;
     }
-    // A templated claim about a different identifier near-matches R on shared
-    // wording alone; it re-asserts nothing R said (see `aboutOtherSubject`).
-    // Not for a place transfer: that chain is explicit, judged as before.
-    if (!transfer && aboutOtherSubject(incoming, r, current)) continue;
 
     // `survivorAfter` is who holds R's place once this write lands (the
     // incoming claim itself when this write supersedes `current`).

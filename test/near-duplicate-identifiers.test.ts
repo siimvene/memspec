@@ -17,8 +17,9 @@ import { makeTempProject, runCli } from './helpers.js';
  * Claims that name different identifiers are different claims. The weighted
  * lexical similarity reads a shared template as the claim ("`A` in a.ts is
  * set to 2" vs "`B` in a.ts is set to 3" scores 0.68), so the near-duplicate
- * band (and the tombstone's threshold path) also compare identifiers.
- * Fixtures follow the wrongness benchmark's phrasing
+ * band (and the merged-piece check) also compare identifiers. The
+ * rejected-value check does not: naming another subject exempts nothing
+ * there (fail closed; CLI --allow-rejected). Fixtures follow the wrongness benchmark's phrasing
  * (scripts/bench-wrongness/phrasing.mjs, template 0).
  */
 
@@ -204,29 +205,46 @@ test('a twin that only adds body detail (a commit, another symbol) is still refu
   );
 });
 
-// --- The tombstone's threshold path ------------------------------------------
+// --- The tombstone: naming another subject exempts nothing -----------------
+// The identifier rule decides near-duplicates of active records and merged
+// pieces only. Next to a rejected value, a templated claim about another
+// identifier is refused over MCP (accepted cost) and written on the CLI with
+// --allow-rejected, which logs the override.
 
-test('tombstone: a templated claim about another identifier is not a re-assertion of a rejected value', async () => {
+const refusedAsRejected = (verb: 'remember' | 'supersede', id: string) => new RegExp(`${verb} refuses rejected value: this value was rejected in ${id}`);
+
+function refusedOverMcpWrittenWithOverride(cwd: string, c: Claim, rejectedId: string): void {
+  assert.throws(
+    () => runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }),
+    refusedAsRejected('remember', rejectedId),
+  );
+  assert.throws(() => runRemember('fact', c.title, { cwd, body: c.body, source: 'human:op', channel: 'cli' }), refusedAsRejected('remember', rejectedId));
+  const written = runRemember('fact', c.title, { cwd, body: c.body, source: 'human:op', channel: 'cli', allowRejected: true });
+  const log = new MemspecStore(cwd).findById(written.id)!.ext?.rejected_value_overrides as Array<Record<string, unknown>>;
+  assert.deepEqual(log.map((x) => x.id), [rejectedId]);
+}
+
+test('tombstone: a templated claim about another identifier near a rejected value is refused over MCP, written with --allow-rejected', async () => {
   const cwd = await project();
   const old = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '2');
   const fixed = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '3');
   const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
   runSupersede(a.id, { cwd, reason: 'value is 3', title: fixed.title, body: fixed.body, source: 'agent-a' });
-  // Same wording, same rejected number, different constant: written.
-  const other = constant('STASH_EFFECT', 'src/jsx/hooks/index.ts', '2');
-  assert.ok(claimSimilarity(other, old) >= CLAIM_SIMILARITY_THRESHOLD);
-  assert.ok(runRemember('fact', other.title, { cwd, body: other.body, source: 'agent-b', channel: 'mcp' }).id);
-  // The rejected value itself, and with an added identifier, still refuse.
+  // The rejected value itself, and with an added identifier, refuse.
   const padded = { title: old.title, body: `${old.body} Also set in config/hooks.yaml.` };
   for (const c of [old, padded]) {
     assert.throws(
       () => runRemember('decision', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }),
-      new RegExp(`remember refuses rejected value: this value was rejected in ${a.id}`),
+      refusedAsRejected('remember', a.id),
     );
   }
+  // Same wording, same rejected number, different constant: no subject set-aside.
+  const other = constant('STASH_EFFECT', 'src/jsx/hooks/index.ts', '2');
+  assert.ok(claimSimilarity(other, old) >= CLAIM_SIMILARITY_THRESHOLD);
+  refusedOverMcpWrittenWithOverride(cwd, other, a.id);
 });
 
-test('tombstone: a retraction still refuses its own claim, not a templated claim about another identifier', async () => {
+test('tombstone: a retraction refuses its own claim and a templated claim about another identifier (override on the CLI)', async () => {
   const cwd = await project();
   const old = constant('HONO_PORTAL_ELEMENT', 'src/jsx/dom/render.ts', "'_hp'");
   const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
@@ -237,7 +255,18 @@ test('tombstone: a retraction still refuses its own claim, not a templated claim
   );
   const other = constant('HONO_ELEMENT_ID', 'src/jsx/dom/render.ts', "'_hp'");
   assert.ok(claimSimilarity(other, old) >= CLAIM_SIMILARITY_THRESHOLD);
-  assert.ok(runRemember('fact', other.title, { cwd, body: other.body, source: 'agent-b', channel: 'mcp' }).id);
+  refusedOverMcpWrittenWithOverride(cwd, other, a.id);
+});
+
+test('tombstone: a templated claim about another identifier with no archived neighbour is written', async () => {
+  // Control for the two tests above: the refusal comes from the rejected
+  // value, not from the identifier rule.
+  const cwd = await project();
+  const first = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '3');
+  runRemember('fact', first.title, { cwd, body: first.body, source: 'agent-a' });
+  for (const c of [constant('STASH_EFFECT', 'src/jsx/hooks/index.ts', '2'), constant('HONO_ELEMENT_ID', 'src/jsx/dom/render.ts', "'_hp'")]) {
+    assert.ok(runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }).id, c.title);
+  }
 });
 
 test('tombstone: a merged piece refuses its restatement, not a templated claim about another identifier', async () => {
@@ -251,76 +280,6 @@ test('tombstone: a merged piece refuses its restatement, not a templated claim a
     /remember refuses near-duplicate: this claim restates a record consolidated by a merge/,
   );
   const other = exportOf('useContext', 'src/jsx/context.ts');
-  assert.ok(runRemember('fact', other.title, { cwd, body: other.body, source: 'agent-b', channel: 'mcp' }).id);
-});
-
-// --- Another subject means R's title subject is dropped ----------------------
-// Only a non-path identifier of R's title (and S's title, when R has a
-// survivor) is R's subject: adding one title identifier while dropping the
-// file or a body-only identifier still restates R's rejected value.
-
-const TTL = (ttl: string) =>
-  `Session cache entries in the gateway expire after ${ttl} minutes. The TTL is set in config/cache.yaml under session.ttl and applies to every pod in the cluster; changing it requires a rolling restart of the gateway deployment.`;
-const STORE = (v: string) =>
-  `The gateway keeps session state in ${v}. Every pod connects through the shared session client configured in config/session.yaml, and a failover drill runs monthly against the ${v} cluster.`;
-const refusedAsRejected = (verb: 'remember' | 'supersede', id: string) => new RegExp(`${verb} refuses rejected value: this value was rejected in ${id}`);
-
-test('tombstone: old value restated with a new title identifier and the body-only key and file dropped is refused', async () => {
-  const cwd = await project();
-  const a = runRemember('fact', 'Session cache TTL is 30 minutes', { cwd, body: TTL('30'), source: 'agent-a' });
-  runSupersede(a.id, { cwd, reason: 'is 15', title: 'Session cache TTL is 15 minutes', body: TTL('15'), source: 'agent-a' });
-  const c = {
-    title: 'Session cache TTL is 30 minutes (see RUNBOOK_TTL)',
-    body: 'Session cache entries in the gateway expire after 30 minutes. The TTL applies to every pod in the cluster; changing it requires a rolling restart of the gateway deployment.',
-  };
-  assert.throws(() => runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }), refusedAsRejected('remember', a.id));
-});
-
-test('tombstone: a word-valued old value restated with a new title identifier and the config file dropped is refused', async () => {
-  const cwd = await project();
-  const a = runRemember('fact', 'Gateway session store is Redis', { cwd, body: STORE('Redis'), source: 'agent-a' });
-  runSupersede(a.id, { cwd, reason: 'moved', title: 'Gateway session store is Memcached', body: STORE('Memcached'), source: 'agent-a' });
-  const c = {
-    title: 'Gateway session store is Redis (per DEPLOY_NOTES)',
-    body: 'The gateway keeps session state in Redis. Every pod connects through the shared session client, and a failover drill runs monthly against the Redis cluster.',
-  };
-  assert.throws(() => runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }), refusedAsRejected('remember', a.id));
-});
-
-test('tombstone: the same constant at its rejected value with the file dropped and another symbol named is refused (remember and supersede)', async () => {
-  const cwd = await project();
-  const old = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '2');
-  const fixed = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '3');
-  const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
-  const s = runSupersede(a.id, { cwd, reason: 'is 3', title: fixed.title, body: fixed.body, source: 'agent-a' });
-  const c = { title: '`STASH_CALLBACK` is set to 2 (read by `useCallback`)', body: '`STASH_CALLBACK` is set to 2. Full value: 2. Read from the hooks module at hono 0123456789ab.' };
-  const keepsFile = { title: '`STASH_CALLBACK` in src/jsx/hooks/index.ts is set to 2 (read by `useCallback`)', body: old.body };
-  for (const x of [c, keepsFile]) {
-    assert.throws(() => runRemember('fact', x.title, { cwd, body: x.body, source: 'agent-b', channel: 'mcp' }), refusedAsRejected('remember', a.id));
-  }
-  // As the supersede of the survivor it would make the rejected value the chain's active end.
-  assert.throws(
-    () => runSupersede(s.survivor_id, { cwd, reason: 'back to 2', title: c.title, body: c.body, source: 'agent-b', channel: 'mcp' }),
-    refusedAsRejected('supersede', a.id),
-  );
-  assert.deepEqual(new MemspecStore(cwd).loadActive().map((x) => x.title), [fixed.title]);
-  // Control: another constant at the rejected number drops STASH_CALLBACK and is written.
-  const other = constant('STASH_EFFECT', 'src/jsx/hooks/index.ts', '2');
-  assert.ok(runRemember('fact', other.title, { cwd, body: other.body, source: 'agent-b', channel: 'mcp' }).id);
-});
-
-test('tombstone: a retracted constant restated with the file dropped and another symbol named is refused', async () => {
-  const cwd = await project();
-  const old = constant('HONO_PORTAL_ELEMENT', 'src/jsx/dom/render.ts', "'_hp'");
-  const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
-  runSupersede(a.id, { cwd, reason: 'removed', source: 'agent-a' });
-  const c = {
-    title: "`HONO_PORTAL_ELEMENT` is set to '_hp' (used by `createPortal`)",
-    body: "`HONO_PORTAL_ELEMENT` is set to '_hp'. Full value: '_hp'. Read from the dom renderer at hono 0123456789ab.",
-  };
-  assert.throws(() => runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }), new RegExp(`rejected in ${a.id} .*retracted with no replacement`));
-  // Control: another constant with the same literal drops HONO_PORTAL_ELEMENT and is written.
-  const other = constant('HONO_ELEMENT_ID', 'src/jsx/dom/render.ts', "'_hp'");
   assert.ok(runRemember('fact', other.title, { cwd, body: other.body, source: 'agent-b', channel: 'mcp' }).id);
 });
 
@@ -338,4 +297,144 @@ test('tombstone: a merged piece with one added title identifier is judged like a
   const s = runRemember('fact', 'Context exports of the JSX runtime', { cwd, body: 'The JSX runtime context module exports its helpers.', source: 'agent-a' });
   runSupersede(s.id, { cwd, reason: 'consolidate', mergeFrom: [p.id], source: 'agent-a' });
   assert.ok(runRemember('fact', restated, { cwd, body: piece.body, source: 'agent-b', channel: 'mcp' }).id);
+});
+
+// --- Tombstone bypass probes: every restatement of a rejected value refuses --
+// Earlier "another subject" set-asides were bypassed by each of these: a new
+// title identifier with the file or body-only key dropped (round 1), the
+// subject respelled in another case or separator form, or the rejected record
+// restated in the body under a bland title (round 2), on remember and on the
+// supersede that would make the rejected value the chain's active end.
+
+const TTL = (ttl: string) =>
+  `Session cache entries in the gateway expire after ${ttl} minutes. The TTL is set in config/cache.yaml under session.ttl and applies to every pod in the cluster; changing it requires a rolling restart of the gateway deployment.`;
+const STORE = (v: string) =>
+  `The gateway keeps session state in ${v}. Every pod connects through the shared session client configured in config/session.yaml, and a failover drill runs monthly against the ${v} cluster.`;
+const mcpRemember = (cwd: string, c: Claim) => () => runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' });
+
+async function correctedConstant(): Promise<{ cwd: string; old: Claim; fixed: Claim; rejectedId: string; survivorId: string }> {
+  const cwd = await project();
+  const old = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '2');
+  const fixed = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '3');
+  const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
+  const s = runSupersede(a.id, { cwd, reason: 'is 3', title: fixed.title, body: fixed.body, source: 'agent-a' });
+  return { cwd, old, fixed, rejectedId: a.id, survivorId: s.survivor_id };
+}
+
+test('tombstone probe: old value restated with a new title identifier and the body-only key and file dropped is refused', async () => {
+  const cwd = await project();
+  const a = runRemember('fact', 'Session cache TTL is 30 minutes', { cwd, body: TTL('30'), source: 'agent-a' });
+  runSupersede(a.id, { cwd, reason: 'is 15', title: 'Session cache TTL is 15 minutes', body: TTL('15'), source: 'agent-a' });
+  const c = {
+    title: 'Session cache TTL is 30 minutes (see RUNBOOK_TTL)',
+    body: 'Session cache entries in the gateway expire after 30 minutes. The TTL applies to every pod in the cluster; changing it requires a rolling restart of the gateway deployment.',
+  };
+  assert.throws(mcpRemember(cwd, c), refusedAsRejected('remember', a.id));
+});
+
+test('tombstone probe: a word-valued old value restated with a new title identifier and the config file dropped is refused', async () => {
+  const cwd = await project();
+  const a = runRemember('fact', 'Gateway session store is Redis', { cwd, body: STORE('Redis'), source: 'agent-a' });
+  runSupersede(a.id, { cwd, reason: 'moved', title: 'Gateway session store is Memcached', body: STORE('Memcached'), source: 'agent-a' });
+  const c = {
+    title: 'Gateway session store is Redis (per DEPLOY_NOTES)',
+    body: 'The gateway keeps session state in Redis. Every pod connects through the shared session client, and a failover drill runs monthly against the Redis cluster.',
+  };
+  assert.throws(mcpRemember(cwd, c), refusedAsRejected('remember', a.id));
+});
+
+test('tombstone probe: the same constant at its rejected value with the file dropped and another symbol named is refused (remember and supersede)', async () => {
+  const { cwd, old, fixed, rejectedId, survivorId } = await correctedConstant();
+  const c = { title: '`STASH_CALLBACK` is set to 2 (read by `useCallback`)', body: '`STASH_CALLBACK` is set to 2. Full value: 2. Read from the hooks module at hono 0123456789ab.' };
+  const keepsFile = { title: '`STASH_CALLBACK` in src/jsx/hooks/index.ts is set to 2 (read by `useCallback`)', body: old.body };
+  for (const x of [c, keepsFile]) assert.throws(mcpRemember(cwd, x), refusedAsRejected('remember', rejectedId));
+  assert.throws(
+    () => runSupersede(survivorId, { cwd, reason: 'back to 2', title: c.title, body: c.body, source: 'agent-b', channel: 'mcp' }),
+    refusedAsRejected('supersede', rejectedId),
+  );
+  assert.deepEqual(new MemspecStore(cwd).loadActive().map((x) => x.title), [fixed.title]);
+});
+
+test('tombstone probe: a retracted constant restated with the file dropped and another symbol named is refused', async () => {
+  const cwd = await project();
+  const old = constant('HONO_PORTAL_ELEMENT', 'src/jsx/dom/render.ts', "'_hp'");
+  const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
+  runSupersede(a.id, { cwd, reason: 'removed', source: 'agent-a' });
+  const c = {
+    title: "`HONO_PORTAL_ELEMENT` is set to '_hp' (used by `createPortal`)",
+    body: "`HONO_PORTAL_ELEMENT` is set to '_hp'. Full value: '_hp'. Read from the dom renderer at hono 0123456789ab.",
+  };
+  assert.throws(mcpRemember(cwd, c), new RegExp(`rejected in ${a.id} .*retracted with no replacement`));
+});
+
+test('tombstone probe: the subject respelled in another case or separator form is refused', async () => {
+  const { cwd, rejectedId } = await correctedConstant();
+  const lower = constant('stash_callback', 'src/jsx/hooks/index.ts', '2 (read by `useCallback`)');
+  const hyphen = {
+    title: 'STASH-CALLBACK in src/jsx/hooks/index.ts is set to 2 (read by `useCallback`)',
+    body: 'STASH-CALLBACK in src/jsx/hooks/index.ts is set to 2. Full value: 2. Read from src/jsx/hooks/index.ts at hono 0123456789ab.',
+  };
+  const sameSpelling = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '2 (read by `useCallback`)');
+  for (const c of [lower, hyphen, sameSpelling]) assert.throws(mcpRemember(cwd, c), refusedAsRejected('remember', rejectedId), c.title);
+});
+
+test('tombstone probe: a version, an env var and a retracted literal respelled in another case are refused', async () => {
+  const cases: Array<[Claim, Claim | null, Claim]> = [
+    [
+      claim('Hono pins `typescript` to 5.4.2 in package.json', '5.4.2', 'package.json'),
+      claim('Hono pins `typescript` to 5.5.1 in package.json', '5.5.1', 'package.json'),
+      claim('Hono pins TypeScript to 5.4.2 in package.json (see `tsconfig.json`)', '5.4.2', 'package.json'),
+    ],
+    [
+      claim('`PORT` env var defaults to 3000 in src/server.ts', '3000', 'src/server.ts'),
+      claim('`PORT` env var defaults to 8080 in src/server.ts', '8080', 'src/server.ts'),
+      claim('The `port` env var defaults to 3000 in src/server.ts (read by `serve`)', '3000', 'src/server.ts'),
+    ],
+    [
+      constant('HONO_PORTAL_ELEMENT', 'src/jsx/dom/render.ts', "'_hp'"),
+      null,
+      constant('hono_portal_element', 'src/jsx/dom/render.ts', "'_hp' (used by `createPortal`)"),
+    ],
+  ];
+  for (const [old, fixed, c] of cases) {
+    const cwd = await project();
+    const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
+    runSupersede(a.id, { cwd, reason: 'changed', ...(fixed ? { title: fixed.title, body: fixed.body } : {}), source: 'agent-a' });
+    assert.throws(mcpRemember(cwd, c), new RegExp(`rejected in ${a.id}`), c.title);
+  }
+});
+
+test('tombstone probe: a shared version number dropped from the title is refused', async () => {
+  const cwd = await project();
+  const a = runRemember('fact', 'Postgres 16 primary listens on port 5433', {
+    cwd, body: 'The Postgres 16 primary database listens on 5433, not the default 5432. Verified in postgresql.conf.', source: 'agent-a',
+  });
+  runSupersede(a.id, {
+    cwd, reason: 'moved to 5434', title: 'Postgres 16 primary listens on port 5434',
+    body: 'The Postgres 16 primary database listens on 5434, not the default 5432. Verified in postgresql.conf.', source: 'agent-a',
+  });
+  const c = { title: 'Postgres primary listens on port 5433 (see `pg_hba.conf`)', body: 'The Postgres primary database listens on 5433, not the default 5432. Verified in postgresql.conf.' };
+  assert.throws(mcpRemember(cwd, c), refusedAsRejected('remember', a.id));
+});
+
+test('tombstone probe: the rejected record restated in the body under a bland title is refused', async () => {
+  const { cwd, old, rejectedId } = await correctedConstant();
+  const lowered = old.body.replace(/STASH_CALLBACK/g, 'stash_callback');
+  for (const c of [
+    { title: 'Hooks constants', body: old.body },
+    { title: 'Hooks constants (`useCallback`)', body: old.body },
+    { title: 'Hooks constants (`useCallback`)', body: lowered },
+  ]) {
+    assert.throws(mcpRemember(cwd, c), refusedAsRejected('remember', rejectedId), `${c.title} / ${c.body.slice(0, 20)}`);
+  }
+});
+
+test('tombstone probe: superseding the survivor with the subject respelled is refused (the rejected value cannot become the active end)', async () => {
+  const { cwd, fixed, rejectedId, survivorId } = await correctedConstant();
+  const c = constant('stash_callback', 'src/jsx/hooks/index.ts', '2 (read by `useCallback`)');
+  assert.throws(
+    () => runSupersede(survivorId, { cwd, reason: 'back to 2', title: c.title, body: c.body, source: 'agent-b', channel: 'mcp' }),
+    refusedAsRejected('supersede', rejectedId),
+  );
+  assert.deepEqual(new MemspecStore(cwd).loadActive().map((x) => x.title), [fixed.title]);
 });
