@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { loadClaimIndex, type ClaimIndexEntry } from './claim-index.js';
 import type { CompositeStore } from './composite-store.js';
-import { CLAIM_SIMILARITY_THRESHOLD, displayToken, isIdentifierToken, mentionsIdentifier, sameClaim, weightedSimilarity, type ClaimShape } from './similarity.js';
+import { CLAIM_SIMILARITY_THRESHOLD, displayToken, isIdentifierToken, isPathIdentifier, mentionsIdentifier, sameClaim, weightedSimilarity, type ClaimShape } from './similarity.js';
 import type { MemspecStore } from './store.js';
 
 /**
@@ -55,10 +55,10 @@ import type { MemspecStore } from './store.js';
  *     - sim(claim, S) >= sim(claim, R) (implied by the margin when S' = S).
  *   A retraction (no survivor) always refuses. Caller-declared edges
  *   (distinct_from, refines, ...) exempt nothing. R is set aside, before
- *   any of that, when the claim is about another subject: it names an
- *   identifier neither R nor S mentions AND drops one R and S both name
- *   (`aboutOtherSubject`; a templated "`B` in a.ts is set to 2" next to a
- *   rejected "`A` in a.ts is set to 2"). A merged piece is likewise not
+ *   any of that, when the claim is about another subject: its title names an
+ *   identifier neither R nor S mentions AND it drops a non-path identifier
+ *   R's title and S's title both name (`aboutOtherSubject`; a templated
+ *   "`B` in a.ts is set to 2" next to a rejected "`A` in a.ts is set to 2"). A merged piece is likewise not
  *   restated by a claim that is not the same claim as the piece (the
  *   near-duplicate band's rule, similarity.ts `sameClaim`).
  *
@@ -120,25 +120,34 @@ export interface IncomingClaim {
 /**
  * Whether the incoming claim is about a different subject than rejection R:
  * its title names an identifier neither R nor R's current survivor S
- * mentions, AND
- * it drops an identifier R and S both name (the subject the correction kept:
- * the constant, the file, the key; with no survivor, every identifier of R).
+ * mentions, AND it drops R's subject: a non-path identifier in R's title
+ * (and, when R has a survivor, in S's title too: the subject the correction
+ * kept, e.g. the constant or the key; with no survivor, any of R's title).
  * "`B` in a.ts is set to 2" against R "`A` in a.ts is set to 2" (corrected to
- * 3, or retracted) is about B, not a re-assertion of A's rejected value.
+ * 3, or retracted) drops A and is about B, not a re-assertion of A's
+ * rejected value.
  *
  * Both halves are required so the guardrail keeps its bite: a claim that
  * keeps R's subject and only adds a new identifier ("A is set to 2, per
  * config.yaml") is still judged, and so is one that names nothing new.
- * When R and S share no identifier (a prose claim, or one whose only
- * identifier is the value), nothing is set aside.
+ * Dropping a path (the file the subject lives in) or an identifier only R's
+ * body names is not dropping the subject: "`A` is set to 2 (read by `f`)"
+ * with a.ts left out still restates A's rejected value. When R's title (or
+ * R's and S's titles together) names no non-path identifier (a prose claim,
+ * or one whose only identifier is the value), nothing is set aside.
  */
 function aboutOtherSubject(incoming: IncomingClaim, r: ClaimIndexEntry, current: ClaimIndexEntry | undefined): boolean {
   const shape = incoming.shape;
-  if (!shape || r.ids === undefined || (current && current.ids === undefined)) return false;
+  if (!shape || r.ids === undefined || r.titleIds === undefined) return false;
+  if (current && (current.ids === undefined || current.titleIds === undefined)) return false;
   const named = [...shape.titleIds].some((id) => !mentionsIdentifier(id, r) && !(current && mentionsIdentifier(id, current)));
   if (!named) return false;
-  const kept = current ? r.ids.filter((id) => mentionsIdentifier(id, current)) : r.ids;
-  return kept.some((id) => !mentionsIdentifier(id, shape));
+  // Title against title only, no loose word matches: a narrower subject means
+  // fewer records set aside (fail closed).
+  const subject = r.titleIds.filter(
+    (id) => !isPathIdentifier(id) && (!current || mentionsIdentifier(id, { ids: current.titleIds })),
+  );
+  return subject.some((id) => !mentionsIdentifier(id, shape));
 }
 
 /** An archived record whose rejected value the incoming claim re-asserts. */

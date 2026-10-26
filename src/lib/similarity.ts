@@ -310,6 +310,11 @@ function fileRef(id: string): { segments: string[]; ext: string | null } | null 
   return segments.length > 0 ? { segments, ext } : null;
 }
 
+/** Whether an identifier names a file or directory (a `/` or a known file extension): where a claim's subject lives, not the subject. */
+export function isPathIdentifier(id: string): boolean {
+  return fileRef(id) !== null;
+}
+
 /** The same file named by paths of different length: one segment list ends the other, extensions agree when both carry one. */
 function sameFile(a: { segments: string[]; ext: string | null }, b: { segments: string[]; ext: string | null }): boolean {
   if (a.ext && b.ext && a.ext !== b.ext) return false;

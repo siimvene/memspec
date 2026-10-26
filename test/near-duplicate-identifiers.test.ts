@@ -253,3 +253,89 @@ test('tombstone: a merged piece refuses its restatement, not a templated claim a
   const other = exportOf('useContext', 'src/jsx/context.ts');
   assert.ok(runRemember('fact', other.title, { cwd, body: other.body, source: 'agent-b', channel: 'mcp' }).id);
 });
+
+// --- Another subject means R's title subject is dropped ----------------------
+// Only a non-path identifier of R's title (and S's title, when R has a
+// survivor) is R's subject: adding one title identifier while dropping the
+// file or a body-only identifier still restates R's rejected value.
+
+const TTL = (ttl: string) =>
+  `Session cache entries in the gateway expire after ${ttl} minutes. The TTL is set in config/cache.yaml under session.ttl and applies to every pod in the cluster; changing it requires a rolling restart of the gateway deployment.`;
+const STORE = (v: string) =>
+  `The gateway keeps session state in ${v}. Every pod connects through the shared session client configured in config/session.yaml, and a failover drill runs monthly against the ${v} cluster.`;
+const refusedAsRejected = (verb: 'remember' | 'supersede', id: string) => new RegExp(`${verb} refuses rejected value: this value was rejected in ${id}`);
+
+test('tombstone: old value restated with a new title identifier and the body-only key and file dropped is refused', async () => {
+  const cwd = await project();
+  const a = runRemember('fact', 'Session cache TTL is 30 minutes', { cwd, body: TTL('30'), source: 'agent-a' });
+  runSupersede(a.id, { cwd, reason: 'is 15', title: 'Session cache TTL is 15 minutes', body: TTL('15'), source: 'agent-a' });
+  const c = {
+    title: 'Session cache TTL is 30 minutes (see RUNBOOK_TTL)',
+    body: 'Session cache entries in the gateway expire after 30 minutes. The TTL applies to every pod in the cluster; changing it requires a rolling restart of the gateway deployment.',
+  };
+  assert.throws(() => runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }), refusedAsRejected('remember', a.id));
+});
+
+test('tombstone: a word-valued old value restated with a new title identifier and the config file dropped is refused', async () => {
+  const cwd = await project();
+  const a = runRemember('fact', 'Gateway session store is Redis', { cwd, body: STORE('Redis'), source: 'agent-a' });
+  runSupersede(a.id, { cwd, reason: 'moved', title: 'Gateway session store is Memcached', body: STORE('Memcached'), source: 'agent-a' });
+  const c = {
+    title: 'Gateway session store is Redis (per DEPLOY_NOTES)',
+    body: 'The gateway keeps session state in Redis. Every pod connects through the shared session client, and a failover drill runs monthly against the Redis cluster.',
+  };
+  assert.throws(() => runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }), refusedAsRejected('remember', a.id));
+});
+
+test('tombstone: the same constant at its rejected value with the file dropped and another symbol named is refused (remember and supersede)', async () => {
+  const cwd = await project();
+  const old = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '2');
+  const fixed = constant('STASH_CALLBACK', 'src/jsx/hooks/index.ts', '3');
+  const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
+  const s = runSupersede(a.id, { cwd, reason: 'is 3', title: fixed.title, body: fixed.body, source: 'agent-a' });
+  const c = { title: '`STASH_CALLBACK` is set to 2 (read by `useCallback`)', body: '`STASH_CALLBACK` is set to 2. Full value: 2. Read from the hooks module at hono 0123456789ab.' };
+  const keepsFile = { title: '`STASH_CALLBACK` in src/jsx/hooks/index.ts is set to 2 (read by `useCallback`)', body: old.body };
+  for (const x of [c, keepsFile]) {
+    assert.throws(() => runRemember('fact', x.title, { cwd, body: x.body, source: 'agent-b', channel: 'mcp' }), refusedAsRejected('remember', a.id));
+  }
+  // As the supersede of the survivor it would make the rejected value the chain's active end.
+  assert.throws(
+    () => runSupersede(s.survivor_id, { cwd, reason: 'back to 2', title: c.title, body: c.body, source: 'agent-b', channel: 'mcp' }),
+    refusedAsRejected('supersede', a.id),
+  );
+  assert.deepEqual(new MemspecStore(cwd).loadActive().map((x) => x.title), [fixed.title]);
+  // Control: another constant at the rejected number drops STASH_CALLBACK and is written.
+  const other = constant('STASH_EFFECT', 'src/jsx/hooks/index.ts', '2');
+  assert.ok(runRemember('fact', other.title, { cwd, body: other.body, source: 'agent-b', channel: 'mcp' }).id);
+});
+
+test('tombstone: a retracted constant restated with the file dropped and another symbol named is refused', async () => {
+  const cwd = await project();
+  const old = constant('HONO_PORTAL_ELEMENT', 'src/jsx/dom/render.ts', "'_hp'");
+  const a = runRemember('fact', old.title, { cwd, body: old.body, source: 'agent-a' });
+  runSupersede(a.id, { cwd, reason: 'removed', source: 'agent-a' });
+  const c = {
+    title: "`HONO_PORTAL_ELEMENT` is set to '_hp' (used by `createPortal`)",
+    body: "`HONO_PORTAL_ELEMENT` is set to '_hp'. Full value: '_hp'. Read from the dom renderer at hono 0123456789ab.",
+  };
+  assert.throws(() => runRemember('fact', c.title, { cwd, body: c.body, source: 'agent-b', channel: 'mcp' }), new RegExp(`rejected in ${a.id} .*retracted with no replacement`));
+  // Control: another constant with the same literal drops HONO_PORTAL_ELEMENT and is written.
+  const other = constant('HONO_ELEMENT_ID', 'src/jsx/dom/render.ts', "'_hp'");
+  assert.ok(runRemember('fact', other.title, { cwd, body: other.body, source: 'agent-b', channel: 'mcp' }).id);
+});
+
+test('tombstone: a merged piece with one added title identifier is judged like an active twin (written by both)', async () => {
+  // A merged piece is consolidated, not rejected: its value is held by an
+  // active survivor, so the near-duplicate band's rule applies, the same one
+  // that writes this claim next to the piece while it was still active.
+  const piece = exportOf('createContext', 'src/jsx/context.ts');
+  const restated = `${piece.title} (via useContext)`;
+  const live = await project();
+  runRemember('fact', piece.title, { cwd: live, body: piece.body, source: 'agent-a' });
+  assert.ok(runRemember('fact', restated, { cwd: live, body: piece.body, source: 'agent-b', channel: 'mcp' }).id);
+  const cwd = await project();
+  const p = runRemember('fact', piece.title, { cwd, body: piece.body, source: 'agent-a' });
+  const s = runRemember('fact', 'Context exports of the JSX runtime', { cwd, body: 'The JSX runtime context module exports its helpers.', source: 'agent-a' });
+  runSupersede(s.id, { cwd, reason: 'consolidate', mergeFrom: [p.id], source: 'agent-a' });
+  assert.ok(runRemember('fact', restated, { cwd, body: piece.body, source: 'agent-b', channel: 'mcp' }).id);
+});
