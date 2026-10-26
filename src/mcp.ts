@@ -40,6 +40,17 @@ const defaultCwd = typeof values.cwd === 'string' ? values.cwd : process.env.MEM
 // per-connection id, not a per-invocation one (see usage.ts resolveSessionId).
 setProcessSessionLabel(`mcp:${process.pid}`);
 
+/*
+ * Size caps on caller text over MCP (defence in depth: every write scans its
+ * title and body under the store lock and again on each claim-index rebuild).
+ * Sized from a real store of ~2.4k records: titles p99 448 / max 829
+ * characters, bodies p99 6,236 / max 16,285. The CLI is not capped.
+ */
+const MAX_TITLE_CHARS = 1_000;
+const MAX_BODY_CHARS = 20_000;
+const titleText = () => z.string().max(MAX_TITLE_CHARS, `title is longer than ${MAX_TITLE_CHARS} characters (at most ${MAX_TITLE_CHARS}): put the detail in the body`);
+const bodyText = (field = 'body') => z.string().max(MAX_BODY_CHARS, `${field} is longer than ${MAX_BODY_CHARS} characters (at most ${MAX_BODY_CHARS}): split it into several records`);
+
 const server = new McpServer({
   name: 'memspec',
   version: '0.13.0',
@@ -330,8 +341,8 @@ server.tool(
   'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Prefer ABSOLUTE file paths in anchors (e.g. /Users/you/git/repo/src/x.ts): this server may run against a personal/global store whose project root is your home directory, so a bare repo-relative path like "src/x.ts" resolves nowhere and the claim silently degrades to an unanchored assertion. If you must pass repo-relative paths, also pass anchor_root pointing at that repo\'s checkout. A file inside a git repo other than the store\'s own is recorded as {repo, file} and resolved on read as a sibling of the project root or under anchors.repo_search_paths (default ~/git). An anchor that resolves nowhere comes back in anchor_warnings telling you what to pass; an anchor recorded against a repo this store cannot resolve on read also warns, naming the directory to add to repo_search_paths. Search first to avoid duplicates: a claim whose title + body near-matches an active same-type record in scope is refused with a pointer to it (use memspec_supersede instead), and a claim that near-matches a value a supersede or retraction rejected (any type, any scope) is refused with the rejected record, its persisted reason and the survivor unless it is measurably closer to the survivor and carries none of the values the correction removed; restating a record a merge consolidated is refused pointing at the survivor that holds it. Over MCP both refusals are final and declared edges (distinct_from, refines, ...) do not exempt them. Operator tier is never available here: a source naming an operator ("siim", "user", "human:<name>") is recorded at agent tier as "mcp:<source>" (the claimed string kept in ext.claimed_source, the response carrying source_warning), and answers_question refuses an operator-sourced question. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
   {
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
-    title: z.string().describe('Short title for the memory'),
-    body: z.string().optional().describe('Full content/details'),
+    title: titleText().describe(`Short title for the memory (at most ${MAX_TITLE_CHARS} characters)`),
+    body: bodyText().optional().describe(`Full content/details (at most ${MAX_BODY_CHARS} characters)`),
     source: z.string().optional().describe('Who/what created this memory (defaults to the connected client name; "unknown" is rejected)'),
     tags: z.array(z.string()).optional().describe('Tags'),
     anchors: z.array(z.string()).optional().describe('File paths to anchor the claim to. Prefer ABSOLUTE paths — a bare repo-relative path resolves nowhere when the store\'s project root is not the repo (e.g. a home-rooted personal store). Repo-relative and repo-qualified ("repo/path") forms are also accepted; pass anchor_root for the former. If the claim describes code, anchor it now.'),
@@ -400,8 +411,8 @@ server.tool(
   {
     id: z.string().describe('Memory ID to supersede (or the survivor id when merging without a replacement body)'),
     reason: z.string().describe('Why the target is wrong, stale, or being merged. Persisted on every record involved.'),
-    title: z.string().optional().describe('Fresh title for the replacement (only used when body is provided; defaults to the old title)'),
-    body: z.string().optional().describe('Replacement content. If omitted with no merge_from, the target is retracted.'),
+    title: titleText().optional().describe(`Fresh title for the replacement (only used when body is provided; defaults to the old title; at most ${MAX_TITLE_CHARS} characters)`),
+    body: bodyText().optional().describe(`Replacement content (at most ${MAX_BODY_CHARS} characters). If omitted with no merge_from, the target is retracted.`),
     merge_from: z.array(z.string()).optional().describe('Additional memory ids to collapse into the survivor in a single atomic operation.'),
     source: z.string().optional().describe('Who is performing the supersede'),
     scope: z.string().optional().describe('Project scope for the surviving record, e.g. "kleidia"; "universal" marks it visible from every scope. Omit it and the survivor inherits the scope of the records it replaces (and stays unscoped when they disagree or carry none). State it explicitly when you are reclassifying the knowledge: this server may have been started with a working directory unrelated to that project, so nothing else here can infer the right answer.'),
@@ -413,7 +424,7 @@ server.tool(
   'memspec_observe',
   'Capture a point-in-time observation with hard expiry. Observations index a moment — they do not go stale and do not claim to be current; they simply vanish on expiry. Use for ephemeral context (what a tool returned, what was visible on screen, what a user said in passing). For durable knowledge, use memspec_remember instead.',
   {
-    text: z.string().describe('Observation text. First line becomes the title; the full text is the body.'),
+    text: bodyText('text').describe(`Observation text (at most ${MAX_BODY_CHARS} characters). First line becomes the title; the full text is the body.`),
     ttl: z.string().optional().describe('Duration before the observation expires (e.g. "7d", "48h", "never"). Defaults to 7d.'),
     scope: z.string().optional().describe('Project scope this observation belongs to, e.g. "kleidia". Only readers with that active scope will see it; "universal" marks it visible from every scope. State it explicitly whenever you know which project the moment belongs to: this server may have been started with a working directory unrelated to that project, and scope derived from the working directory would then be wrong. Omit it to fall back to working-directory derivation (and to writing no scope at all when nothing matches).'),
   },
@@ -658,7 +669,7 @@ server.tool(
   'memspec_question',
   'Create or edit a question group — a named question with competing answer records, the preferred form when two or more records answer one question (clearer than pairwise conflicts_with). Create: pass a `title` plus `answers` (existing record ids; each must be active or superseded); add `closed: true` for a closed-world question whose answers are the only candidates. Edit an existing question by passing its `id` with exactly one of: `add` (more answer ids), `close`/`open` (toggle closed-world), or `resolve` (settle it — requires exactly one answer still active, the survivor). A closed question with one surviving active answer is reported "resolved by elimination" in memspec_status; resolution is never automatic. Over MCP an operator-sourced question is read-only (add/close/open/resolve refused; a human uses `memspec question` at a terminal), and a source naming an operator creates the question at agent tier.',
   {
-    title: z.string().optional().describe('The question text (create only). Omit when editing an existing question by id.'),
+    title: titleText().optional().describe('The question text (create only). Omit when editing an existing question by id.'),
     id: z.string().optional().describe('Existing question id to edit (with add/close/open/resolve). Omit when creating.'),
     answers: z.array(z.string()).optional().describe('Create: competing answer record ids (each must exist and be active or superseded).'),
     closed: z.boolean().optional().describe('Create: mark the question closed-world (its answers are the only candidates).'),

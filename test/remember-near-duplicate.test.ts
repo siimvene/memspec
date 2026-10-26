@@ -80,14 +80,20 @@ test('near-duplicate refusal is scoped like the exact-title refusal: other types
 
 test('distinct_from records the judgement and lets a lexically close, different claim through', async () => {
   const cwd = await project();
-  const staging = runRemember('fact', 'Staging runs Postgres 16', { cwd, body: 'The staging database is Postgres 16.', source: 'agent-a' });
+  // One swapped qualifier in a longer claim: same identifiers, wording that
+  // agrees (similarity.ts `sameClaim`), so only the writer can tell them apart.
+  // (The two-word "Staging runs Postgres 16" pair now differs in wording and
+  // is written without a declaration.)
+  const DB = (env: string) =>
+    `The ${env} database runs Postgres 16 with nightly backups to the shared bucket, point-in-time recovery and two read replicas behind the pooler.`;
+  const staging = runRemember('fact', 'Staging database runs Postgres 16', { cwd, body: DB('staging'), source: 'agent-a' });
 
   assert.throws(
-    () => runRemember('fact', 'Production runs Postgres 16', { cwd, body: 'The production database is Postgres 16.', source: 'agent-a' }),
+    () => runRemember('fact', 'Production database runs Postgres 16', { cwd, body: DB('production'), source: 'agent-a' }),
     /remember refuses near-duplicate/,
   );
-  const prod = runRemember('fact', 'Production runs Postgres 16', {
-    cwd, body: 'The production database is Postgres 16.', source: 'agent-a', distinctFrom: [staging.id],
+  const prod = runRemember('fact', 'Production database runs Postgres 16', {
+    cwd, body: DB('production'), source: 'agent-a', distinctFrom: [staging.id],
   });
   assert.deepEqual(new MemspecStore(cwd).findById(prod.id)!.distinct_from, [staging.id]);
 });

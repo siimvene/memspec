@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { loadClaimIndex, type ClaimIndexEntry } from './claim-index.js';
 import type { CompositeStore } from './composite-store.js';
-import { CLAIM_SIMILARITY_THRESHOLD, displayToken, isIdentifierToken, weightedSimilarity } from './similarity.js';
+import { CLAIM_SIMILARITY_THRESHOLD, displayToken, isIdentifierToken, sameClaim, weightedSimilarity, type ClaimShape } from './similarity.js';
 import type { MemspecStore } from './store.js';
 
 /**
@@ -54,7 +54,18 @@ import type { MemspecStore } from './store.js';
  *       write supersedes S): measurably closer to the current value, and
  *     - sim(claim, S) >= sim(claim, R) (implied by the margin when S' = S).
  *   A retraction (no survivor) always refuses. Caller-declared edges
- *   (distinct_from, refines, ...) exempt nothing.
+ *   (distinct_from, refines, ...) exempt nothing, and neither does naming
+ *   another subject: a templated "`B` in a.ts is set to 2" near a rejected
+ *   "`A` in a.ts is set to 2" is judged like any other claim (fail closed).
+ *   The near-duplicate band's identifier rule (similarity.ts `sameClaim`)
+ *   never sets a rejection aside: lexical tests for "another subject" (a new
+ *   title identifier, a dropped title subject) were bypassed by respelling
+ *   the subject (`stash_callback`, STASH-CALLBACK) or by restating R in the
+ *   body under a bland title. Accepted cost: an MCP write of a
+ *   different-subject claim lexically near a rejected value is refused; a
+ *   human writes it with `--allow-rejected`. A merged piece (consolidated,
+ *   not rejected) is refused as a near-duplicate, so the band's rule applies
+ *   there: a claim that is not the same claim as the piece does not restate it.
  *
  * Why more than the margin: when the write is itself the supersede of S the
  * claim is its own survivor and scores 1.0 against it, so the margin alone
@@ -103,6 +114,12 @@ export const CLAIM_WRITE_LOCK = 'remember';
 export interface IncomingClaim {
   tokens: ReadonlySet<string>;
   weight: number;
+  /**
+   * `claimShape` of the claim (similarity.ts), read only for merged pieces
+   * (`sameClaim`, the near-duplicate band's rule); without it similarity
+   * alone decides. Rejections never read it.
+   */
+  shape?: ClaimShape;
 }
 
 /** An archived record whose rejected value the incoming claim re-asserts. */
@@ -256,7 +273,12 @@ export function scanArchive(
 
     const holder = mergeHolder(r, after);
     if (holder) {
-      if (holder.id !== pending?.newId) merged.push({ piece: r, survivor: holder, similarity });
+      // A merged piece is refused as a near-duplicate, so the active band's
+      // rule applies (similarity.ts `sameClaim`): a claim naming something the
+      // piece does not, or saying something else about it, is a different
+      // claim, not a restatement of it.
+      const otherClaim = !transfer && incoming.shape !== undefined && !sameClaim(incoming.shape, r);
+      if (holder.id !== pending?.newId && !otherClaim) merged.push({ piece: r, survivor: holder, similarity });
       continue;
     }
 
