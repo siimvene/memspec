@@ -13,11 +13,13 @@ npm run build
 node scripts/bench-wrongness/run.mjs /tmp/wrongness.json
 ```
 
-One command, 7 to 9 minutes on an M-series laptop (most of it is writing
+One command, 7 to 10 minutes on an M-series laptop (most of it is writing
 2,100 records through `remember`, 2,100 searches and 1,000 `check` runs). It prints the
 tables below and writes the full result, including every false fact and how
 memspec treated it, to the JSON path. Flags: `--repo <url|path>` clones from a
-local mirror instead of GitHub, `--work <dir>` keeps the work directory,
+local mirror instead of GitHub (a relative path resolves against the current
+directory), `--work <dir>` keeps the work directory (it must be new, empty or
+one an earlier run created: the run recreates fixed subdirectories in it),
 `--pairs <n>` sets the number of contradiction pairs (default 120),
 `--skip-contradiction` runs Part A only. The answer-key extractors have a
 self-test: `node --test scripts/bench-wrongness/`.
@@ -70,24 +72,27 @@ involved anywhere.
 
 | class | what the fact says | facts | false at C5 |
 |-------|--------------------|-------|-------------|
-| export | `src/x.ts` exports `name` as a value / type / class / enum | 638 | 6 |
+| export | `src/x.ts` exports `name` as a value / type / class / enum (`export { x }` takes x's declaration; a re-exported import is "a re-listed binding") | 637 | 6 |
 | signature | `fn` in `src/x.ts` takes parameters `(a, b?, ...rest)` (exported and module-internal functions) | 345 | 15 |
 | default | option or parameter default: `defaults` object literals, `options.x ?? literal`, `param = literal` | 32 | 0 |
 | constant | top-level `const NAME = literal` | 29 | 1 |
 | dependency | `package.json` dependency / devDependency / engine pin | 26 | 23 |
-| public-api | `name` is importable from `hono/<subpath>` (package.json `exports` map, followed through `export *` / `export { } from` chains) | 348 | 1 |
+| public-api | `name` is importable from `hono/<subpath>` (package.json `exports` map, followed through `export *` / `export { } from` chains; a named re-export counts only when its source exports the name) | 348 | 1 |
 | usage | `name` from `src/a.ts` is used by `src/b.ts` (named imports, type imports included) | 698 | 16 |
 
 2,123 facts at the start commit. Two are refused at write time (see Observed
-behaviour), leaving 2,121; 5 more are `uncertain` at C5 and excluded from the
-scores, leaving 2,116 scored facts, 62 of them false.
+behaviour), leaving 2,121; 6 more are `uncertain` at C5 and excluded from the
+scores, leaving 2,115 scored facts, 62 of them false.
 
 `uncertain` is a narrow escape hatch for refactors the extractor cannot follow:
 a signature whose function still exists under the same name but is now built
-by a factory call (`export const upgradeWebSocket: T = defineHelper(...)`), or a
-default whose pattern vanished while the file still mentions the option and
-the old value. The 5 uncertain facts are listed in the JSON (all 5 were
-flagged by memspec, so excluding them does not flatter it).
+by a factory call (`export const upgradeWebSocket: T = defineHelper(...)`; a
+name now declared only as something provably not callable, such as a literal
+or an interface, is false instead), a default whose pattern vanished while the
+file still mentions the option and the old value, or an export whose group was
+unknown on one side (a re-exported import, like `memo` in `jsx/dom/index.ts`,
+which became a local `const` by C1). The 6 uncertain facts are listed in the
+JSON (all 6 were flagged by memspec, so excluding them does not flatter it).
 
 Validation: `extract.test.mjs` checks each extractor on a case it must accept
 and one it must reject (JSDoc examples, regex literals containing `//`,
@@ -140,17 +145,17 @@ Same definitions as the mex post:
 
 | checkpoint | facts | false | stale-served | fresh retention | false alarm | flag precision | balanced acc |
 |------------|-------|-------|--------------|-----------------|-------------|----------------|--------------|
-| C1 (+73)   | 2119  | 16    | 6.3%         | 30%             | 70%         | 1%             | 61.9%        |
-| C2 (+147)  | 2119  | 34    | 8.8%         | 20.1%           | 79.9%       | 1.8%           | 55.7%        |
-| C3 (+220)  | 2118  | 42    | 7.1%         | 16.3%           | 83.7%       | 2.2%           | 54.6%        |
-| C4 (+294)  | 2116  | 58    | 5.2%         | 14.1%           | 85.9%       | 3%             | 54.5%        |
-| C5 (+367)  | 2116  | 62    | 6.5%         | 12.7%           | 87.3%       | 3.1%           | 53.1%        |
+| C1 (+73)   | 2118  | 16    | 6.3%         | 30%             | 70%         | 1%             | 61.9%        |
+| C2 (+147)  | 2118  | 34    | 8.8%         | 20.2%           | 79.8%       | 1.8%           | 55.7%        |
+| C3 (+220)  | 2117  | 42    | 7.1%         | 16.3%           | 83.7%       | 2.2%           | 54.6%        |
+| C4 (+294)  | 2115  | 58    | 5.2%         | 14.1%           | 85.9%       | 3%             | 54.5%        |
+| C5 (+367)  | 2115  | 62    | 6.5%         | 12.7%           | 87.3%       | 3.1%           | 53.1%        |
 
 ### A. C5 by fact class
 
 | class      | facts | false | stale-served | fresh retention | false alarm | flag precision | balanced acc |
 |------------|-------|-------|--------------|-----------------|-------------|----------------|--------------|
-| export     | 638   | 6     | 0%           | 14.1%           | 85.9%       | 1.1%           | 57%          |
+| export     | 637   | 6     | 0%           | 14.1%           | 85.9%       | 1.1%           | 57.1%        |
 | signature  | 345   | 15    | 0%           | 10.3%           | 89.7%       | 4.8%           | 55.2%        |
 | default    | 32    | 0     | n/a          | 9.4%            | 90.6%       | 0%             | n/a          |
 | constant   | 29    | 1     | 0%           | 21.4%           | 78.6%       | 4.3%           | 60.7%        |
@@ -162,10 +167,10 @@ Same definitions as the mex post:
 
 | row                                   | facts | false | stale-served | fresh retention | false alarm | flag precision | balanced acc |
 |---------------------------------------|-------|-------|--------------|-----------------|-------------|----------------|--------------|
-| memspec, all facts                    | 2116  | 62    | 6.5%         | 12.7%           | 87.3%       | 3.1%           | 53.1%        |
-| unlinked memory (never flags)         | 2116  | 62    | 100%         | 100%            | 0%          | n/a            | 50%          |
-| memspec, code facts                   | 1044  | 22    | 0%           | 12.9%           | 87.1%       | 2.4%           | 56.5%        |
-| symbol-grain simulation, code facts   | 1044  | 22    | 0%           | 76.9%           | 23.1%       | 8.5%           | 88.5%        |
+| memspec, all facts                    | 2115  | 62    | 6.5%         | 12.7%           | 87.3%       | 3.1%           | 53.1%        |
+| unlinked memory (never flags)         | 2115  | 62    | 100%         | 100%            | 0%          | n/a            | 50%          |
+| memspec, code facts                   | 1043  | 22    | 0%           | 12.9%           | 87.1%       | 2.4%           | 56.5%        |
+| symbol-grain simulation, code facts   | 1043  | 22    | 0%           | 76.9%           | 23.1%       | 8.5%           | 88.4%        |
 | public-api, entry+package.json anchor | 348   | 1     | 0%           | 0%              | 100%        | 0.3%           | 50%          |
 | public-api, full closure anchor       | 348   | 1     | 0%           | 0%              | 100%        | 0.3%           | 50%          |
 | usage, subject-file anchor            | 698   | 16    | 25%          | 18.9%           | 81.1%       | 2.1%           | 47%          |
@@ -236,7 +241,7 @@ probably claims whose only distinctive shared title term is the function name
 - **Finer anchors would buy most of it back.** Flagging on the enclosing
   statement instead of the file keeps stale-served at 0% on the same code facts
   and raises fresh retention from 12.9% to 76.9% (false alarms 87.1% -> 23.1%,
-  balanced accuracy 56.5% -> 88.5%). For comparison, mex reports 56.9% fresh
+  balanced accuracy 56.5% -> 88.4%). For comparison, mex reports 56.9% fresh
   retention for `mex check` (symbol-linked) on its own fact set.
 - **`memspec check` is a topic-overlap gate, not a contradiction detector.**
   It pairs 86-89% of contradictions that keep the symbol and file in the claim
@@ -252,7 +257,7 @@ probably claims whose only distinctive shared title term is the function name
 ## Threats to validity
 
 - **One repository, one window.** Hono is a stable, well-factored library;
-  churn per file and the false-fact rate (62 of 2,116, 2.9%, against mex's 30
+  churn per file and the false-fact rate (62 of 2,115, 2.9%, against mex's 30
   of 132) will differ elsewhere. The fact set is dominated by true facts, so
   false-alarm numbers are tight and stale-served numbers rest on 62 facts (16
   for `usage`).
@@ -262,7 +267,7 @@ probably claims whose only distinctive shared title term is the function name
   files than the one they are "about", so they behave like `usage`, not like
   `signature`: expect higher stale-served under single-file anchors.
 - **The fact mix sets the overall row.** Overall numbers are a weighted mix of
-  classes chosen by what the extractors could find (638 exports, 698 usages);
+  classes chosen by what the extractors could find (637 exports, 698 usages);
   read the per-class table.
 - **The anchor policy is the harness's choice.** The headline uses "anchor the
   file the fact is about"; the closure rows bound the other end. Real agents
@@ -270,7 +275,7 @@ probably claims whose only distinctive shared title term is the function name
   is served unflagged until its calendar TTL fires, which this replay does not
   model: records are written with `check_by: never`).
 - **Extractor error.** A construct the extractor stops recognising would mark
-  a true fact false. The `uncertain` rule catches the two refactor shapes seen
+  a true fact false. The `uncertain` rule catches the three refactor shapes seen
   in this window; the false list in the JSON was spot-checked, not fully
   audited.
 - **Planted contradictions are templated.** Three phrasing templates and a

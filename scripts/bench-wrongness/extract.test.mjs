@@ -11,7 +11,10 @@ import {
 } from './extract.mjs';
 import { idFor, mutate } from './contradiction.mjs';
 import { titleOf } from './phrasing.mjs';
-import { score } from './run.mjs';
+import { score, repoSource, redactUrl, claimWorkDir } from './run.mjs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const get = (facts, key) => facts.get(key)?.value;
 
@@ -56,7 +59,7 @@ test('exports are grouped by declaration kind and a name may carry a value and a
   assert.equal(get(facts, 'export|src/m.ts|Bar'), 'type');
   assert.equal(get(facts, 'export|src/m.ts|Baz'), 'class');
   assert.equal(get(facts, 'export|src/m.ts|qux'), 'value');
-  assert.equal(get(facts, 'export|src/m.ts|local'), 'listed');
+  assert.equal(get(facts, 'export|src/m.ts|local'), 'value', 'a re-listed local binding takes its declaration group');
   assert.equal(facts.has('export|src/m.ts|nope'), false);
 });
 
@@ -143,6 +146,69 @@ test('factHolds: true, false (changed or removed), uncertain', () => {
   assert.equal(factHolds(def, same), 'true');
   assert.equal(factHolds(def, changed, "const { mode = 'fast' } = options"), 'uncertain');
   assert.equal(factHolds(def, changed, 'nothing here'), 'false');
+});
+
+test('named re-exports resolve through the source module: missing bindings are not public, aliases and chains are followed', () => {
+  const files = new Map([
+    ['src/index.ts', "export { x, gone } from './a'\nexport { b as bee } from './b'\nexport { ext } from 'pkg'\n"],
+    ['src/a.ts', "export { x } from './c'\n"],
+    ['src/c.ts', 'export const x = 1\n'],
+    ['src/b.ts', 'export const b = 2\nexport const bee = 3\n'],
+  ]);
+  const names = publicNames('src/index.ts', (p) => files.get(p) ?? null, (p) => files.has(p));
+  assert.deepEqual([...names.keys()].sort(), ['bee', 'ext', 'x'], '`gone` is listed but a.ts does not export it');
+  assert.deepEqual(names.get('x'), ['src/index.ts', 'src/a.ts', 'src/c.ts']);
+  assert.deepEqual(names.get('bee'), ['src/index.ts', 'src/b.ts']);
+  assert.deepEqual(names.get('ext'), ['src/index.ts'], 'a package re-export cannot be followed and stays as listed');
+  // The alias reads the SOURCE name: renaming `b` in b.ts makes `bee` false even though b.ts still exports a `bee`.
+  files.set('src/b.ts', 'export const b2 = 2\nexport const bee = 3\n');
+  assert.equal(publicNames('src/index.ts', (p) => files.get(p) ?? null, (p) => files.has(p)).has('bee'), false);
+});
+
+test('re-listed local bindings take the declaration group; an unresolved listing compares as uncertain', () => {
+  const at0 = extractSourceFacts('src/l.ts', 'const x = 1\nexport { x }\nclass K {}\nexport type { K }\n');
+  assert.equal(get(at0, 'export|src/l.ts|x'), 'value');
+  assert.equal(get(at0, 'export|src/l.ts|K'), 'type', 'export type { } exports the type side only');
+  assert.equal(factHolds(at0.get('export|src/l.ts|x'), extractSourceFacts('src/l.ts', 'export type x = string\n')), 'false');
+  assert.equal(factHolds(at0.get('export|src/l.ts|x'), extractSourceFacts('src/l.ts', 'export const x = 2\n')), 'true');
+  const imp = extractSourceFacts('src/l.ts', "import { y } from './y'\nexport { y }\n");
+  assert.equal(get(imp, 'export|src/l.ts|y'), 'listed');
+  assert.equal(factHolds(imp.get('export|src/l.ts|y'), imp), 'true');
+  assert.equal(factHolds(imp.get('export|src/l.ts|y'), extractSourceFacts('src/l.ts', 'export type y = 1\n')), 'uncertain');
+  assert.equal(factHolds(extractSourceFacts('src/l.ts', 'export const y = 1\n').get('export|src/l.ts|y'), imp), 'uncertain');
+  assert.equal(factHolds(extractSourceFacts('src/l.ts', 'export type y = 1\n').get('export|src/l.ts|y'), extractSourceFacts('src/l.ts', 'export const y = 1\n')), 'false');
+});
+
+test('signature: a function replaced by a non-callable declaration is false, not uncertain', () => {
+  const sig = extractSourceFacts('src/n.ts', 'export function f(a: number) {}\n').get('signature|src/n.ts|f');
+  assert.equal(factHolds(sig, extractSourceFacts('src/n.ts', 'export const f = 42\n')), 'false');
+  assert.equal(factHolds(sig, extractSourceFacts('src/n.ts', 'export const f = {\n  a: 1,\n}\n')), 'false');
+  assert.equal(factHolds(sig, extractSourceFacts('src/n.ts', 'export interface f { a: number }\n')), 'false');
+  assert.equal(factHolds(sig, extractSourceFacts('src/n.ts', 'export const f: F = make()\n')), 'uncertain');
+  assert.equal(factHolds(sig, extractSourceFacts('src/n.ts', 'export type f = F\nexport const f: F = make()\n')), 'uncertain', 'a type and a maybe-callable value of one name stay uncertain');
+  assert.equal(factHolds(sig, extractSourceFacts('src/n.ts', 'export class f {}\n')), 'uncertain', 'a class is constructible, so its parameters are not provably gone');
+});
+
+test('run helpers: relative --repo paths resolve against the caller, credentials never reach the log, --work must be ours', () => {
+  const base = mkdtempSync(join(tmpdir(), 'wrongness-test-'));
+  try {
+    mkdirSync(join(base, 'hono'));
+    assert.equal(repoSource('./hono', base), join(base, 'hono'));
+    assert.equal(repoSource('https://github.com/honojs/hono.git', base), 'https://github.com/honojs/hono.git');
+    assert.equal(repoSource('git@github.com:honojs/hono.git', base), 'git@github.com:honojs/hono.git');
+    assert.equal(redactUrl('clone https://user:s3cret@host/r.git failed'), 'clone https://***@host/r.git failed');
+    assert.equal(redactUrl('https://host/r.git and git@host:r.git'), 'https://host/r.git and git@host:r.git');
+    // An empty or missing directory is claimed; a claimed one is reused; anything else is refused untouched.
+    const fresh = join(base, 'work');
+    claimWorkDir(fresh);
+    claimWorkDir(fresh);
+    const foreign = join(base, 'foreign');
+    mkdirSync(join(foreign, 'contra'), { recursive: true });
+    assert.throws(() => claimWorkDir(foreign), /not a benchmark work directory/);
+    assert.equal(existsSync(join(foreign, 'contra')), true);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test('contradiction helpers: ids are schema-valid and deterministic; mutations change the value', () => {

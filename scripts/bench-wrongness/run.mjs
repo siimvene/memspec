@@ -16,7 +16,7 @@
 // The replayed repository is untrusted data: it is cloned bare into a temp
 // directory, only `git` reads it (hooks disabled), and none of its scripts run.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -61,6 +61,28 @@ function parseArgs(argv) {
 }
 
 const log = (...m) => console.error('[wrongness]', ...m);
+
+/** `--repo`: an existing local path resolves against the caller's cwd (git runs from the work dir); anything else is a URL. */
+export function repoSource(arg, cwd = process.cwd()) {
+  const local = resolve(cwd, arg);
+  return existsSync(local) ? local : arg;
+}
+
+/** Mask URL userinfo (`https://user:token@host`) in text bound for a log or an error. */
+export const redactUrl = (s) => String(s).replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1***@');
+
+const WORK_MARKER = '.memspec-wrongness-work';
+/**
+ * The run deletes and recreates fixed subdirectories (`tree-*`, `contra`) of
+ * the work dir, so it only works in a directory it created: missing or empty
+ * (claimed with a marker file), or one that already carries the marker.
+ */
+export function claimWorkDir(dir) {
+  mkdirSync(dir, { recursive: true });
+  if (existsSync(join(dir, WORK_MARKER))) return;
+  if (readdirSync(dir).length > 0) throw new Error(`${dir} is not a benchmark work directory (no ${WORK_MARKER}); pass an empty or new --work dir`);
+  writeFileSync(join(dir, WORK_MARKER), 'memspec wrongness benchmark work directory\n');
+}
 
 // ---- Answer key ---------------------------------------------------------
 /** Every fact extractable at `commit`, plus the file texts the 'uncertain' rule reads. */
@@ -258,7 +280,8 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const started = Date.now();
   const work = args.work ? resolve(args.work) : mkdtempSync(join(tmpdir(), 'memspec-wrongness-'));
-  mkdirSync(work, { recursive: true });
+  claimWorkDir(work);
+  const repo = repoSource(args.repo);
   // memspec must never see the operator's own stores: a throwaway HOME and no walk-up.
   const home = join(work, 'home');
   mkdirSync(home, { recursive: true });
@@ -271,8 +294,12 @@ async function main() {
   // 1. Clone the replay repo bare, drop its remote, check the pins.
   const bare = join(work, 'hono.git');
   if (!existsSync(bare)) {
-    log(`cloning ${args.repo} -> ${bare}`);
-    git(work, ['clone', '--bare', '--quiet', args.repo, bare]);
+    log(`cloning ${redactUrl(repo)} -> ${bare}`);
+    try {
+      git(work, ['clone', '--bare', '--quiet', repo, bare]);
+    } catch (err) {
+      throw new Error(redactUrl(err?.message ?? err));
+    }
   }
   try { git(bare, ['remote', 'remove', 'origin']); } catch { /* already removed */ }
   for (const sha of [START, ...CHECKPOINTS.map((c) => c.sha)]) git(bare, ['cat-file', '-e', `${sha}^{commit}`]);

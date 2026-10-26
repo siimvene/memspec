@@ -230,8 +230,10 @@ export function topLevelStatements(code) {
   }
   if (cur) stmts.push(cur);
   for (const s of stmts) {
-    const m = s.text.match(/^(?:export\s+)?(?:declare\s+)?(?:default\s+)?(?:async\s+)?(?:abstract\s+)?(?:function\*?|class|const|let|var|interface|type|enum|namespace)\s+([A-Za-z_$][\w$]*)/);
-    s.name = m ? m[1] : null;
+    const m = s.text.match(/^(?:export\s+)?(?:declare\s+)?(?:default\s+)?(?:async\s+)?(?:abstract\s+)?(function\*?|class|const|let|var|interface|type|enum|namespace)\s+([A-Za-z_$][\w$]*)/);
+    s.name = m ? m[2] : null;
+    s.kind = m ? m[1].replace('*', '') : null;
+    s.nameEnd = m ? m[0].length : -1;
   }
   return stmts;
 }
@@ -322,6 +324,17 @@ function firstDepthZeroAssign(s) {
   return -1;
 }
 
+/** Export group of a top-level declaration keyword (as `addExport` records it). */
+const KIND_GROUP = { function: 'value', const: 'value', let: 'value', var: 'value', interface: 'type', type: 'type', class: 'class', enum: 'enum', namespace: 'namespace' };
+
+/** Is this top-level declaration provably not callable? A class (constructible) or a namespace (mergeable with a function) is not proof. */
+function notCallable(st) {
+  if (st.kind === 'interface' || st.kind === 'type' || st.kind === 'enum') return true;
+  if (st.kind !== 'const' && st.kind !== 'let' && st.kind !== 'var') return false;
+  const init = initializerOf(st.text, st.nameEnd);
+  return init !== null && !isFunctionInit(init) && (literalValue(init) !== null || /^\s*[{[]/.test(init));
+}
+
 /** Parse the top-level `key: literal` entries of an object literal starting at `s[0] === '{'`. */
 function objectLiteralEntries(s) {
   const end = matchBracket(s, 0);
@@ -357,20 +370,43 @@ export function extractSourceFacts(file, src) {
   };
   const code = stripComments(src);
   const stmts = topLevelStatements(code);
+  // Declaration groups of every top-level name, so `export { x }` of a local binding gets x's group.
+  const localGroups = new Map();
+  for (const st of stmts) {
+    if (!st.name) continue;
+    const g = localGroups.get(st.name) ?? new Set();
+    g.add(KIND_GROUP[st.kind]);
+    localGroups.set(st.name, g);
+  }
   for (const st of stmts) {
     const text = st.text;
     const span = ws(text);
     const m = text.match(DECL);
     // Declared-name markers (not benchmark facts): let `factHolds` tell
-    // "function removed" from "function now built by a factory call".
-    if (st.name) facts.set(`decl|${file}|${st.name}`, { cls: 'decl', key: `decl|${file}|${st.name}`, file, name: st.name, value: '' });
-    const list = m ? null : text.match(/^export\s+(?:type\s+)?\{([^}]*)\}\s*(?!\s*from\b)/);
+    // "function removed" from "function now built by a factory call". The
+    // value is 'noncallable' only when every declaration of the name is
+    // provably not callable (interface/type/enum, or a literal initializer).
+    if (st.name) {
+      const key = `decl|${file}|${st.name}`;
+      const prev = facts.get(key);
+      const value = notCallable(st) && (!prev || prev.value === 'noncallable') ? 'noncallable' : '';
+      facts.set(key, { cls: 'decl', key, file, name: st.name, value });
+    }
+    const list = m ? null : text.match(/^export\s+(type\s+)?\{([^}]*)\}\s*(?!\s*from\b)/);
     if (list && !/^export\s+(?:type\s+)?\{[^}]*\}\s*from\b/.test(text)) {
-      // `export { a, b as c }` of local bindings: exported, declaration group unknown.
-      for (const part of list[1].split(',')) {
-        const p = part.trim().replace(/^type\s+/, '');
-        const exported = p.match(/^(?:[A-Za-z_$][\w$]*\s+as\s+)?([A-Za-z_$][\w$]*)$/)?.[1];
-        if (exported && exported !== 'default') addExport(exported, 'listed', span);
+      // `export { a, b as c }` of local bindings: the local declaration's
+      // group; 'listed' (group unknown) when `a` is not declared here (an import).
+      for (const part of list[2].split(',')) {
+        const raw = part.trim();
+        const typeOnly = Boolean(list[1]) || /^type\s/.test(raw);
+        const lm = raw.replace(/^type\s+/, '').match(/^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$/);
+        if (!lm) continue;
+        const exported = lm[2] ?? lm[1];
+        if (exported === 'default') continue;
+        const groups = localGroups.get(lm[1]);
+        if (!groups) addExport(exported, 'listed', span);
+        else if (typeOnly) addExport(exported, 'type', span);
+        else for (const g of groups) addExport(exported, g, span);
       }
     }
     if (m) {
@@ -455,7 +491,7 @@ export function moduleExports(src) {
   const code = stripComments(src);
   const names = new Set();
   const starFrom = [];
-  const namedFrom = []; // [spec, [names]]
+  const namedFrom = []; // [spec, [[source name, exported name]]]
   for (const st of topLevelStatements(code)) {
     const t = st.text;
     if (!t.startsWith('export')) continue;
@@ -476,7 +512,10 @@ export function moduleExports(src) {
         if (!p) continue;
         const asM = p.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
         const exported = asM ? asM[2] : p.match(/^([A-Za-z_$][\w$]*)$/)?.[1];
-        if (exported) { names.add(exported); listed.push(exported); }
+        if (!exported) continue;
+        // `export { x } from './m'` is only an export when ./m provides x: publicNames checks that.
+        if (list[2]) listed.push([asM ? asM[1] : exported, exported]);
+        else names.add(exported);
       }
       if (list[2]) namedFrom.push([list[2], listed]);
     }
@@ -499,32 +538,36 @@ export function resolveModule(fromFile, spec, has) {
 }
 
 /**
- * Names exported by `entry`, following `export *` chains. Returns
- * Map name -> list of files on the path from entry to the declaring module.
+ * Names exported by `entry`, following `export *` and `export { } from`
+ * chains. Returns Map name -> list of files on the path from entry to the
+ * declaring module. A named re-export counts only when its source module
+ * exports the source name; one whose source cannot be read (a package, a
+ * cycle) is kept on the re-exporting file alone.
  */
 export function publicNames(entry, read, has) {
   const memo = new Map();
   const visit = (file, stack) => {
     if (memo.has(file)) return memo.get(file);
-    if (stack.has(file)) return new Map();
+    if (stack.has(file)) return null;
     stack.add(file);
     const src = read(file);
     const out = new Map();
     if (src !== null) {
       const { names, starFrom, namedFrom } = moduleExports(src);
-      const viaNamed = new Map();
+      for (const n of names) out.set(n, [file]);
       for (const [spec, listed] of namedFrom) {
         const target = resolveModule(file, spec, has);
-        for (const n of listed) viaNamed.set(n, target);
-      }
-      for (const n of names) {
-        const target = viaNamed.get(n);
-        out.set(n, target ? [file, target] : [file]);
+        const from = target && read(target) !== null ? visit(target, stack) : null;
+        for (const [source, exported] of listed) {
+          if (out.has(exported)) continue;
+          if (from === null) out.set(exported, target ? [file, target] : [file]);
+          else if (from.has(source)) out.set(exported, [file, ...from.get(source)]);
+        }
       }
       for (const spec of starFrom) {
         const target = resolveModule(file, spec, has);
         if (!target) continue;
-        for (const [n, path] of visit(target, stack)) {
+        for (const [n, path] of visit(target, stack) ?? []) {
           if (n === 'default' || out.has(n)) continue;
           out.set(n, [file, ...path]);
         }
@@ -613,16 +656,22 @@ export function factHolds(f0, now, fileTextNow) {
   const g = now.get(f0.key);
   if (f0.cls === 'export') {
     if (!g) return 'false';
+    // 'listed' is a re-exported import whose group is unknown: it matches
+    // nothing for sure, so a group it would have to stand in for is uncertain.
     const was = new Set(f0.value.split('+'));
     const is = new Set(g.value.split('+'));
-    if (is.has('listed') || was.has('listed')) return 'true';
-    for (const x of was) if (!is.has(x)) return 'false';
+    for (const x of was) if (x !== 'listed' && !is.has(x)) return is.has('listed') ? 'uncertain' : 'false';
+    if (was.has('listed') && !is.has('listed')) return 'uncertain';
     return 'true';
   }
   if (g) return g.value === f0.value ? 'true' : 'false';
   // The function still exists under the same name but its parameters are no
-  // longer readable (e.g. `export const f: T = helper(...)`).
-  if (f0.cls === 'signature' && now.has(`decl|${f0.file}|${f0.name}`)) return 'uncertain';
+  // longer readable (e.g. `export const f: T = helper(...)`). A name now only
+  // declared as something provably not callable falls through to 'false'.
+  if (f0.cls === 'signature') {
+    const d = now.get(`decl|${f0.file}|${f0.name}`);
+    if (d && d.value !== 'noncallable') return 'uncertain';
+  }
   if (f0.cls === 'default' && typeof fileTextNow === 'string') {
     const stillMentioned = fileTextNow.includes(f0.option) && fileTextNow.includes(f0.value.replace(/^\[|\]$/g, '').split(',')[0].trim());
     if (stillMentioned) return 'uncertain';
