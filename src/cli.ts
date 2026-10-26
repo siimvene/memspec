@@ -547,11 +547,20 @@ program
   .argument('<dir>', 'bundle directory')
   .option('--cwd <path>', 'project root')
   .option('--store <name>', 'target store layer when several writable layers are in scope')
-  .action((dir: string, options: { cwd?: string; format: string; store?: string }) => {
+  .option('--trusted', 'keep the bundle\'s trust fields (source tier, pinned, verified_with, last_verified) verbatim; only for a bundle you exported yourself. Default: re-derive them (imported records land as source_kind import, unpinned, witness re-checked locally)')
+  .action((dir: string, options: { cwd?: string; format: string; store?: string; trusted?: boolean }) => {
     if (options.format !== OKF_FORMAT) throw new Error(`--format must be: ${OKF_FORMAT} (got "${options.format}")`);
-    const res = runImportOkf({ cwd: options.cwd, dir, store: options.store });
+    const res = runImportOkf({ cwd: options.cwd, dir, store: options.store, trusted: options.trusted === true });
     for (const s of res.skipped) console.error(`skipped ${s.file}: ${s.reason}`);
     for (const e of res.errors) console.error(`error ${e.file}: ${e.reason}`);
+    if (res.downgraded.length > 0) {
+      const count = (c: string): number => res.downgraded.filter((d) => (d.changes as string[]).includes(c)).length;
+      console.log(
+        `Trust re-derived on ${res.downgraded.length} records: ${count('tier')} operator tier -> import, `
+        + `${count('pinned')} unpinned, ${count('witness')} witness downgraded, ${count('last_verified')} last_verified clamped `
+        + '(originals kept in ext.okf_import; --trusted keeps them for your own backup)',
+      );
+    }
     console.log(`Imported ${res.imported.length} records (${res.skipped.length} skipped, ${res.errors.length} errors)`);
     if (res.errors.length > 0) process.exitCode = 1;
   });

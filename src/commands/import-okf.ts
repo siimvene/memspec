@@ -30,18 +30,33 @@
  * through `attachEvidence` (same containment and secret checks as `remember
  * --evidence`) once the sha256 matches the entry; a record whose blob is
  * missing or altered is an error, not imported.
+ *
+ * Trust is re-derived by default. A bundle is just files: anyone can write
+ * `source: siim`, `pinned: true` (injected into every session's boot context)
+ * or `verified_with: anchor` into one, so the bundle's trust fields are not
+ * believed. Every imported record lands as `source: okf-import`,
+ * `source_kind: import` (never operator tier), unpinned, with `verified_with`
+ * recomputed the way `remember` computes it from what the import can check
+ * itself: `anchor` when every anchor re-hashes to its recorded sha in the local
+ * checkout, else `evidence` when it carries a file-backed blob (sha256 checked
+ * above), else `assertion`; `last_verified` is clamped to the import time. The
+ * bundle's original values are kept under `ext.okf_import`. `trusted: true`
+ * (CLI `--trusted`, for restoring one's own backup) keeps them verbatim.
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
+import { checkAnchors, projectRootForStore } from '../lib/anchors.js';
 import { CompositeStore } from '../lib/composite-store.js';
+import { loadConfig } from '../lib/config.js';
 import { attachEvidence, EVIDENCE_DIR } from '../lib/evidence.js';
 import { serializeMemoryFile } from '../lib/frontmatter.js';
 import { QUESTIONS_SUBDIR } from '../lib/questions.js';
 import { parseFrontMatter } from '../lib/safe-matter.js';
 import { assertValidFrontmatter } from '../lib/schema.js';
 import type { MemspecStore } from '../lib/store.js';
-import type { MemoryFrontmatter } from '../lib/types.js';
+import { effectiveSourceKind } from '../lib/source.js';
+import type { MemoryFrontmatter, VerifiedWith } from '../lib/types.js';
 import { decodeOkfDocument, fileBackedEvidence, OKF_RESERVED_FILES, OkfNotMemspecError, readEvidenceBlob } from './okf.js';
 
 export interface ImportOkfOptions {
@@ -50,7 +65,19 @@ export interface ImportOkfOptions {
   dir: string;
   /** Target layer when the cwd has several writable layers (as `remember --store`). */
   store?: string;
+  /**
+   * Keep the bundle's trust fields (source/source_kind, pinned, verified_with,
+   * last_verified) verbatim. Only for a bundle the operator wrote themselves.
+   */
+  trusted?: boolean;
+  /** Import time (tests); defaults to now. */
+  now?: Date;
 }
+
+/** What the default (untrusted) import changed on one record's trust fields. */
+export type TrustChange = 'tier' | 'pinned' | 'witness' | 'last_verified';
+
+export const OKF_IMPORT_SOURCE = 'okf-import';
 
 export interface ImportOkfResult {
   imported: string[];
@@ -58,6 +85,55 @@ export interface ImportOkfResult {
   skipped: Array<{ file: string; reason: string }>;
   /** Files that failed to parse or validate. */
   errors: Array<{ file: string; reason: string }>;
+  /** Imported records whose trust fields were downgraded (default mode only). */
+  downgraded: Array<{ id: string; changes: TrustChange[] }>;
+}
+
+const WITNESS_RANK: Record<VerifiedWith, number> = { anchor: 4, probe: 3, operator: 2, evidence: 1, assertion: 0 };
+
+interface TrustContext {
+  projectRoot: string;
+  repoSearchPaths: string[];
+  now: Date;
+}
+
+/**
+ * Replace a bundle record's trust fields with what this import can stand
+ * behind (see the module comment). Returns the record and the downgrades.
+ */
+function rederiveTrust(fm: MemoryFrontmatter, ctx: TrustContext): { record: MemoryFrontmatter; changes: TrustChange[] } {
+  const changes: TrustChange[] = [];
+  const nowIso = ctx.now.toISOString();
+  const record: MemoryFrontmatter = { ...fm, source: OKF_IMPORT_SOURCE, source_kind: 'import' };
+  if (effectiveSourceKind(fm) === 'operator') changes.push('tier');
+
+  delete record.pinned;
+  if (fm.pinned) changes.push('pinned');
+
+  // Same order as `remember`: anchors > (operator: never, the tier is import) > file evidence > assertion.
+  // A probe is not re-run here (it executes a shell command), so it witnesses nothing on import.
+  const anchors = fm.anchors ?? [];
+  const anchored = anchors.length > 0
+    && checkAnchors(ctx.projectRoot, anchors, { repoSearchPaths: ctx.repoSearchPaths }).every((a) => a.status === 'unchanged');
+  const witness: VerifiedWith = anchored ? 'anchor' : fileBackedEvidence(fm).length > 0 ? 'evidence' : 'assertion';
+  record.verified_with = witness;
+  if (fm.verified_with && WITNESS_RANK[fm.verified_with] > WITNESS_RANK[witness]) changes.push('witness');
+
+  // last_verified defaults to created on read, so a future `created` would
+  // sort first just the same: the clamp covers the effective value.
+  const claimed = fm.last_verified ?? fm.created;
+  if (Date.parse(claimed) > ctx.now.getTime()) {
+    record.last_verified = nowIso;
+    changes.push('last_verified');
+  }
+
+  const original: Record<string, unknown> = { imported_at: nowIso, source: fm.source };
+  if (fm.source_kind !== undefined) original.source_kind = fm.source_kind;
+  if (fm.pinned !== undefined) original.pinned = fm.pinned;
+  if (fm.verified_with !== undefined) original.verified_with = fm.verified_with;
+  if (fm.last_verified !== undefined) original.last_verified = fm.last_verified;
+  record.ext = { ...(fm.ext ?? {}), okf_import: original };
+  return { record, changes };
 }
 
 function conceptFiles(dir: string, root = true): string[] {
@@ -97,7 +173,13 @@ export function runImportOkf(options: ImportOkfOptions): ImportOkfResult {
   const existing = new Set(resolved.composite.loadAll().map((i) => i.id));
   for (const file of store.recordFiles()) existing.add(basename(file, '.md'));
 
-  const result: ImportOkfResult = { imported: [], skipped: [], errors: [] };
+  const trust: TrustContext = {
+    projectRoot: projectRootForStore(store.root),
+    repoSearchPaths: loadConfig(store.root).anchors?.repo_search_paths ?? [],
+    now: options.now ?? new Date(),
+  };
+
+  const result: ImportOkfResult = { imported: [], skipped: [], errors: [], downgraded: [] };
   for (const file of conceptFiles(dir)) {
     try {
       const parsed = parseFrontMatter(readFileSync(file, 'utf8'));
@@ -108,11 +190,16 @@ export function runImportOkf(options: ImportOkfOptions): ImportOkfResult {
         continue;
       }
       // Same validation the store applies on read; throws with the field list.
-      const fm = assertValidFrontmatter(decoded.frontmatter) as MemoryFrontmatter;
+      let fm = assertValidFrontmatter(decoded.frontmatter) as MemoryFrontmatter;
       // Check every blob before copying any. A blob copied for a record whose
       // write then fails is content-addressed and inert.
       const blobs = fileBackedEvidence(fm);
       for (const entry of blobs) readEvidenceBlob(dir, entry);
+      let changes: TrustChange[] = [];
+      if (!options.trusted) {
+        ({ record: fm, changes } = rederiveTrust(fm, trust));
+        fm = assertValidFrontmatter(fm) as MemoryFrontmatter;
+      }
       for (const entry of blobs) {
         const copied = attachEvidence(store.root, join(dir, entry.path!));
         if (copied.path !== entry.path) throw new Error(`evidence blob ${entry.path} landed at ${copied.path}`);
@@ -120,6 +207,7 @@ export function runImportOkf(options: ImportOkfOptions): ImportOkfResult {
       placeRecord(store, { ...fm, title: decoded.title, body: decoded.body });
       existing.add(id);
       result.imported.push(id);
+      if (changes.length > 0) result.downgraded.push({ id, changes });
     } catch (err) {
       const reason = (err as NodeJS.ErrnoException).code === 'EEXIST'
         ? 'a record file with this id appeared during the import; not overwritten'

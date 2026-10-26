@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { runExportOkf } from '../src/commands/export.js';
 import { runImportOkf } from '../src/commands/import-okf.js';
 import { validateOkfConcept, OKF_VERSION } from '../src/commands/okf.js';
+import { blobSha } from '../src/lib/anchors.js';
 import { parseFrontMatter } from '../src/lib/safe-matter.js';
 import { MemspecStore } from '../src/lib/store.js';
 import type { MemoryFrontmatter } from '../src/lib/types.js';
@@ -119,9 +120,10 @@ test('round trip memspec -> OKF -> memspec is lossless for every field', async (
   const out = await bundle(dir);
 
   const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
-  const res = runImportOkf({ cwd: target, dir: out });
+  const res = runImportOkf({ cwd: target, dir: out, trusted: true });
   assert.deepEqual(res.errors, []);
   assert.deepEqual(res.skipped, []);
+  assert.deepEqual(res.downgraded, []);
   assert.equal(res.imported.length, 13);
 
   const before = snapshot(store);
@@ -244,9 +246,16 @@ test('CLI: export --format okf --out then import --format okf round-trips', asyn
   assert.match(exp.stdout, /Wrote 13 OKF documents/);
 
   const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
-  const imp = await runCli(['import', '--format', 'okf', out, '--cwd', target]);
+  const imp = await runCli(['import', '--format', 'okf', out, '--cwd', target, '--trusted']);
   assert.match(imp.stdout, /Imported 13 records \(0 skipped, 0 errors\)/);
+  assert.doesNotMatch(imp.stdout, /Trust re-derived/);
   assert.deepEqual(snapshot(new MemspecStore(target)), snapshot(store));
+
+  // Default (untrusted): same bundle, trust fields re-derived and summarised.
+  const untrusted = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const imp2 = await runCli(['import', '--format', 'okf', out, '--cwd', untrusted]);
+  assert.match(imp2.stdout, /Trust re-derived on \d+ records: 2 operator tier -> import, 1 unpinned, 3 witness downgraded, 0 last_verified clamped/);
+  assert.match(imp2.stdout, /Imported 13 records/);
 
   await assert.rejects(runCli(['export', '--format', 'okf', '--cwd', dir]), /requires --out/);
   await assert.rejects(runCli(['export', '--format', 'jsonl', '--out', out, '--cwd', dir]), /only applies to --format okf/);
@@ -439,4 +448,147 @@ test('concurrent exports to one --out: exactly one wins, the bundle is not mixed
   const ok = [[ID(1), ID(2)], [ID(3), ID(4), ID(5)]].map((ids) => ids.map((i) => `${i}.md`));
   assert.ok(ok.some((want) => JSON.stringify(want) === JSON.stringify(files)), `mixed bundle: ${files.join(',')}`);
   assert.deepEqual((await readdir(parent)).sort(), ['b'], 'no staging directory left behind');
+});
+
+// --- security side-pass: an imported bundle does not carry trust -----------
+
+const NOW = new Date('2026-10-01T00:00:00.000Z');
+
+async function importDefault(records: Rec[], prepare?: (target: string) => Promise<void>) {
+  const { dir } = await makeStore(records);
+  const out = await bundle(dir);
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  await prepare?.(target);
+  const res = runImportOkf({ cwd: target, dir: out, now: NOW });
+  assert.deepEqual(res.errors, []);
+  const store = new MemspecStore(target);
+  return { res, store, target, out, get: (n: number) => store.findById(ID(n))! };
+}
+
+test('default import: operator-tier records land as import tier with the original source kept in ext', async () => {
+  const { res, get, target } = await importDefault(fixture());
+  const one = get(1);
+  assert.equal(one.source, 'okf-import');
+  assert.equal(one.source_kind, 'import');
+  assert.deepEqual(one.ext?.okf_import, {
+    imported_at: NOW.toISOString(), source: 'siim', source_kind: 'operator', pinned: true,
+    verified_with: 'anchor', last_verified: '2026-04-01T08:00:00.000Z',
+  });
+  assert.equal(one.ext?.confirmations, 2, 'the record\'s own ext survives');
+  assert.ok(!existsSync(join(target, '.memspec', 'memory', 'operator')), 'nothing lands in the operator subtree');
+  // A source string that only matches the operator pattern (no source_kind) is caught too.
+  const { get: get2 } = await importDefault([base(30, { source: 'user', source_kind: undefined })]);
+  assert.equal(get2(30).source_kind, 'import');
+  assert.ok(res.downgraded.find((d) => d.id === ID(1))!.changes.includes('tier'));
+  assert.ok(!res.downgraded.find((d) => d.id === ID(6)), 'an agent record is not a tier downgrade');
+});
+
+test('default import: pinned is dropped', async () => {
+  const { res, get } = await importDefault([base(1, { pinned: true, source: 'agent-x', source_kind: 'agent' })]);
+  assert.equal(get(1).pinned, undefined);
+  assert.deepEqual(res.downgraded, [{ id: ID(1), changes: ['pinned'] }]);
+});
+
+test('default import: verified_with is recomputed from what the import can re-check', async () => {
+  const content = Buffer.from('export const b = 1;\n');
+  // git blob sha, what `blobSha` computes for the file the import re-hashes.
+  const sha = createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
+  const { res, get } = await importDefault([
+    // anchor claimed, file absent locally -> assertion
+    base(1, { verified_with: 'anchor', anchors: [{ file: 'src/a.ts', sha: 'a'.repeat(40) }] }),
+    // anchor claimed, file present locally with the recorded sha -> anchor (re-hashed)
+    base(2, { verified_with: 'anchor', anchors: [{ file: 'src/b.ts', sha }] }),
+    // operator / probe witnesses cannot be re-checked on import -> assertion
+    base(3, { verified_with: 'operator', source: 'siim', source_kind: 'operator' }),
+    base(4, { verified_with: 'probe', probe: { cmd: 'echo hi', hash: 'c'.repeat(64) } }),
+    // file-backed blob checked by sha256 -> evidence; url-only evidence -> assertion
+    base(5, { verified_with: 'evidence', evidence: [{ sha256: BLOB_SHA, name: 'notes.txt', path: BLOB_PATH, captured_at: '2026-05-03T00:00:00.000Z' }] }),
+    base(6, { verified_with: 'evidence', evidence: [{ url: 'https://example.com/doc', captured_at: '2026-05-03T00:00:00.000Z' }] }),
+  ], async (target) => {
+    mkdirSync(join(target, 'src'), { recursive: true });
+    writeFileSync(join(target, 'src', 'b.ts'), content);
+    assert.equal(blobSha(join(target, 'src', 'b.ts')), sha);
+  });
+  assert.equal(get(1).verified_with, 'assertion');
+  assert.equal(get(2).verified_with, 'anchor');
+  assert.equal(get(3).verified_with, 'assertion');
+  assert.equal(get(4).verified_with, 'assertion');
+  assert.equal(get(5).verified_with, 'evidence');
+  assert.equal(get(6).verified_with, 'assertion');
+  const witness = res.downgraded.filter((d) => d.changes.includes('witness')).map((d) => d.id).sort();
+  assert.deepEqual(witness, [ID(1), ID(3), ID(4), ID(6)].sort());
+  assert.equal((get(1).ext!.okf_import as Record<string, unknown>).verified_with, 'anchor');
+});
+
+test('default import: last_verified is clamped to the import time', async () => {
+  const { res, get } = await importDefault([
+    base(1, { last_verified: '2099-06-01T00:00:00.000Z', verified_with: 'assertion' }),
+    base(2, { last_verified: '2026-04-01T00:00:00.000Z', verified_with: 'assertion' }),
+    // no last_verified: the effective value is `created`, also clamped
+    base(3, { created: '2099-01-01T00:00:00.000Z' }),
+  ]);
+  assert.equal(get(1).last_verified, NOW.toISOString());
+  assert.equal(get(2).last_verified, '2026-04-01T00:00:00.000Z');
+  assert.equal(get(3).last_verified, NOW.toISOString());
+  assert.deepEqual(res.downgraded.map((d) => d.id).sort(), [ID(1), ID(3)].sort());
+  assert.equal((get(1).ext!.okf_import as Record<string, unknown>).last_verified, '2099-06-01T00:00:00.000Z');
+});
+
+test('--trusted import keeps tier, pin, witness and last_verified verbatim', async () => {
+  const rec = base(1, {
+    source: 'siim', source_kind: 'operator', pinned: true, verified_with: 'operator', last_verified: '2099-06-01T00:00:00.000Z',
+  });
+  const { dir } = await makeStore([rec]);
+  const out = await bundle(dir);
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const res = runImportOkf({ cwd: target, dir: out, trusted: true, now: NOW });
+  assert.deepEqual(res.downgraded, []);
+  const got = new MemspecStore(target).findById(ID(1))!;
+  assert.equal(got.source, 'siim');
+  assert.equal(got.source_kind, 'operator');
+  assert.equal(got.pinned, true);
+  assert.equal(got.verified_with, 'operator');
+  assert.equal(got.last_verified, '2099-06-01T00:00:00.000Z');
+  assert.equal(got.ext, undefined);
+  assert.ok(existsSync(join(target, '.memspec', 'memory', 'operator', 'facts', `${ID(1)}.md`)));
+});
+
+// --- link and status hardening ----------------------------------------------
+
+test('an edge target that is not a memspec id gets no link in the Links block', async () => {
+  const evil = 'x) [evil](https://attacker.example';
+  const { dir } = await makeStore([base(1, {}), base(2, { refines: [ID(1)], supports: [evil] })]);
+  const out = await bundle(dir);
+  const raw = await readFile(join(out, `${ID(2)}.md`), 'utf8');
+  const parsed = parseFrontMatter(raw);
+  assert.ok(!raw.slice(raw.indexOf('<!-- memspec:links -->')).includes('attacker'), 'no attacker text in the Links block');
+  assert.match(parsed.content, new RegExp(`\\(/${ID(1)}\\.md\\) - refines`), 'a valid target is still linked');
+  // The edge still travels typed in the extension and round-trips.
+  assert.deepEqual((parsed.data['x-memspec'] as Record<string, unknown>).edges, [{ type: 'refines', to: ID(1) }, { type: 'supports', to: evil }]);
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  runImportOkf({ cwd: target, dir: out, trusted: true });
+  assert.deepEqual(new MemspecStore(target).findById(ID(2))!.supports, [evil]);
+});
+
+test('a bundle file with its status deleted is an error unless x-memspec carries the state', async () => {
+  const { dir } = await makeStore(fixture());
+  const out = await bundle(dir);
+  const retired = join(out, `${ID(10)}.md`);
+  const original = await readFile(retired, 'utf8');
+  assert.match(original, /^status: deprecated$/m);
+  await writeFile(retired, original.replace(/^status: deprecated\n/m, ''));
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const res = runImportOkf({ cwd: target, dir: out });
+  assert.equal(res.errors.length, 1);
+  assert.match(res.errors[0].file, new RegExp(`${ID(10)}\\.md$`));
+  assert.match(res.errors[0].reason, /missing `status`/);
+  assert.equal(res.imported.length, 12, 'the other files still import');
+  assert.equal(new MemspecStore(target).findById(ID(10)), null);
+
+  // The extension's own state is enough.
+  await writeFile(retired, original.replace(/^status: deprecated\n/m, '').replace('x-memspec:\n', 'x-memspec:\n  state: retired\n'));
+  const target2 = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const res2 = runImportOkf({ cwd: target2, dir: out });
+  assert.deepEqual(res2.errors, []);
+  assert.equal(new MemspecStore(target2).findById(ID(10))!.state, 'retired');
 });

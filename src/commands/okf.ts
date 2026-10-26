@@ -97,6 +97,9 @@ const WITNESS_ACTOR: Record<string, string> = {
 
 type Obj = Record<string, unknown>;
 
+/** A memspec record id (same pattern the frontmatter schema enforces on `id`). */
+export const MEMSPEC_ID = /^ms_[A-Z0-9]{26}$/;
+
 export interface OkfEdge { type: string; to: string }
 
 /** The `x-memspec` extension block. */
@@ -306,8 +309,13 @@ export function encodeOkfDocument(item: MemoryItem, titleOf: (id: string) => str
   if (sources.length > 0) doc.sources = sources;
 
   let body = item.body.trim();
-  if (edges.length > 0) {
-    const lines = edges.map((e) => `* [${inertMarkdown(titleOf(e.to) ?? e.to)}](/${e.to}.md) - ${e.type}`);
+  // Edge targets are not schema-checked (a hand-edited `refines: ['x) [evil](https://...)']`
+  // loads fine), and the target is spliced into a link destination, so only a
+  // well-formed memspec id gets a link. Every edge, linked or not, still travels
+  // typed in `x-memspec.edges`.
+  const linkable = edges.filter((e) => MEMSPEC_ID.test(e.to));
+  if (linkable.length > 0) {
+    const lines = linkable.map((e) => `* [${inertMarkdown(titleOf(e.to) ?? e.to)}](/${e.to}.md) - ${e.type}`);
     body = `${body}\n\n${LINKS_BEGIN}\n## Links\n\n${lines.join('\n')}\n${LINKS_END}`;
   }
 
@@ -364,6 +372,12 @@ export function decodeOkfDocument(doc: Obj | null | undefined, rawBody: string):
   const problems = validateOkfConcept(doc);
   if (typeof doc.type === 'string' && !Object.values(TYPE_NAME).includes(doc.type)) {
     problems.push(`type ${doc.type} is not one memspec exports (${Object.values(TYPE_NAME).join(', ')})`);
+  }
+  // The exporter always writes `status`; a missing one would decode as active
+  // (or a resolved question) and silently reactivate a deprecated record.
+  // Only an extension that carries the state itself makes it redundant.
+  if ((doc.status === undefined || doc.status === null) && ext.state === undefined) {
+    problems.push('missing `status` (and no x-memspec.state to take the state from)');
   }
   if (problems.length > 0) throw new Error(`not a valid memspec OKF concept: ${problems.join('; ')}`);
   const edges = (Array.isArray(ext.edges) ? ext.edges : []).filter(
