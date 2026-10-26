@@ -640,7 +640,7 @@ export class CompositeStore {
       priority: number;
       bestRank: number;
       score: number;
-      /** Best match tier anywhere (1 = every query term); sorts before the RRF score. */
+      /** Match tier of the served copy (1 = every query term); sorts before the RRF score. */
       tier: MatchTier;
     }
     const fused = new Map<string, FusedEntry>();
@@ -658,14 +658,23 @@ export class CompositeStore {
         continue;
       }
 
-      results.forEach((item, index) => {
-        if (!layer.writable && pending.has(item.id)) return;
-        const rank = index + 1;
-        const contribution = 1 / (RRF_K + rank);
+      // RRF rank within the hit's own tier: the tiers are sorted apart after
+      // fusion, so a layer's best partial is its rank-1 partial, not rank k+1
+      // behind its own k full matches.
+      const tierRank = new Map<MatchTier, number>();
+      results.forEach((item) => {
         const tier = layerMeta.tiers?.get(item.id) ?? 1;
+        const rank = (tierRank.get(tier) ?? 0) + 1;
+        tierRank.set(tier, rank);
+        if (!layer.writable && pending.has(item.id)) return;
+        const contribution = 1 / (RRF_K + rank);
         const existing = fused.get(item.id);
         if (existing) {
-          existing.tier = Math.min(existing.tier, tier) as MatchTier;
+          // The tier stays the served copy's (the first, highest-priority
+          // layer's): a stale lower-layer copy that still carries every term
+          // must not promote a copy that does not, nor lend it a rank from
+          // the other tier.
+          if (tier !== existing.tier) return;
           // `max`, not `sum`. Duplication across layers is a migration
           // artefact, not corroboration, so a record is scored on its best
           // showing anywhere rather than boosted for existing twice. Without

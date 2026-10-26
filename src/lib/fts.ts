@@ -45,6 +45,8 @@ export interface FtsScoredResult {
   id: string;
   bm25Score: number;
   tier: MatchTier;
+  /** Matched only through the prefix pass; ranks after the exact matches of its tier. */
+  prefix?: true;
 }
 
 export class FtsIndex {
@@ -164,6 +166,12 @@ export class FtsIndex {
    * on ZERO full-term rows used to drop the target of a natural query with
    * one term the target lacks: AND returned one to three other records and
    * the OR pass never ran. Tier-1 rows always come first.
+   *
+   * A multi-term query whose exact-AND page is short also runs prefix-AND
+   * before the partial top-up, so a record carrying every term only by prefix
+   * (`kube config` → `Kubernetes configuration`) stays a tier-1 full match
+   * instead of being demoted to, or crowded out of, the partial tier. A
+   * single-term query has no partial tier to lose it to and keeps exact-only.
    */
   search(query: string, options: FtsSearchOptions = {}): FtsScoredResult[] {
     const {
@@ -176,8 +184,14 @@ export class FtsIndex {
     if (terms.length === 0) return [];
 
     let results = this.runFtsQuery(terms, false, 'AND', types, scope, limit);
-    if (results.length === 0) {
-      results = this.runFtsQuery(terms, true, 'AND', types, scope, limit);
+    if (results.length === 0 || (results.length < limit && terms.length > 1)) {
+      const exact = new Set(results.map((r) => r.id));
+      // Over-fetch by the exact count: those rows match the prefix pass too.
+      const prefixed = this.runFtsQuery(terms, true, 'AND', types, scope, limit + exact.size)
+        .filter((r) => !exact.has(r.id))
+        .slice(0, limit - results.length)
+        .map((r) => ({ ...r, prefix: true as const }));
+      results = [...results, ...prefixed];
     }
     if (results.length < limit && terms.length > 1) {
       const full = new Set(results.map((r) => r.id));

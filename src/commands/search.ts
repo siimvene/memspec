@@ -880,11 +880,13 @@ function classifyCoverage(
   // priority); in a single store BM25 can rank a one-term title hit above a
   // record carrying every term. The question is "does the store cover this
   // query", so the strongest witness among the returned set answers it.
+  // Ties go to the better match tier, so a full match is never judged as a partial.
+  const tierOf = (s: SeedTokens) => meta.tiers?.get(s.item.id) ?? 1;
   let best = seedTokens[0];
   let bestMatched = -1;
   for (const s of seedTokens) {
     const matched = distinct.filter((t) => s.all.has(t.token)).length;
-    if (matched > bestMatched) {
+    if (matched > bestMatched || (matched === bestMatched && tierOf(s) < tierOf(best))) {
       best = s;
       bestMatched = matched;
     }
@@ -906,12 +908,15 @@ function classifyCoverage(
     }
   }
 
-  // Match-tier signal. When no hit carries every query term, the whole page is
-  // the OR top-up: records sharing SOME words with the query, which is exactly
-  // what a query about something the store does not hold returns. That is a
-  // genuine match only when the best hit still carries most of the content
-  // terms (PARTIAL_MATCH_OK_RATIO); otherwise it reads weak, naming the gap.
-  const fullMatch = seeds.some((s) => (meta.tiers?.get(s.id) ?? 1) === 1);
+  // Match-tier signal. When the best-covered hit is a partial (OR top-up) row,
+  // no hit carries more of the query's whole tokens than a record sharing SOME
+  // words with it, which is exactly what a query about something the store
+  // does not hold returns. That is a genuine match only when that hit still
+  // carries most of the content terms (PARTIAL_MATCH_OK_RATIO); otherwise it
+  // reads weak, naming the gap. Judged on the best-covered hit, not on "any
+  // full match on the page": a prefix-only full match carrying fewer whole
+  // tokens must not vouch for a partial row it did not out-cover.
+  const fullMatch = tierOf(best) === 1;
   if (!fullMatch && distinct.length > 0 && bestMatched / distinct.length < PARTIAL_MATCH_OK_RATIO) {
     const unmatched = distinct.filter((t) => !best.all.has(t.token));
     return {

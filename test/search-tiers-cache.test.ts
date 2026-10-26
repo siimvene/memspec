@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { makeTempProject } from './helpers.js';
 import { searchPayload } from '../src/commands/search.js';
 import { runRemember } from '../src/commands/remember.js';
@@ -270,4 +270,168 @@ test('a config that still carries min_confidence loads and searches; new configs
   const id = remember(project, 'Legacy config record', 'still searchable');
   assert.deepEqual(searchPayload('legacy config', { cwd: project, json: true }).results.map((r) => r.id), [id]);
   assert.doesNotMatch(defaultConfigYaml(), /min_confidence/);
+});
+
+// --- review round: tier consistency ----------------------------------------
+
+test('FTS keeps a prefix-only full match in tier 1, after the exact full matches and above every partial', () => {
+  const fts = new FtsIndex();
+  try {
+    fts.populate([
+      item('exact', 'Kube config', 'kube config'),
+      // Carries every term only by prefix, and shares no exact token with the query.
+      item('prefixed', 'Kubernetes configuration', 'kubernetes configuration notes'),
+      item('half', 'Kube only', 'kube kube'),
+    ]);
+    const hits = fts.search('kube config', { limit: 10 });
+    assert.deepEqual(hits.map((h) => [h.id, h.tier]), [['exact', 1], ['prefixed', 1], ['half', 2]]);
+    assert.equal(hits.find((h) => h.id === 'prefixed')!.prefix, true);
+    assert.ok(!hits.find((h) => h.id === 'exact')!.prefix);
+  } finally {
+    fts.close();
+  }
+});
+
+test('store keeps exact full matches above prefix full matches, and both above partials', async () => {
+  const project = await freshStore();
+  // The exact match is a weak body-only mention; the prefix match is all title.
+  const exact = remember(project, 'Cluster note', 'Among many other words about clusters, nodes and pods there is a config for kube mention near the end of this long body.');
+  const prefixed = remember(project, 'Kubernetes configuration', 'Kubernetes configuration kubernetes configuration kubernetes.');
+  const half = remember(project, 'Kube kube kube', 'kube kube kube kube');
+  for (let i = 0; i < 8; i++) remember(project, `Unrelated filler ${i}`, 'nothing to see here');
+
+  // Test the test: on raw BM25 the prefix match beats the exact one.
+  const fts = new FtsIndex();
+  try {
+    fts.populate(new MemspecStore(project).loadActive());
+    const score = new Map(fts.search('kube config', { limit: 20 }).map((h) => [h.id, h.bm25Score]));
+    assert.ok(score.get(prefixed)! < score.get(exact)!, 'precondition: prefix match scores higher on BM25');
+  } finally {
+    fts.close();
+  }
+
+  const meta: SearchRelevanceMeta = { topBm25: null };
+  const ranked = new MemspecStore(project).search('kube config', { limit: 10 }, meta);
+  assert.deepEqual(ranked.map((i) => i.id), [exact, prefixed, half]);
+  assert.deepEqual([meta.tiers?.get(exact), meta.tiers?.get(prefixed), meta.tiers?.get(half)], [1, 1, 2]);
+});
+
+test('topBm25 is taken from the full-term matches when there are any, never from a partial top-up row', async () => {
+  const project = await freshStore();
+  remember(project, 'Deployment runbook', 'The runbook mentions zephyr once and quokka once, among many other words about deployment windows and rollback.');
+  remember(project, 'Zephyr zephyr zephyr', 'zephyr zephyr zephyr zephyr');
+  // Enough other records that BM25's IDF is not the degenerate near-zero.
+  for (let i = 0; i < 8; i++) remember(project, `Unrelated filler ${i}`, 'nothing to see here');
+
+  const fts = new FtsIndex();
+  let tier1Best = Infinity;
+  let tier2Best = Infinity;
+  try {
+    fts.populate(new MemspecStore(project).loadActive());
+    for (const hit of fts.search('zephyr quokka', { limit: 20 })) {
+      if (hit.tier === 1) tier1Best = Math.min(tier1Best, hit.bm25Score);
+      else tier2Best = Math.min(tier2Best, hit.bm25Score);
+    }
+  } finally {
+    fts.close();
+  }
+  // Test the test: the partial row scores better on raw BM25.
+  assert.ok(tier2Best < tier1Best, `precondition: tier 2 ${tier2Best} < tier 1 ${tier1Best}`);
+
+  const meta: SearchRelevanceMeta = { topBm25: null };
+  new MemspecStore(project).search('zephyr quokka', { limit: 10 }, meta);
+  assert.equal(meta.topBm25, tier1Best);
+
+  // A page of partials only still reports its strongest partial.
+  const partialMeta: SearchRelevanceMeta = { topBm25: null };
+  new MemspecStore(project).search('zephyr ocelot', { limit: 10 }, partialMeta);
+  assert.notEqual(partialMeta.topBm25, null);
+});
+
+test('coverage judges the partial-term rule on the best-covered hit, not on any full match elsewhere on the page', async () => {
+  const project = await freshStore();
+  // Full match only by prefix, one exact query token, title only.
+  remember(project, 'Kubernetes configuration tariff', 'See doc.');
+  // Partial match carrying two exact tokens in its body, missing the third.
+  remember(project, 'Cluster notes', 'kube config notes for the cluster');
+  remember(project, 'Unrelated filler one', 'nothing to see');
+  remember(project, 'Unrelated filler two', 'still nothing');
+  const payload = searchPayload('kube config tariff', { cwd: project, json: true });
+  assert.equal(payload.count, 2);
+  assert.equal(payload.coverage, 'weak', payload.coverage_note);
+  assert.match(payload.coverage_note, /only partial-term matches: best hit carries 2 of 3 query terms \(unmatched: tariff\)/);
+});
+
+function layered(personal: string, team: string): void {
+  writeFileSync(join(personal, '.memspec', 'config.yaml'), [
+    'stores:',
+    '  - name: personal',
+    `    path: ${join(personal, '.memspec')}`,
+    '    priority: 10',
+    '    writable: true',
+    '  - name: team',
+    `    path: ${join(team, '.memspec')}`,
+    '    priority: 0',
+    '    writable: false',
+    '',
+  ].join('\n'));
+}
+
+test('layer fusion ranks partial matches by their rank within the partial tier, not behind the layer\'s own full matches', async () => {
+  const personal = await freshStore();
+  const team = await freshStore();
+  remember(personal, 'Quokka zephyr survey', 'quokka and zephyr counted together');
+  remember(personal, 'Zephyr quokka census', 'zephyr with quokka again');
+  const personalPartial = remember(personal, 'Quokka habitat', 'quokka quokka');
+  remember(team, 'Quokka diet', 'quokka eats leaves');
+  remember(team, 'Zephyr winds', 'zephyr blows');
+  layered(personal, team);
+
+  const meta: SearchRelevanceMeta = { topBm25: null };
+  const ranked = CompositeStore.forCwd(personal).search('quokka zephyr', { limit: 10 }, meta);
+  assert.equal(ranked.length, 5);
+  assert.deepEqual(ranked.map((i) => meta.tiers?.get(i.id)), [1, 1, 2, 2, 2]);
+  // Rank 1 of the personal layer's partials ties rank 1 of the team's on RRF; layer priority breaks it.
+  assert.equal(ranked[2].id, personalPartial);
+});
+
+test('layer fusion takes a duplicated id\'s tier from the copy it serves, not from a stale copy in a lower layer', async () => {
+  const personal = await freshStore();
+  const team = await freshStore();
+  const census = remember(team, 'Zephyr quokka census', 'zephyr with quokka counted');
+  const dup = remember(team, 'Quokka zephyr notes', 'quokka and zephyr together');
+  // The personal layer holds a newer copy of `dup` that no longer mentions zephyr.
+  const teamPath = new MemspecStore(team).loadActive().find((i) => i.id === dup)!.filePath;
+  const personalPath = join(new MemspecStore(personal).root, teamPath.slice(new MemspecStore(team).root.length));
+  mkdirSync(dirname(personalPath), { recursive: true });
+  writeFileSync(personalPath, readFileSync(teamPath, 'utf8').replace('Quokka zephyr notes', 'Quokka notes').replace('quokka and zephyr together', 'quokka alone now'));
+  layered(personal, team);
+
+  const meta: SearchRelevanceMeta = { topBm25: null };
+  const ranked = CompositeStore.forCwd(personal).search('quokka zephyr', { limit: 10 }, meta);
+  assert.deepEqual(ranked.map((i) => i.id), [census, dup]);
+  assert.equal(ranked[1].title, 'Quokka notes');
+  assert.equal(meta.tiers?.get(dup), 2);
+  assert.equal(meta.tiers?.get(census), 1);
+});
+
+// --- review round: usage cursor --------------------------------------------
+
+test('usage stats refold a same-size in-place rewrite that keeps the inode and the probed tail', async () => {
+  const project = await freshStore();
+  const root = new MemspecStore(project).root;
+  const path = usagePath(root);
+  const row = (id: string, session: string) => JSON.stringify({ id, retrieved_at: '2026-01-01T00:00:00.000Z', session });
+  writeFileSync(path, [row('A', 's1'), row('B', 's2'), row('C', 's3')].join('\n') + '\n');
+  assert.deepEqual([...computeUsageStats(root).keys()].sort(), ['A', 'B', 'C']);
+  const before = statSync(path);
+
+  // First row rewritten to another of the same length; the last 64 bytes are untouched.
+  const rewritten = readFileSync(path, 'utf8').replace(row('A', 's1'), row('Z', 's1'));
+  writeFileSync(path, rewritten);
+  const after = statSync(path);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
+  assert.deepEqual([...computeUsageStats(root).keys()].sort(), ['B', 'C', 'Z']);
+  assert.deepEqual(computeUsageStats(root), referenceStats(root));
 });

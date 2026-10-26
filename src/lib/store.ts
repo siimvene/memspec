@@ -601,7 +601,7 @@ export class MemspecStore {
       // unbounded; without normalization the relevance weight is the only
       // dial that ever moves the ranking. Per-set normalization makes the
       // profile ranking ratios (relevance vs recency) actually apply.
-      const rawScored = matches.map(({ id, bm25Score, tier }) => {
+      const rawScored = matches.map(({ id, bm25Score, tier, prefix }) => {
         const item = itemMap.get(id);
         if (!item) return null;
 
@@ -621,8 +621,8 @@ export class MemspecStore {
         const ageDays = ageMs / (24 * 60 * 60 * 1000);
         const recency = 1 / (1 + ageDays);
 
-        return { item, rawRelevance, recency, tier };
-      }).filter((entry): entry is { item: MemoryItem; rawRelevance: number; recency: number; tier: MatchTier } => entry !== null);
+        return { item, rawRelevance, recency, tier, prefix: prefix === true };
+      }).filter((entry): entry is { item: MemoryItem; rawRelevance: number; recency: number; tier: MatchTier; prefix: boolean } => entry !== null);
 
       // Per-tier relevance normalization → [0, 1]. recency is already in [0, 1].
       // Per TIER, not per set: a partial-match top-up row with a rare term can
@@ -631,24 +631,31 @@ export class MemspecStore {
       const maxRelevance = new Map<MatchTier, number>();
       for (const r of rawScored) maxRelevance.set(r.tier, Math.max(maxRelevance.get(r.tier) ?? 0, r.rawRelevance));
 
-      const scored = rawScored.map(({ item, rawRelevance, recency, tier }) => {
+      const scored = rawScored.map(({ item, rawRelevance, recency, tier, prefix }) => {
         const max = maxRelevance.get(tier) ?? 0;
         const denom = max > 0 ? max : 1;
-        return { item, tier, score: (rawRelevance / denom) * relevanceWeight + recency * recencyWeight };
+        return { item, tier, prefix, score: (rawRelevance / denom) * relevanceWeight + recency * recencyWeight };
       });
 
-      // Full-term matches always rank above partial ones; scoring orders within a tier.
+      // Full-term matches always rank above partial ones, and within the full
+      // tier exact matches above prefix-only ones (the order FTS returned them
+      // in); scoring orders within each group.
       const rankedScored = scored
-        .sort((a, b) => a.tier - b.tier || b.score - a.score)
+        .sort((a, b) => a.tier - b.tier || Number(a.prefix) - Number(b.prefix) || b.score - a.score)
         .slice(0, limit);
       const ranked = rankedScored.map(({ item }) => item);
 
       if (meta) {
         meta.tiers = new Map(rankedScored.map(({ item, tier }) => [item.id, tier]));
-        // Strongest lexical match among the returned hits: the min (most
-        // negative) raw BM25. If even the best hit is weak, coverage is weak.
+        // Strongest lexical match among the returned hits of the best tier:
+        // the min (most negative) raw BM25. If even the best hit is weak,
+        // coverage is weak. A partial top-up row's score says nothing about
+        // how well the full matches cover the query, so it only counts when
+        // the page holds no full match.
+        const topTier = rankedScored.length > 0 ? rankedScored[0].tier : undefined;
         let best: number | null = null;
-        for (const item of ranked) {
+        for (const { item, tier } of rankedScored) {
+          if (tier !== topTier) continue;
           const raw = bm25ById.get(item.id);
           if (raw === undefined) continue;
           if (best === null || raw < best) best = raw;

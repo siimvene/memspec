@@ -35,7 +35,11 @@ interface UsageFold {
  * grew linearly with history (~30 ms at 33k rows). The log is append-only:
  * while the file keeps its inode and the bytes before `offset` are unchanged
  * (checked on a short probe), only the bytes after `offset` are read. Any
- * other change (rotated, truncated, rewritten) refolds from the start.
+ * other change (rotated, truncated, rewritten) refolds from the start. An
+ * append always grows the file, so a write that leaves the size at `offset`
+ * (mtime or ctime moved) is a same-size rewrite the probe cannot see: refold.
+ * A same-size rewrite of earlier rows in the same window as an append, past
+ * the probe, is still not detected; the log is append-only by contract.
  */
 interface UsageCursor {
   ino: number;
@@ -43,6 +47,9 @@ interface UsageCursor {
   offset: number;
   /** The last bytes before `offset`, compared on the next read to detect a rewrite. */
   probe: Buffer;
+  /** File times at the last read, to spot a rewrite that did not change the size. */
+  mtimeMs: number;
+  ctimeMs: number;
   fold: UsageFold;
 }
 
@@ -117,11 +124,14 @@ function usageFoldFor(storeRoot: string): { fold: UsageFold; pending: UsageEntry
   try {
     let cursor = usageCursors.get(path);
     if (cursor && (cursor.ino !== st.ino || st.size < cursor.offset)) cursor = undefined;
+    if (cursor && st.size === cursor.offset && (st.mtimeMs !== cursor.mtimeMs || st.ctimeMs !== cursor.ctimeMs)) cursor = undefined;
     if (cursor && cursor.probe.length > 0) {
       const probe = readRange(path, cursor.offset - cursor.probe.length, cursor.offset);
       if (!probe.equals(cursor.probe)) cursor = undefined;
     }
-    if (!cursor) cursor = { ino: st.ino, offset: 0, probe: Buffer.alloc(0), fold: newFold() };
+    if (!cursor) cursor = { ino: st.ino, offset: 0, probe: Buffer.alloc(0), mtimeMs: 0, ctimeMs: 0, fold: newFold() };
+    cursor.mtimeMs = st.mtimeMs;
+    cursor.ctimeMs = st.ctimeMs;
 
     const pending: UsageEntry[] = [];
     if (st.size > cursor.offset) {
