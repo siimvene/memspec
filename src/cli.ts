@@ -8,7 +8,8 @@ import { runContext } from './commands/context.js';
 import { runObserve } from './commands/observe.js';
 import { runOutcome } from './commands/outcome.js';
 import { runProbe } from './commands/probe.js';
-import { EXPORT_FORMATS, parseTypesArg, runExport, type ExportFormat } from './commands/export.js';
+import { EXPORT_FORMATS, OKF_FORMAT, parseTypesArg, runExport, runExportOkf, type ExportFormat } from './commands/export.js';
+import { runImportOkf } from './commands/import-okf.js';
 import { runReconcile } from './commands/reconcile.js';
 import { runRelate, runUnrelate, RELATION_TYPES, type RelationType } from './commands/relate.js';
 import { runRemember } from './commands/remember.js';
@@ -506,14 +507,29 @@ program
 
 program
   .command('export')
-  .description('Export the memory graph (nodes + edges) as JSONL, GraphML, or DOT to stdout')
-  .requiredOption('--format <format>', `output format: ${EXPORT_FORMATS.join(' | ')}`)
+  .description('Export the memory graph (nodes + edges) as JSONL, GraphML, or DOT to stdout, or the whole store as an OKF v0.2 bundle (--format okf --out <dir>)')
+  .requiredOption('--format <format>', `output format: ${[...EXPORT_FORMATS, OKF_FORMAT].join(' | ')}`)
   .option('--cwd <path>', 'project root')
-  .option('--include-superseded', 'include superseded records (active-only by default)')
-  .option('--types <types>', 'comma-separated subset of fact,decision,procedure (default: all three)')
-  .action((options: { cwd?: string; format: string; includeSuperseded?: boolean; types?: string }) => {
+  .option('--include-superseded', 'include superseded records (active-only by default; graph formats only)')
+  .option('--types <types>', 'comma-separated subset of fact,decision,procedure (default: all three; graph formats only)')
+  .option('--out <dir>', 'okf only: directory to write the bundle into (must not exist or be empty)')
+  .action((options: { cwd?: string; format: string; includeSuperseded?: boolean; types?: string; out?: string }) => {
+    if (options.format === OKF_FORMAT) {
+      if (!options.out) throw new Error('--format okf requires --out <dir>');
+      if (options.includeSuperseded || options.types) {
+        throw new Error('--include-superseded and --types do not apply to --format okf (the bundle carries every record and state)');
+      }
+      const res = runExportOkf({ cwd: options.cwd, out: options.out });
+      for (const s of res.skipped) console.error(`skipped ${s.id}: ${s.reason}`);
+      for (const u of res.unreadable) console.error(`unreadable ${u.file}: ${u.reason}`);
+      for (const m of res.missingEvidence) console.error(`evidence not carried for ${m.id} (${m.path}): ${m.reason}`);
+      console.log(`Wrote ${res.written} OKF documents to ${res.out}`);
+      if (res.skipped.length + res.unreadable.length + res.missingEvidence.length > 0) process.exitCode = 1;
+      return;
+    }
+    if (options.out) throw new Error('--out only applies to --format okf (graph formats write to stdout)');
     if (!(EXPORT_FORMATS as readonly string[]).includes(options.format)) {
-      throw new Error(`--format must be one of: ${EXPORT_FORMATS.join(' | ')} (got "${options.format}")`);
+      throw new Error(`--format must be one of: ${[...EXPORT_FORMATS, OKF_FORMAT].join(' | ')} (got "${options.format}")`);
     }
     const out = runExport({
       cwd: options.cwd,
@@ -522,6 +538,31 @@ program
       types: parseTypesArg(options.types),
     });
     process.stdout.write(out);
+  });
+
+program
+  .command('import')
+  .description('Import records from an OKF v0.2 bundle written by `memspec export --format okf`')
+  .requiredOption('--format <format>', 'input format: okf')
+  .argument('<dir>', 'bundle directory')
+  .option('--cwd <path>', 'project root')
+  .option('--store <name>', 'target store layer when several writable layers are in scope')
+  .option('--trusted', 'keep the bundle\'s trust fields (source tier, pinned, verified_with, last_verified) verbatim; only for a bundle you exported yourself. Default: re-derive them (imported records land as source_kind import, unpinned, witness re-checked locally)')
+  .action((dir: string, options: { cwd?: string; format: string; store?: string; trusted?: boolean }) => {
+    if (options.format !== OKF_FORMAT) throw new Error(`--format must be: ${OKF_FORMAT} (got "${options.format}")`);
+    const res = runImportOkf({ cwd: options.cwd, dir, store: options.store, trusted: options.trusted === true });
+    for (const s of res.skipped) console.error(`skipped ${s.file}: ${s.reason}`);
+    for (const e of res.errors) console.error(`error ${e.file}: ${e.reason}`);
+    if (res.downgraded.length > 0) {
+      const count = (c: string): number => res.downgraded.filter((d) => (d.changes as string[]).includes(c)).length;
+      console.log(
+        `Trust re-derived on ${res.downgraded.length} records: ${count('tier')} operator tier -> import, `
+        + `${count('pinned')} unpinned, ${count('witness')} witness downgraded, ${count('last_verified')} last_verified clamped `
+        + '(originals kept in ext.okf_import; --trusted keeps them for your own backup)',
+      );
+    }
+    console.log(`Imported ${res.imported.length} records (${res.skipped.length} skipped, ${res.errors.length} errors)`);
+    if (res.errors.length > 0) process.exitCode = 1;
   });
 
 program
