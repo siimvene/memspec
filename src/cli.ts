@@ -521,8 +521,10 @@ program
       }
       const res = runExportOkf({ cwd: options.cwd, out: options.out });
       for (const s of res.skipped) console.error(`skipped ${s.id}: ${s.reason}`);
+      for (const u of res.unreadable) console.error(`unreadable ${u.file}: ${u.reason}`);
+      for (const m of res.missingEvidence) console.error(`evidence not carried for ${m.id} (${m.path}): ${m.reason}`);
       console.log(`Wrote ${res.written} OKF documents to ${res.out}`);
-      if (res.skipped.length > 0) process.exitCode = 1;
+      if (res.skipped.length + res.unreadable.length + res.missingEvidence.length > 0) process.exitCode = 1;
       return;
     }
     if (options.out) throw new Error('--out only applies to --format okf (graph formats write to stdout)');
@@ -544,9 +546,10 @@ program
   .requiredOption('--format <format>', 'input format: okf')
   .argument('<dir>', 'bundle directory')
   .option('--cwd <path>', 'project root')
-  .action((dir: string, options: { cwd?: string; format: string }) => {
+  .option('--store <name>', 'target store layer when several writable layers are in scope')
+  .action((dir: string, options: { cwd?: string; format: string; store?: string }) => {
     if (options.format !== OKF_FORMAT) throw new Error(`--format must be: ${OKF_FORMAT} (got "${options.format}")`);
-    const res = runImportOkf({ cwd: options.cwd, dir });
+    const res = runImportOkf({ cwd: options.cwd, dir, store: options.store });
     for (const s of res.skipped) console.error(`skipped ${s.file}: ${s.reason}`);
     for (const e of res.errors) console.error(`error ${e.file}: ${e.reason}`);
     console.log(`Imported ${res.imported.length} records (${res.skipped.length} skipped, ${res.errors.length} errors)`);

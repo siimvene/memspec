@@ -30,11 +30,12 @@
  * procedure} set.
  */
 
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { CompositeStore } from '../lib/composite-store.js';
 import { stringifyFrontMatter } from '../lib/safe-matter.js';
 import { effectiveSourceKind } from '../lib/source.js';
-import { descriptionOf, encodeOkfDocument, OKF_VERSION } from './okf.js';
+import { descriptionOf, encodeOkfDocument, fileBackedEvidence, inertMarkdown, OKF_VERSION, readEvidenceBlob } from './okf.js';
 import { MemspecStore } from '../lib/store.js';
 import { MEMORY_TYPES, type MemoryItem, type MemoryType, type SourceKind, type VerifiedWith } from '../lib/types.js';
 
@@ -517,6 +518,14 @@ export interface ExportOkfResult {
   written: number;
   /** Records that could not be carried (id + reason); the rest of the bundle is still written. */
   skipped: Array<{ id: string; reason: string }>;
+  /** Store files that failed to load (and layers that are missing), so are absent from the bundle. */
+  unreadable: Array<{ file: string; reason: string }>;
+  /**
+   * File-backed evidence whose blob could not be copied (already missing or
+   * altered in the source store). The record is still written; importing it
+   * will refuse it until the blob is restored.
+   */
+  missingEvidence: Array<{ id: string; path: string; reason: string }>;
 }
 
 const OKF_INDEX_SECTIONS: Array<[string, (i: MemoryItem) => boolean]> = [
@@ -530,6 +539,17 @@ const OKF_INDEX_SECTIONS: Array<[string, (i: MemoryItem) => boolean]> = [
 /**
  * Write the whole store (all states, all kinds) as an OKF v0.2 bundle. Pure
  * projection: nothing in the store is touched. See `okf.ts` for the mapping.
+ *
+ * The store is the read view for `cwd` (`CompositeStore.forCwd`, the set
+ * `search`/`context` read): a `.memspec.yaml` pointer or a `stores:` block
+ * contributes every layer present on disk, each record read raw from its own
+ * layer (no read-time view projections). An id held by several layers is
+ * taken from the highest-priority one; the shadowed copies are listed in
+ * `skipped`. Files that fail to load are listed in `unreadable`.
+ *
+ * The bundle is built in a sibling staging directory and renamed into place,
+ * so a concurrent export to the same `--out` fails instead of merging, and a
+ * failed export leaves nothing behind.
  */
 export function runExportOkf(options: ExportOkfOptions): ExportOkfResult {
   const out = resolve(options.out);
@@ -537,35 +557,80 @@ export function runExportOkf(options: ExportOkfOptions): ExportOkfResult {
     throw new Error(`--out ${out} is not empty; export into a new or empty directory`);
   }
 
-  const store = new MemspecStore(options.cwd);
-  const items = store.loadAll().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const view = CompositeStore.forCwd(options.cwd);
+  const owner = new Map<string, MemspecStore>();
+  const items: MemoryItem[] = [];
+  const skipped: ExportOkfResult['skipped'] = [];
+  for (const layer of view.layers) {
+    if (!layer.store.exists) continue;
+    for (const item of layer.store.loadAll()) {
+      const held = owner.get(item.id);
+      if (held) {
+        skipped.push({ id: item.id, reason: `shadowed: also in higher-priority layer ${held.root}, exported from there (copy in ${layer.store.root} not carried)` });
+        continue;
+      }
+      owner.set(item.id, layer.store);
+      items.push(item);
+    }
+  }
+  const unreadable = view.warnings.map((w) => ({ file: w.file, reason: w.reason }));
+  items.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const titles = new Map(items.map((i) => [i.id, i.title]));
 
-  mkdirSync(out, { recursive: true });
-  const skipped: ExportOkfResult['skipped'] = [];
-  const done: MemoryItem[] = [];
-  for (const item of items) {
+  mkdirSync(dirname(out), { recursive: true });
+  const stage = mkdtempSync(join(dirname(out), `.${basename(out)}.okf-`));
+  try {
+    chmodSync(stage, 0o755);
+    const missingEvidence: ExportOkfResult['missingEvidence'] = [];
+    const done: MemoryItem[] = [];
+    for (const item of items) {
+      try {
+        const doc = encodeOkfDocument(item, (id) => titles.get(id));
+        writeFileSync(join(stage, doc.path), stringifyFrontMatter(`${doc.body}\n`, doc.frontmatter));
+        done.push(item);
+      } catch (err) {
+        skipped.push({ id: item.id, reason: err instanceof Error ? err.message : String(err) });
+        continue;
+      }
+      for (const entry of fileBackedEvidence(item)) {
+        try {
+          const bytes = readEvidenceBlob(owner.get(item.id)!.root, entry);
+          const dest = join(stage, entry.path!);
+          mkdirSync(dirname(dest), { recursive: true });
+          if (!existsSync(dest)) writeFileSync(dest, bytes);
+        } catch (err) {
+          missingEvidence.push({ id: item.id, path: String(entry.path), reason: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    }
+
+    const lines: string[] = [];
+    for (const [heading, match] of OKF_INDEX_SECTIONS) {
+      const section = done.filter(match);
+      if (section.length === 0) continue;
+      lines.push(`# ${heading}`, '');
+      for (const item of section) {
+        const desc = descriptionOf(item.body);
+        lines.push(`* [${inertMarkdown(item.title || item.id)}](${item.id}.md)${desc ? ` - ${inertMarkdown(desc)}` : ''}`);
+      }
+      lines.push('');
+    }
+    writeFileSync(join(stage, 'index.md'), stringifyFrontMatter(`${lines.join('\n')}\n`, { okf_version: OKF_VERSION }));
+
     try {
-      const doc = encodeOkfDocument(item, (id) => titles.get(id));
-      writeFileSync(join(out, doc.path), stringifyFrontMatter(`${doc.body}\n`, doc.frontmatter));
-      done.push(item);
+      // rename(2) replaces a missing or EMPTY directory and fails on a
+      // non-empty one: a second exporter that raced past the check above
+      // loses here instead of interleaving files with the first.
+      renameSync(stage, out);
     } catch (err) {
-      skipped.push({ id: item.id, reason: err instanceof Error ? err.message : String(err) });
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOTEMPTY' || code === 'EEXIST') {
+        throw new Error(`--out ${out} was filled by another writer during the export; nothing was written`);
+      }
+      throw err;
     }
+    return { out, written: done.length, skipped, unreadable, missingEvidence };
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
   }
-
-  const lines: string[] = [];
-  for (const [heading, match] of OKF_INDEX_SECTIONS) {
-    const section = done.filter(match);
-    if (section.length === 0) continue;
-    lines.push(`# ${heading}`, '');
-    for (const item of section) {
-      const desc = descriptionOf(item.body);
-      lines.push(`* [${(item.title || item.id).replace(/[\r\n]+/g, ' ')}](${item.id}.md)${desc ? ` - ${desc}` : ''}`);
-    }
-    lines.push('');
-  }
-  writeFileSync(join(out, 'index.md'), stringifyFrontMatter(`${lines.join('\n')}\n`, { okf_version: OKF_VERSION }));
-
-  return { out, written: done.length, skipped };
 }

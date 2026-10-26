@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +15,9 @@ import { runCli } from './helpers.js';
 
 const ID = (n: number): string => `ms_${String(n).padStart(26, '0').replace(/0/g, 'A').slice(0, 26)}`;
 const FUTURE = '2099-01-01T00:00:00.000Z';
+const BLOB = Buffer.from('evidence notes\n');
+const BLOB_SHA = createHash('sha256').update(BLOB).digest('hex');
+const BLOB_PATH = `evidence/${BLOB_SHA.slice(0, 12)}/notes.txt`;
 
 type Rec = MemoryFrontmatter & { title: string; body: string };
 
@@ -54,7 +59,7 @@ function fixture(): Rec[] {
       verified_with: 'evidence', last_verified: '2026-05-03T00:00:00.000Z',
       evidence: [
         { url: 'https://example.com/doc', captured_at: '2026-05-03T00:00:00.000Z' },
-        { sha256: 'd'.repeat(64), name: 'notes.txt', path: `evidence/${'d'.repeat(12)}/notes.txt`, source: 'repo:notes.txt', captured_at: '2026-05-03T01:00:00.000Z' },
+        { sha256: BLOB_SHA, name: 'notes.txt', path: BLOB_PATH, source: 'repo:notes.txt', captured_at: '2026-05-03T01:00:00.000Z' },
       ],
     }),
     base(5, { verified_with: 'assertion', last_verified: '2026-03-02T00:00:00.000Z', source: 'imp', source_kind: 'import' }),
@@ -85,6 +90,10 @@ async function makeStore(records: Rec[]): Promise<{ dir: string; store: MemspecS
   const store = new MemspecStore(dir);
   store.init();
   for (const r of records) store.writeItem(r);
+  if (records.some((r) => r.evidence?.some((e) => e.path === BLOB_PATH))) {
+    mkdirSync(join(store.root, BLOB_PATH, '..'), { recursive: true });
+    writeFileSync(join(store.root, BLOB_PATH), BLOB);
+  }
   return { dir, store };
 }
 
@@ -145,7 +154,9 @@ test('stale is not exported but is re-derived from check_by on the imported stor
 test('OKF output meets the spec required fields and the shapes of the emitted families', async () => {
   const { dir } = await makeStore(fixture());
   const out = await bundle(dir);
-  const files = (await readdir(out)).sort();
+  const entries = (await readdir(out)).sort();
+  assert.ok(entries.includes('evidence'), 'evidence blobs travel in the bundle');
+  const files = entries.filter((f) => f.endsWith('.md'));
   assert.ok(files.includes('index.md'));
   assert.ok(!files.includes('log.md'));
   assert.equal(files.filter((f) => f !== 'index.md').length, 13);
@@ -239,4 +250,193 @@ test('CLI: export --format okf --out then import --format okf round-trips', asyn
 
   await assert.rejects(runCli(['export', '--format', 'okf', '--cwd', dir]), /requires --out/);
   await assert.rejects(runCli(['export', '--format', 'jsonl', '--out', out, '--cwd', dir]), /only applies to --format okf/);
+});
+
+// --- review findings (consort panel) ---------------------------------------
+
+function layerDecl(entries: Array<{ name: string; path: string; priority: number; writable: boolean }>): string {
+  return 'stores:\n' + entries.map((e) => `  - name: ${e.name}\n    path: ${e.path}\n    priority: ${e.priority}\n    writable: ${e.writable}\n`).join('');
+}
+
+test('file-backed evidence blobs travel in the bundle and back; a missing blob refuses the record', async () => {
+  const { dir } = await makeStore(fixture());
+  const out = await bundle(dir);
+  assert.deepEqual(await readFile(join(out, BLOB_PATH)), BLOB);
+
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const res = runImportOkf({ cwd: target, dir: out });
+  assert.deepEqual(res.errors, []);
+  assert.deepEqual(await readFile(join(target, '.memspec', BLOB_PATH)), BLOB);
+
+  // Same bundle without the blob: the evidence-witnessed record is refused, the rest import.
+  rmSync(join(out, 'evidence'), { recursive: true });
+  const bare = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const res2 = runImportOkf({ cwd: bare, dir: out });
+  assert.equal(res2.errors.length, 1);
+  assert.match(res2.errors[0].file, new RegExp(ID(4)));
+  assert.match(res2.errors[0].reason, /evidence blob .* is missing/);
+  assert.equal(res2.imported.length, 12);
+
+  // A source store whose blob is already gone: exported, but reported.
+  const { dir: src, store } = await makeStore(fixture());
+  rmSync(join(store.root, 'evidence'), { recursive: true });
+  const exp = runExportOkf({ cwd: src, out: join(await mkdtemp(join(tmpdir(), 'memspec-okf-out-')), 'b') });
+  assert.equal(exp.written, 13);
+  assert.deepEqual(exp.missingEvidence.map((m) => m.id), [ID(4)]);
+});
+
+test('import places questions under memory/questions and superseded/retired records under archive', async () => {
+  const { dir } = await makeStore(fixture());
+  const out = await bundle(dir);
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  runImportOkf({ cwd: target, dir: out });
+  const root = join(target, '.memspec');
+  for (const id of [ID(12), ID(13)]) assert.ok(existsSync(join(root, 'memory', 'questions', `${id}.md`)), `question ${id}`);
+  for (const id of [ID(8), ID(10)]) assert.ok(existsSync(join(root, 'archive', `${id}.md`)), `archived ${id}`);
+  const active = new MemspecStore(target).activeSourceFiles().map((f) => f.split('/').pop());
+  for (const id of [ID(8), ID(10)]) assert.ok(!active.includes(`${id}.md`), `${id} is not an active source file`);
+  assert.ok(!existsSync(join(root, 'observations', `${ID(12)}.md`)));
+});
+
+test('export and import resolve the layered store like search and remember do', async () => {
+  const { dir: layerDir, store } = await makeStore(fixture());
+  // A repo with only a pointer file: export reads the declared layer.
+  const repo = await mkdtemp(join(tmpdir(), 'memspec-okf-repo-'));
+  await writeFile(join(repo, '.memspec.yaml'), layerDecl([{ name: 'team', path: store.root, priority: 10, writable: true }]));
+  const out = join(await mkdtemp(join(tmpdir(), 'memspec-okf-out-')), 'b');
+  assert.equal(runExportOkf({ cwd: repo, out }).written, 13);
+  assert.ok(!existsSync(join(repo, '.memspec')));
+
+  // Import through a pointer lands in the pointer's layer, not a phantom <repo>/.memspec.
+  const dest = await mkdtemp(join(tmpdir(), 'memspec-okf-dest-'));
+  const repo2 = await mkdtemp(join(tmpdir(), 'memspec-okf-repo-'));
+  await writeFile(join(repo2, '.memspec.yaml'), layerDecl([{ name: 'team', path: join(dest, '.memspec'), priority: 10, writable: true }]));
+  mkdirSync(join(dest, '.memspec'));
+  assert.equal(runImportOkf({ cwd: repo2, dir: out }).imported.length, 13);
+  assert.ok(!existsSync(join(repo2, '.memspec')));
+  assert.equal(new MemspecStore(join(dest, '.memspec')).loadAll().length, 13);
+
+  // Only read-only layers: import refuses and writes nothing.
+  const repo3 = await mkdtemp(join(tmpdir(), 'memspec-okf-repo-'));
+  await writeFile(join(repo3, '.memspec.yaml'), layerDecl([{ name: 'team', path: join(layerDir, '.memspec'), priority: 10, writable: false }]));
+  const before = new MemspecStore(join(layerDir, '.memspec')).recordFiles().length;
+  assert.throws(() => runImportOkf({ cwd: repo3, dir: out }), /no writable store layer/);
+  assert.equal(new MemspecStore(join(layerDir, '.memspec')).recordFiles().length, before);
+  assert.ok(!existsSync(join(repo3, '.memspec')));
+});
+
+test('export reports records that fail to load and the CLI exits non-zero', async () => {
+  const { dir, store } = await makeStore([base(1, {}), base(2, {})]);
+  await writeFile(join(store.root, 'memory', 'facts', 'ms_BROKEN.md'), '---\nid: ms_BROKEN\nkind: claim\n---\n# Broken\n');
+  const out = join(await mkdtemp(join(tmpdir(), 'memspec-okf-out-')), 'b');
+  const res = runExportOkf({ cwd: dir, out });
+  assert.equal(res.written, 2);
+  assert.equal(res.unreadable.length, 1);
+  assert.match(res.unreadable[0].file, /ms_BROKEN\.md$/);
+
+  const out2 = join(await mkdtemp(join(tmpdir(), 'memspec-okf-out-')), 'b');
+  await assert.rejects(runCli(['export', '--format', 'okf', '--out', out2, '--cwd', dir]), (err: { code?: number; stderr?: string }) => {
+    assert.equal(err.code, 1);
+    assert.match(String(err.stderr), /unreadable .*ms_BROKEN\.md/);
+    return true;
+  });
+});
+
+test('import never overwrites an existing record file, even one that fails to load', async () => {
+  const { dir } = await makeStore([base(1, {})]);
+  const out = await bundle(dir);
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const targetStore = new MemspecStore(target);
+  targetStore.init();
+  const corrupt = join(targetStore.root, 'memory', 'facts', `${ID(1)}.md`);
+  writeFileSync(corrupt, '---\nid: broken\n---\nhand-edited, invalid\n');
+  const res = runImportOkf({ cwd: target, dir: out });
+  assert.equal(res.imported.length, 0);
+  assert.match(res.skipped[0].reason, /already exists/);
+  assert.equal(await readFile(corrupt, 'utf8'), '---\nid: broken\n---\nhand-edited, invalid\n');
+});
+
+test('import refuses edited native type/status instead of reading them as the default', async () => {
+  const { dir } = await makeStore(fixture());
+  const out = await bundle(dir);
+  const retired = join(out, `${ID(10)}.md`);
+  await writeFile(retired, (await readFile(retired, 'utf8')).replace('status: deprecated', 'status: bogus'));
+  const typed = join(out, `${ID(6)}.md`);
+  await writeFile(typed, (await readFile(typed, 'utf8')).replace('type: Fact', 'type: Bogus'));
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const res = runImportOkf({ cwd: target, dir: out });
+  assert.deepEqual(res.errors.map((e) => e.file.split('/').pop()).sort(), [`${ID(10)}.md`, `${ID(6)}.md`].sort());
+  assert.match(res.errors.find((e) => e.file.endsWith(`${ID(10)}.md`))!.reason, /invalid status bogus/);
+  assert.equal(new MemspecStore(target).findById(ID(10)), null);
+});
+
+test('import skips files whose front matter is empty or not a mapping as foreign', async () => {
+  const { dir } = await makeStore([base(1, {})]);
+  const out = await bundle(dir);
+  await writeFile(join(out, 'empty.md'), '---\n# only a comment\n---\nhello\n');
+  await writeFile(join(out, 'scalar.md'), '---\njust a string\n---\nhello\n');
+  const res = runImportOkf({ cwd: await mkdtemp(join(tmpdir(), 'memspec-okf-in-')), dir: out });
+  assert.deepEqual(res.errors, []);
+  assert.equal(res.imported.length, 1);
+  for (const f of ['empty.md', 'scalar.md']) {
+    assert.match(res.skipped.find((s) => s.file.endsWith(f))!.reason, /no x-memspec extension/);
+  }
+});
+
+test('import accepts unquoted YAML timestamps in the extension and native fields', async () => {
+  const { dir } = await makeStore([base(1, { valid_from: '2026-01-01T00:00:00.000Z' })]);
+  const out = await bundle(dir);
+  const f = join(out, `${ID(1)}.md`);
+  const raw = await readFile(f, 'utf8');
+  const unquoted = raw.replace(/'(\d{4}-\d{2}-\d{2}T[\d:.]+Z)'/g, '$1');
+  assert.notEqual(unquoted, raw, 'fixture has quoted timestamps to unquote');
+  await writeFile(f, unquoted);
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  const res = runImportOkf({ cwd: target, dir: out });
+  assert.deepEqual(res.errors, []);
+  const item = new MemspecStore(target).findById(ID(1))!;
+  assert.equal(item.valid_from, '2026-01-01T00:00:00.000Z');
+  assert.equal(item.check_by, FUTURE);
+});
+
+test('record titles and descriptions cannot inject links into generated navigation', async () => {
+  const evil = 'Legit](https://attacker.example)[x <a href="https://attacker.example">y</a>';
+  const { dir } = await makeStore([
+    base(1, { title: evil, body: `# ${evil}\n\n[click](https://attacker.example)` }),
+    base(2, { refines: [ID(1)] }),
+  ]);
+  const out = await bundle(dir);
+  const index = await readFile(join(out, 'index.md'), 'utf8');
+  const links = (await readFile(join(out, `${ID(2)}.md`), 'utf8'));
+  for (const text of [index, links]) {
+    assert.ok(!/\]\(https:\/\/attacker/.test(text.replace(/\\\]/g, '')), 'no live link to the attacker');
+    assert.ok(!/<a href/.test(text.replace(/\\</g, '')), 'no live inline HTML');
+  }
+  // The record's own body still round-trips verbatim.
+  const target = await mkdtemp(join(tmpdir(), 'memspec-okf-in-'));
+  runImportOkf({ cwd: target, dir: out });
+  assert.equal(new MemspecStore(target).findById(ID(1))!.title, evil);
+});
+
+test('a source already in actor form is exported as that actor', async () => {
+  const { dir } = await makeStore([base(1, { source: 'human:siim', source_kind: 'operator' })]);
+  const out = await bundle(dir);
+  const d = parseFrontMatter(await readFile(join(out, `${ID(1)}.md`), 'utf8')).data as Record<string, any>;
+  assert.equal(d.generated.by, 'human:siim');
+});
+
+test('concurrent exports to one --out: exactly one wins, the bundle is not mixed', async () => {
+  const { dir: a } = await makeStore([base(1, {}), base(2, {})]);
+  const { dir: b } = await makeStore([base(3, {}), base(4, {}), base(5, {})]);
+  const parent = await mkdtemp(join(tmpdir(), 'memspec-okf-out-'));
+  const out = join(parent, 'b');
+  const settled = await Promise.allSettled([
+    runCli(['export', '--format', 'okf', '--out', out, '--cwd', a]),
+    runCli(['export', '--format', 'okf', '--out', out, '--cwd', b]),
+  ]);
+  assert.equal(settled.filter((s) => s.status === 'fulfilled').length, 1);
+  const files = (await readdir(out)).filter((f) => f !== 'index.md').sort();
+  const ok = [[ID(1), ID(2)], [ID(3), ID(4), ID(5)]].map((ids) => ids.map((i) => `${i}.md`));
+  assert.ok(ok.some((want) => JSON.stringify(want) === JSON.stringify(files)), `mixed bundle: ${files.join(',')}`);
+  assert.deepEqual((await readdir(parent)).sort(), ['b'], 'no staging directory left behind');
 });

@@ -345,12 +345,13 @@ export class MemspecStore {
 
   private writes = 0;
 
-  writeItem(item: MemoryFrontmatter & { title: string; body: string }): string {
+  /** `exclusive`: fail with EEXIST instead of replacing a file already at the record's path. */
+  writeItem(item: MemoryFrontmatter & { title: string; body: string }, options: { exclusive?: boolean } = {}): string {
     this.writes++;
     const filePath = this.pathForItem(item);
     const dir = resolve(filePath, '..');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(filePath, serializeMemoryFile(item));
+    writeFileSync(filePath, serializeMemoryFile(item), options.exclusive ? { flag: 'wx' } : undefined);
     // Every write path keeps the store's .gitignore current, so a store
     // created before 0.11 picks up `outcomes.jsonl` / `local/` / `logs/` on
     // its first 0.11 write instead of committing telemetry on the next sync.

@@ -45,11 +45,21 @@
  * the round trip is lossless by construction, not by a hand-kept field list.
  *
  * Not carried: `stale` (derived from check_by at read time, re-flagged on the
- * first read of the imported store), evidence file BYTES (the entry, incl.
- * path and sha256, is kept; the blob under `<store>/evidence/` is not copied).
+ * first read of the imported store).
+ *
+ * Evidence blobs: a file-backed entry (`sha256` + `path`) is only a witness
+ * while its content-addressed blob exists, so the exporter copies each blob
+ * into the bundle at the same relative path (`evidence/<sha12>/<name>`, at most
+ * 5 MB each) and the importer copies it back, checking the sha256. A record
+ * whose blob is missing or altered is refused on import rather than landing
+ * with a `verified_with: evidence` witness that points at nothing.
  */
 
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { EVIDENCE_DIR, isFileBackedEvidence } from '../lib/evidence.js';
 import { effectiveSourceKind } from '../lib/source.js';
 import type { CodeAnchor, EvidenceEntry, MemoryFrontmatter, MemoryItem, SourceKind } from '../lib/types.js';
 
@@ -111,9 +121,19 @@ export function toInstant(value: unknown): string | undefined {
 
 function actorFor(item: MemoryFrontmatter): string {
   const kind: SourceKind = effectiveSourceKind(item);
-  if (kind === 'operator') return `human:${item.source}`;
-  if (kind === 'import') return `process:${item.source}`;
+  // A source already in actor form (`human:siim`) is the actor id as-is.
+  if (kind === 'operator') return /^human:/i.test(item.source) ? item.source : `human:${item.source}`;
+  if (kind === 'import') return /^process:/i.test(item.source) ? item.source : `process:${item.source}`;
   return item.source;
+}
+
+/**
+ * Record text placed inside generated markdown (index entries, Links labels):
+ * one line, with the characters that open a link, image or inline HTML
+ * escaped, so a title like `x](https://evil)[y` stays inert text.
+ */
+export function inertMarkdown(text: string): string {
+  return text.replace(/[\r\n]+/g, ' ').replace(/[\\[\]<]/g, '\\$&');
 }
 
 function anchorResource(anchor: CodeAnchor): string {
@@ -287,7 +307,7 @@ export function encodeOkfDocument(item: MemoryItem, titleOf: (id: string) => str
 
   let body = item.body.trim();
   if (edges.length > 0) {
-    const lines = edges.map((e) => `* [${(titleOf(e.to) ?? e.to).replace(/[\r\n]+/g, ' ')}](/${e.to}.md) - ${e.type}`);
+    const lines = edges.map((e) => `* [${inertMarkdown(titleOf(e.to) ?? e.to)}](/${e.to}.md) - ${e.type}`);
     body = `${body}\n\n${LINKS_BEGIN}\n## Links\n\n${lines.join('\n')}\n${LINKS_END}`;
   }
 
@@ -318,12 +338,34 @@ export interface OkfDecoded {
 
 export class OkfNotMemspecError extends Error {}
 
-/** Decode a parsed OKF concept document produced by `encodeOkfDocument`. */
-export function decodeOkfDocument(doc: Obj, rawBody: string): OkfDecoded {
-  const ext = doc[OKF_EXTENSION_KEY] as OkfExtension | undefined;
-  if (!ext || typeof ext !== 'object' || typeof ext.id !== 'string') {
+/** YAML turns an unquoted ISO timestamp into a Date; memspec frontmatter holds strings. */
+function datesToIso(value: unknown): unknown {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? value : value.toISOString();
+  if (Array.isArray(value)) return value.map(datesToIso);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Obj).map(([k, v]) => [k, datesToIso(v)]));
+  }
+  return value;
+}
+
+/**
+ * Decode a parsed OKF concept document produced by `encodeOkfDocument`.
+ * Throws `OkfNotMemspecError` for a document memspec did not write (no
+ * extension, or no front matter at all), and a plain Error for a memspec
+ * document whose native fields are not valid OKF or not a shape the exporter
+ * emits: the native `type` and `status` decide kind and state, so an edited
+ * value must be refused, not read as the default.
+ */
+export function decodeOkfDocument(doc: Obj | null | undefined, rawBody: string): OkfDecoded {
+  const ext = doc && typeof doc === 'object' ? (doc[OKF_EXTENSION_KEY] as OkfExtension | undefined) : undefined;
+  if (!doc || !ext || typeof ext !== 'object' || typeof ext.id !== 'string') {
     throw new OkfNotMemspecError(`no ${OKF_EXTENSION_KEY} extension with an id (not produced by memspec export)`);
   }
+  const problems = validateOkfConcept(doc);
+  if (typeof doc.type === 'string' && !Object.values(TYPE_NAME).includes(doc.type)) {
+    problems.push(`type ${doc.type} is not one memspec exports (${Object.values(TYPE_NAME).join(', ')})`);
+  }
+  if (problems.length > 0) throw new Error(`not a valid memspec OKF concept: ${problems.join('; ')}`);
   const edges = (Array.isArray(ext.edges) ? ext.edges : []).filter(
     (e): e is OkfEdge => !!e && typeof e.type === 'string' && typeof e.to === 'string',
   );
@@ -333,6 +375,7 @@ export function decodeOkfDocument(doc: Obj, rawBody: string): OkfDecoded {
   for (const [key, value] of Object.entries(ext)) {
     if (!reserved.has(key)) merged[key] = value;
   }
+  for (const [key, value] of Object.entries(merged)) merged[key] = datesToIso(value);
   for (const key of Array.isArray(ext.absent) ? ext.absent : []) delete merged[key];
   return { frontmatter: merged, title, body };
 }
@@ -345,7 +388,8 @@ export function decodeOkfDocument(doc: Obj, rawBody: string): OkfDecoded {
 export function validateOkfConcept(doc: Obj): string[] {
   const problems: string[] = [];
   if (typeof doc.type !== 'string' || doc.type.trim() === '') problems.push('missing non-empty `type`');
-  const instant = (v: unknown): boolean => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})$/.test(v) && !Number.isNaN(Date.parse(v));
+  const instant = (v: unknown): boolean => (v instanceof Date && !Number.isNaN(v.getTime()))
+    || (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})$/.test(v) && !Number.isNaN(Date.parse(v)));
   if (doc.status !== undefined && !['draft', 'stable', 'deprecated'].includes(String(doc.status))) problems.push(`invalid status ${String(doc.status)}`);
   if (doc.stale_after !== undefined && !instant(doc.stale_after)) problems.push('stale_after is not an ISO 8601 instant with offset');
   if (doc.tags !== undefined && !Array.isArray(doc.tags)) problems.push('tags is not a list');
@@ -368,4 +412,33 @@ export function validateOkfConcept(doc: Obj): string[] {
     }
   }
   return problems;
+}
+
+const EVIDENCE_PATH = new RegExp(`^${EVIDENCE_DIR}/([0-9a-f]{12})/([^/\\\\]+)$`);
+
+/**
+ * The bytes of a file-backed evidence entry's blob under `root` (a store or a
+ * bundle), checked against the entry: the path must be the content-addressed
+ * `evidence/<sha256[:12]>/<name>` shape (no traversal), the file a regular
+ * non-symlink file, and its sha256 the recorded one. Throws with the reason.
+ */
+export function readEvidenceBlob(root: string, entry: EvidenceEntry): Buffer {
+  const m = EVIDENCE_PATH.exec(entry.path ?? '');
+  if (!isFileBackedEvidence(entry) || !m || m[2] === '.' || m[2] === '..' || m[1] !== entry.sha256!.slice(0, 12)) {
+    throw new Error(`evidence entry path ${String(entry.path)} is not ${EVIDENCE_DIR}/<sha256[:12]>/<name> for its sha256`);
+  }
+  const file = join(root, entry.path!);
+  if (!existsSync(file)) throw new Error(`evidence blob ${entry.path} is missing`);
+  const stat = lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`evidence blob ${entry.path} is not a regular file`);
+  const bytes = readFileSync(file);
+  if (createHash('sha256').update(bytes).digest('hex') !== entry.sha256) {
+    throw new Error(`evidence blob ${entry.path} does not match its sha256`);
+  }
+  return bytes;
+}
+
+/** File-backed evidence entries of a record (those with a blob to carry). */
+export function fileBackedEvidence(item: { evidence?: EvidenceEntry[] }): EvidenceEntry[] {
+  return (item.evidence ?? []).filter(isFileBackedEvidence);
 }
