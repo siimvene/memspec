@@ -128,3 +128,30 @@ test('MCP: remember, supersede and observe refuse an oversized title or body wit
     await session.close();
   }
 });
+
+const AT = 'Read at hono 0123456789ab.';
+test('wording: verb-swapped restatements of the same identifiers are one claim; distinct facts about them are not', () => {
+  const paraphrases: Array<[Claim, Claim]> = [
+    [{ title: '`render` in src/jsx/dom/render.ts takes a JSX node and a container', body: `\`render\` in src/jsx/dom/render.ts takes a JSX node and a container element and mounts the tree. ${AT}` },
+     { title: '`render` in src/jsx/dom/render.ts receives a JSX node and a container', body: `\`render\` in src/jsx/dom/render.ts receives a JSX node and a container element and attaches the tree. ${AT}` }],
+    [{ title: 'CI runs on the ubuntu-22.04 runner with Node 20', body: 'The GitHub Actions workflow pins ubuntu-22.04 and installs Node 20 before running the test suite.' },
+     { title: 'CI uses the ubuntu-22.04 runner and Node 20', body: 'The GitHub Actions workflow pins ubuntu-22.04 and sets up Node 20 before executing the test suite.' }],
+    [{ title: 'Deploys run from the bastion host: deploy.sh pushes main to production', body: 'deploy.sh on the bastion host deploys the main branch to production when triggered by the release runner.' },
+     { title: 'deploy.sh on the bastion ships main to prod', body: 'The release runner triggers deploy.sh on the bastion host, which rolls the main branch out to production.' }],
+  ];
+  for (const [a, b] of paraphrases) assert.equal(same(a, b), true, `${a.title} / ${b.title}`);
+  // Residual (SPEC): a short claim whose verbs are most of its wording (0.50) reads as a new claim.
+  assert.equal(same(
+    { title: '`validate` in src/validate.ts returns a Result', body: `\`validate\` in src/validate.ts returns a Result object describing the errors. ${AT}` },
+    { title: '`validate` in src/validate.ts gives back a Result', body: `\`validate\` in src/validate.ts gives back a Result object listing the errors. ${AT}` },
+  ), false);
+  const distinct = (a: Claim, b: Claim) => sameClaim(shape(a), shape(b)) || sameClaim(shape(b), shape(a));
+  assert.equal(distinct(
+    { title: '`render` in src/jsx/dom/render.ts takes a JSX node and a container', body: `\`render\` in src/jsx/dom/render.ts takes a JSX node and a container element. ${AT}` },
+    { title: 'src/jsx/dom/render.ts exports `render` as a runtime value', body: `src/jsx/dom/render.ts exports \`render\` as a runtime value. ${AT}` },
+  ), false);
+  assert.equal(distinct(
+    { title: '`validate` in src/validate.ts is synchronous', body: `\`validate\` in src/validate.ts is synchronous and returns a Result. ${AT}` },
+    { title: '`validate` in src/validate.ts is async', body: `\`validate\` in src/validate.ts is async and resolves to a Result. ${AT}` },
+  ), false);
+});

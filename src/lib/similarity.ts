@@ -207,6 +207,19 @@ const LOOSE_PREFIX = '~';
  */
 const MIN_WORDING_WEIGHT = 3;
 
+/**
+ * Wording agreement for claims that name the same identifiers. Lower than
+ * CLAIM_SIMILARITY_THRESHOLD: the shared identifiers already carry the claim,
+ * so a reworded restatement that swaps its verbs ("takes/produces" for
+ * "accepts/returns") measured 0.50-0.64 and should read as the same claim,
+ * while distinct facts about the same identifiers measured 0.20-0.43. Chosen
+ * against the wrongness bench (2,123 templated Hono facts): 0.50 caught every
+ * reworded pair but refused 49 distinct facts (a symbol's signature next to
+ * its export); 0.55 refuses 3 beyond the two exact-title collisions and lets
+ * the two 0.50 rewordings through (SPEC residual).
+ */
+const WORDING_AGREEMENT_THRESHOLD = 0.55;
+
 const FILE_EXT = /\.(?:[cm]?[jt]sx?|json5?|ya?ml|toml|md|mdx|py|go|rs|java|kt|rb|php|cs|swift|sh|sql|css|scss|html?|txt|lock|cfg|ini|conf|xml|csv|env)$/;
 const CODE_SYMBOL = /[\p{Ll}\p{N}]\p{Lu}|_|[\p{L}\p{N}][./][\p{L}\p{N}]/u;
 /*
@@ -457,7 +470,7 @@ export function displayIdentifier(id: string): string {
 
 /**
  * Whether two claims say the same thing about their identifiers: wording
- * Jaccard at or above CLAIM_SIMILARITY_THRESHOLD, or either side too thin
+ * Jaccard at or above WORDING_AGREEMENT_THRESHOLD, or either side too thin
  * (< MIN_WORDING_WEIGHT tokens) to say anything beyond its identifiers.
  */
 export function wordingAgrees(
@@ -470,7 +483,7 @@ export function wordingAgrees(
   if (sa.length < MIN_WORDING_WEIGHT || sb.size < MIN_WORDING_WEIGHT) return true;
   let shared = 0;
   for (const t of sa) if (sb.has(t)) shared++;
-  return shared / (sa.length + sb.size - shared) >= CLAIM_SIMILARITY_THRESHOLD;
+  return shared / (sa.length + sb.size - shared) >= WORDING_AGREEMENT_THRESHOLD;
 }
 
 /**

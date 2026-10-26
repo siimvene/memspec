@@ -669,7 +669,7 @@ server.tool(
   'memspec_question',
   'Create or edit a question group — a named question with competing answer records, the preferred form when two or more records answer one question (clearer than pairwise conflicts_with). Create: pass a `title` plus `answers` (existing record ids; each must be active or superseded); add `closed: true` for a closed-world question whose answers are the only candidates. Edit an existing question by passing its `id` with exactly one of: `add` (more answer ids), `close`/`open` (toggle closed-world), or `resolve` (settle it — requires exactly one answer still active, the survivor). A closed question with one surviving active answer is reported "resolved by elimination" in memspec_status; resolution is never automatic. Over MCP an operator-sourced question is read-only (add/close/open/resolve refused; a human uses `memspec question` at a terminal), and a source naming an operator creates the question at agent tier.',
   {
-    title: z.string().optional().describe('The question text (create only). Omit when editing an existing question by id.'),
+    title: titleText().optional().describe('The question text (create only). Omit when editing an existing question by id.'),
     id: z.string().optional().describe('Existing question id to edit (with add/close/open/resolve). Omit when creating.'),
     answers: z.array(z.string()).optional().describe('Create: competing answer record ids (each must exist and be active or superseded).'),
     closed: z.boolean().optional().describe('Create: mark the question closed-world (its answers are the only candidates).'),
