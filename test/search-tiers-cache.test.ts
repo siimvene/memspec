@@ -188,6 +188,19 @@ test('record cache hands out copies: mutating a loaded record does not leak into
   assert.deepEqual(store.findById(second.id)!.tags, ['one', 'two']);
 });
 
+test('record cache copies keep a parsed __proto__ key as an own property, never as the prototype', async () => {
+  const project = await freshStore();
+  const id = remember(project, 'Proto key holder', 'body text');
+  const file = new MemspecStore(project).findById(id)!.filePath;
+  const raw = readFileSync(file, 'utf8');
+  writeFileSync(file, raw.replace(/^---\n/, '---\next:\n  nested:\n    __proto__:\n      polluted: 1\n'));
+  const loaded = new MemspecStore(project).findById(id)!;
+  const nested = (loaded.ext as Record<string, Record<string, unknown>>).nested;
+  assert.equal(Object.getPrototypeOf(nested), Object.prototype);
+  assert.ok(Object.prototype.hasOwnProperty.call(nested, '__proto__'));
+  assert.equal((nested as { polluted?: unknown }).polluted, undefined);
+});
+
 // --- usage stats -----------------------------------------------------------
 
 /** The pre-cache full-file fold, kept here as the reference semantics. */

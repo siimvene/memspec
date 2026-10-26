@@ -67,7 +67,14 @@ function cloneValue<T>(value: T): T {
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) return structuredClone(value);
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(value)) out[key] = cloneValue((value as Record<string, unknown>)[key]);
+  // defineProperty, not assignment: a parsed `__proto__` key must stay an own
+  // property instead of becoming the copy's prototype.
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(out, key, {
+      value: cloneValue((value as Record<string, unknown>)[key]),
+      enumerable: true, writable: true, configurable: true,
+    });
+  }
   return out as T;
 }
 
