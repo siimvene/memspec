@@ -191,3 +191,20 @@ test('MCP-E: memspec_remember store=global on the two-layer template is refused'
   }
   assert.deepEqual(new MemspecStore(home).loadActive().map((i) => i.title), []);
 });
+
+test('place transfer: a dream-style merge whose summary mentions the removed number for an unrelated reason is written', async () => {
+  const { cwd, survivorId } = await correctionOnly();
+  const redis = runRemember('fact', 'Gateway Redis cluster runs three nodes', {
+    cwd, body: 'The gateway Redis cluster runs three nodes behind a sentinel pair; failover is automatic.', source: 'agent-a',
+  });
+  const probe = runRemember('fact', 'Gateway health check interval', {
+    cwd, body: 'The gateway health check runs every 30 seconds against /healthz on each pod.', source: 'agent-a',
+  });
+  const result = runSupersede(redis.id, {
+    cwd, reason: 'dream consolidation', source: 'agent-dream', ...MCP,
+    title: 'Gateway runtime facts',
+    body: 'The gateway Redis cluster runs three nodes behind a sentinel pair. The health check runs every 30 seconds against /healthz. Session cache entries expire after 15 minutes.',
+    mergeFrom: [survivorId, probe.id],
+  });
+  assert.equal(new MemspecStore(cwd).findById(result.survivor_id)!.state, 'active');
+});

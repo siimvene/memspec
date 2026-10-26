@@ -72,7 +72,9 @@ import type { MemspecStore } from './store.js';
  * the replacement of a body + merge_from). The chain is explicit, so R is
  * judged against that record whatever its lexical distance: a survivor that
  * carries an identifier the correction removed, or sits closer to R than to
- * S, is refused. Without this, merging the current-value record into an
+ * S, is refused (below the threshold, only when it sits closer to R than to
+ * S: a summary equally far from both may mention the number for another
+ * reason). Without this, merging the current-value record into an
  * older record still stating the old value (similarity 0.43, under the
  * threshold) made the old value the chain's active end.
  *
@@ -267,6 +269,11 @@ export function scanArchive(
       const kept = new Set(current.tokens);
       removedValues = r.tokens.filter((t) => isIdentifierToken(t) && !kept.has(t) && incoming.tokens.has(t)).map(displayToken);
       survivorSimilarity = similarityTo(current);
+      // A transfer below the threshold is judged only when the kept text is
+      // closer to the rejected value than to the value being merged away: a
+      // summary that mentions the removed number for an unrelated reason is
+      // equally far from both and stays writable.
+      if (transfer && similarity < CLAIM_SIMILARITY_THRESHOLD && survivorSimilarity >= similarity) continue;
       // When this write is the supersede of `current`, `survivorAfter` is the
       // claim itself (similarity 1): the margin then only stops a verbatim
       // restatement, so the claim must also be no closer to R than to the
