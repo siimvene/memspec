@@ -127,9 +127,11 @@ function verifyInStore(id: string, options: VerifyOptions, store: MemspecStore):
   const unavailable = statuses.filter((a) => a.status === 'repo_unavailable');
   const drifted = statuses.filter((a) => a.status === 'changed' || a.status === 'missing');
   // --reanchor: a changed anchor with a current blob can be re-baselined on
-  // the caller's word; a missing one cannot (nothing to baseline to).
+  // the caller's word; a missing one cannot (nothing to baseline to), nor one
+  // missing from this checkout whose only current blob is the default
+  // branch's (code the caller did not have in front of them).
   const reanchorable = options.reanchor
-    ? drifted.filter((a) => a.status === 'changed' && a.currentSha !== null)
+    ? drifted.filter((a) => a.status === 'changed' && a.currentSha !== null && !a.worktree_missing)
     : [];
   const blocking = drifted.filter((a) => !reanchorable.includes(a));
   if (reanchorable.length > 0 && !options.evidence?.trim() && !options.evidenceFile) {
@@ -153,7 +155,12 @@ function verifyInStore(id: string, options: VerifyOptions, store: MemspecStore):
       lines.push(`  anchor in repo ${a.repo}, fetch to verify: ${a.file}`);
     }
     for (const a of drifted) {
-      lines.push(`  ${a.status === 'missing' ? 'missing' : 'changed'}: ${a.file}`);
+      const what = a.status === 'missing'
+        ? 'missing'
+        : a.worktree_missing
+          ? `missing in this checkout (changed on ${a.compared_to?.replace(/^worktree\+/, '') ?? 'the default branch'})`
+          : 'changed';
+      lines.push(`  ${what}: ${a.file}`);
     }
     lines.push('', 'Memory left untouched.');
     if (drifted.length > 0) {
@@ -163,7 +170,7 @@ function verifyInStore(id: string, options: VerifyOptions, store: MemspecStore):
         `  memspec verify ${id} --reanchor --evidence "..."   # if still true, re-baseline changed anchors (history kept)`,
       );
       if (options.reanchor) {
-        lines.push('--reanchor re-baselines changed files only; a missing file or an unavailable repo still needs review.');
+        lines.push('--reanchor re-baselines changed files in this checkout only; a missing file (here or anywhere) or an unavailable repo still needs review.');
       }
     }
     if (unavailable.length > 0) {

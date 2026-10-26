@@ -2,7 +2,7 @@ import { getCodeAnchors, projectRootForStore, resolveAnchorForWrite } from '../l
 import { loadConfig } from '../lib/config.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { withFileLock } from '../lib/lock.js';
-import { effectiveSourceKind, operatorOverMcpError, type WriteChannel } from '../lib/source.js';
+import { effectiveSourceKind, operatorOverMcpError, sourceForChannel, type WriteChannel } from '../lib/source.js';
 import { MemspecStore } from '../lib/store.js';
 import type { CodeAnchor } from '../lib/types.js';
 
@@ -82,6 +82,27 @@ function anchorInStore(id: string, files: string[], options: AnchorOptions, stor
   // v0.3 stores anchors at the top level; ext.code_anchors is dropped on touch.
   const ext = { ...(item.ext ?? {}) } as Record<string, unknown>;
   delete ext.code_anchors;
+
+  // An existing anchor moved to a new blob (or dropped by --replace) is a
+  // re-baseline: keep the old sha in ext.anchor_history, as verify --reanchor
+  // does, so it is an auditable event rather than a silent overwrite.
+  const previous = getCodeAnchors(item);
+  const moved: Array<{ file: string; repo?: string; previous_sha: string; sha: string | null }> = [];
+  for (const old of previous) {
+    const cur = anchors.find((a) => a.file === old.file && a.repo === old.repo);
+    if (cur?.sha === old.sha) continue;
+    moved.push({ file: old.file, ...(old.repo ? { repo: old.repo } : {}), previous_sha: old.sha, sha: cur?.sha ?? null });
+  }
+  if (moved.length > 0) {
+    const entry: Record<string, unknown> = { at: now, via: 'anchor', anchors: moved };
+    if (options.source) {
+      const { source, claimed } = sourceForChannel(options.source, options.channel);
+      entry.source = source;
+      if (claimed) entry.claimed_source = claimed;
+    }
+    const history = Array.isArray(ext.anchor_history) ? [...(ext.anchor_history as unknown[])] : [];
+    ext.anchor_history = [...history, entry];
+  }
 
   // Anchoring asserts the memory is true against current file state, and the
   // anchor itself is the witness.

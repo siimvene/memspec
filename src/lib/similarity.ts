@@ -89,8 +89,18 @@ export function claimTokens(title: string, body = ''): Set<string> {
   return out;
 }
 
+/** An identifier token (a value: carries a digit, or a single-capital label); see the module note. */
+export function isIdentifierToken(token: string): boolean {
+  return token.startsWith(LABEL_PREFIX) || HAS_DIGIT.test(token);
+}
+
+/** A token as a reader would recognise it (labels lose their internal prefix). */
+export function displayToken(token: string): string {
+  return token.startsWith(LABEL_PREFIX) ? token.slice(LABEL_PREFIX.length).toUpperCase() : token;
+}
+
 function weight(token: string): number {
-  return token.startsWith(LABEL_PREFIX) || HAS_DIGIT.test(token) ? IDENTIFIER_WEIGHT : 1;
+  return isIdentifierToken(token) ? IDENTIFIER_WEIGHT : 1;
 }
 
 /** Total weight of a token collection (the Jaccard denominator's input). */

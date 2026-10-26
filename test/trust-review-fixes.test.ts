@@ -304,7 +304,7 @@ test('tombstone: a declared edge to the survivor does not launder a claim mixing
   assert.ok(rec(cwd, child.id));
 });
 
-test('tombstone: re-scoping to universal or re-typing does not bring a rejected value back', async () => {
+test('tombstone: re-scoping (any scope) or re-typing does not bring a rejected value back', async () => {
   const cwd = await makeTempProject();
   await runCli(['init', '--cwd', cwd]);
   const config = join(cwd, '.memspec', 'config.yaml');
@@ -314,22 +314,30 @@ test('tombstone: re-scoping to universal or re-typing does not bring a rejected 
   const refused = new RegExp(`remember refuses rejected value: this value was rejected in ${old.id}`);
   assert.throws(() => runRemember('fact', OLD.title, { cwd, body: OLD.body, source: 'agent-b', scope: 'universal', channel: 'mcp' }), refused);
   assert.throws(() => runRemember('decision', OLD.title, { cwd, body: OLD.body, source: 'agent-b', scope: 'kvart', channel: 'mcp' }), refused);
-  // A record the rejected one was never visible to stays writable.
-  const elsewhere = runRemember('fact', OLD.title, { cwd, body: OLD.body, source: 'agent-b', scope: 'other', channel: 'mcp' });
-  assert.ok(rec(cwd, elsewhere.id));
+  // An archived rejection is a rejection everywhere: another project's scope too.
+  assert.throws(() => runRemember('fact', OLD.title, { cwd, body: OLD.body, source: 'agent-b', scope: 'other', channel: 'mcp' }), refused);
 });
 
-test('tombstone: a replacement body with merge_from is a replacement (correcting twins keeps the tombstone)', async () => {
+test('tombstone: a replacement body with merge_from replaces the target and merges the rest (twins stay refused over MCP)', async () => {
   const cwd = await project();
   const a = runRemember('fact', OLD.title, { cwd, body: OLD.body, source: 'agent-a' });
   const b = runRemember('fact', 'Sessions in the cache live 30 minutes', { cwd, body: 'Cached sessions are dropped after 30 minutes.', source: 'agent-a', distinctFrom: [a.id] });
   const s = runSupersede(a.id, { cwd, reason: 'lowered', title: NEW.title, body: NEW.body, mergeFrom: [b.id], source: 'agent-a' }).survivor_id;
   assert.equal(rec(cwd, a.id).ext?.supersede_kind, 'replace');
-  assert.equal(rec(cwd, b.id).ext?.supersede_kind, 'replace');
+  assert.equal(rec(cwd, b.id).ext?.supersede_kind, 'merge');
   assert.throws(
     () => runRemember('fact', OLD.title, { cwd, body: OLD.body, source: 'agent-b', channel: 'mcp', distinctFrom: [s] }),
     new RegExp(`remember refuses rejected value: this value was rejected in ${a.id}`),
   );
+  // The merged twin restated over MCP: the near-duplicate refusal naming the
+  // survivor, final (a declared edge does not exempt it), never written.
+  for (const options of [{}, { distinctFrom: [s] }]) {
+    assert.throws(
+      () => runRemember('fact', 'Sessions in the cache live 30 minutes', { cwd, body: 'Cached sessions are dropped after 30 minutes.', source: 'agent-b', channel: 'mcp', ...options }),
+      (err: Error) => err.message.startsWith('remember refuses near-duplicate:') && err.message.includes(`merged into the active fact ${s}`) && /final/.test(err.message),
+    );
+  }
+  assert.equal(new MemspecStore(cwd).loadActive().length, 1);
 });
 
 test('tombstone: a piece merged into S, then S replaced by T, is a rejected value (not held by T)', async () => {

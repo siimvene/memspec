@@ -4,6 +4,16 @@ import { appendOutcome } from '../lib/outcomes.js';
 import { effectiveSourceKind, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
 import { assertKnownScope } from '../lib/scope.js';
 import { withFileLock } from '../lib/lock.js';
+import { loadClaimIndex } from '../lib/claim-index.js';
+import { claimTokens, tokenWeight } from '../lib/similarity.js';
+import {
+  CLAIM_WRITE_LOCK,
+  mergedPieceError,
+  rejectedValueError,
+  rejectedValueOverrides,
+  scanArchive,
+  type RejectedValueMatch,
+} from '../lib/tombstone.js';
 import { CompositeStore, type StoreLayer } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_DECAY_DAYS, type EvidenceEntry, type MemoryItem, type MemoryType } from '../lib/types.js';
@@ -42,6 +52,13 @@ export interface SupersedeOptions {
    * caller who has been asked to classify is past that.
    */
   scope?: string;
+  /**
+   * Write the replacement even though its body near-matches a value an
+   * earlier supersede rejected (the tombstone, lib/tombstone.ts). Honoured
+   * only on the CLI channel; logged into the replacement's
+   * `ext.rejected_value_overrides`. Over MCP the refusal is final.
+   */
+  allowRejected?: boolean;
 }
 
 export interface SupersedeResult {
@@ -63,13 +80,15 @@ export interface SupersedeResult {
 
 /**
  * How a record left the active set, stamped on the archived record as
- * `ext.supersede_kind`. `remember`'s tombstone reads it: a `replace` or
- * `retract` rejected the record's value, a `merge` consolidated it into a
- * survivor that still holds it (the piece is a near-duplicate of the survivor,
- * never a rejected value). `merge` is stamped only by a merge into an existing
- * survivor (no body): a replacement body is new content, union or correction,
- * and stamps `replace` on every record it collapses. The survivor's
- * `supersedes` list cannot tell the kinds apart on its own.
+ * `ext.supersede_kind`. The tombstone (lib/tombstone.ts) reads it: a
+ * `replace` or `retract` rejected the record's value, a `merge` consolidated
+ * it into a survivor that still holds it (restating the piece is a
+ * near-duplicate of the survivor, never a rejected value). Per record: in a
+ * supersede with a replacement body, the target is `replace` (its value is
+ * what the body corrects) and every `merge_from` id is `merge` (consolidated
+ * into the new record, dream-style); a merge into an existing survivor (no
+ * body) stamps `merge` on each piece. The survivor's `supersedes` list cannot
+ * tell the kinds apart on its own.
  */
 export type SupersedeKind = 'replace' | 'merge' | 'retract';
 
@@ -108,6 +127,36 @@ function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason:
     return `${reason} [override_operator used on operator-sourced record]`;
   }
   return reason;
+}
+
+/**
+ * The tombstone for a replacement body (lib/tombstone.ts), judged against the
+ * state the supersede produces: `replaced` / `merged` are the ids this write
+ * archives, `newId` the record it creates. Throws the refusal; on the CLI
+ * with `allowRejected` returns the matches to log on the replacement. A
+ * restated merged piece refuses over MCP only: the CLI supersede is the
+ * operator's consolidation path and never ran a near-duplicate check.
+ */
+function assertNoRejectedValue(
+  store: MemspecStore,
+  claim: { title: string; body: string },
+  pending: { newId: string; replaced: string[]; merged: string[] },
+  options: SupersedeOptions,
+): RejectedValueMatch[] {
+  const viaMcp = options.channel === 'mcp';
+  const tokens = claimTokens(claim.title, claim.body);
+  const scan = scanArchive(loadClaimIndex(store), { tokens, weight: tokenWeight(tokens) }, pending);
+  if (scan.rejected.length > 0 && (viaMcp || !options.allowRejected)) {
+    throw rejectedValueError('supersede', scan.rejected, viaMcp);
+  }
+  if (viaMcp && scan.merged.length > 0) throw mergedPieceError('supersede', scan.merged, true);
+  return scan.rejected;
+}
+
+function overrideNote(matches: RejectedValueMatch[], id: string): string {
+  return matches.length > 0
+    ? `\n⚠ --allow-rejected: ${id} written over ${matches.length} rejected value(s), logged in ext.rejected_value_overrides`
+    : '';
 }
 
 /**
@@ -193,7 +242,9 @@ function crossLayerTarget(composite: CompositeStore, targetId: string, options: 
   const target = owner.store.findById(targetId);
   if (!target) return null;
   local.store.init();
-  return withSupersedeLock(local.store.root, targetId, () => writeCrossLayerReplacement(composite, owner, local, target, body, options));
+  return withSupersedeLock(local.store.root, targetId, () =>
+    withFileLock(local.store.root, CLAIM_WRITE_LOCK, () => writeCrossLayerReplacement(composite, owner, local, target, body, options), { waitMs: 10_000 }),
+  );
 }
 
 /**
@@ -242,6 +293,9 @@ function writeCrossLayerReplacement(
   const scope = explicitScope ?? target.scope;
 
   const newId = `ms_${ulid()}`;
+  // The read-only target is not in this store's archive; the scan covers the
+  // writable layer the replacement lands in (the same store `remember` scans).
+  const overrides = assertNoRejectedValue(local.store, { title: options.title ?? target.title, body }, { newId, replaced: [targetId], merged: [] }, options);
   const now = new Date().toISOString();
   const expires = new Date();
   expires.setUTCDate(expires.getUTCDate() + decayDaysFor(target.type, local.store.root));
@@ -268,6 +322,9 @@ function writeCrossLayerReplacement(
   if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
   if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
   if (claimed) replacement.ext = { claimed_source: claimed };
+  if (overrides.length > 0) {
+    replacement.ext = { ...(replacement.ext ?? {}), rejected_value_overrides: rejectedValueOverrides(overrides, now, source) };
+  }
 
   local.store.writeItem(replacement);
   appendOutcome(local.store.root, targetId, 'corrected', { source, note: reason });
@@ -283,7 +340,8 @@ function writeCrossLayerReplacement(
       `Reason: ${reason}\n` +
       `Pending promotion: ${targetId} lives in read-only layer '${owner.name}' and is unchanged there; ` +
       `promote ${newId} to '${owner.name}' to supersede it for everyone (memspec status lists pending promotions)` +
-      (claimed ? `\n⚠ ${sourceDowngradeWarning(claimed, source)}` : ''),
+      (claimed ? `\n⚠ ${sourceDowngradeWarning(claimed, source)}` : '') +
+      overrideNote(overrides, newId),
   };
 }
 
@@ -306,7 +364,19 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   if (crossLayer) return crossLayer;
   const owner = composite.assertWritableLayerForId(targetId);
   const store = owner ? owner.store : new MemspecStore(options.cwd);
+  // Not found: refuse before the lock, which would create the store's
+  // local/locks directory under a cwd that holds no store.
+  if (!store.findById(targetId)) {
+    throw new Error(`Memory item "${targetId}" not found`);
+  }
+  // Every branch changes what the tombstone reads (a new claim, an archived
+  // record): the store-wide claim-write lock `remember` holds serializes the
+  // two, so a remember's check cannot interleave with a supersede's write.
+  return withFileLock(store.root, CLAIM_WRITE_LOCK, () => supersedeInStore(store, targetId, options), { waitMs: 10_000 });
+}
 
+/** The check + write half of `runSupersede`, run under the store's claim-write lock. */
+function supersedeInStore(store: MemspecStore, targetId: string, options: SupersedeOptions): SupersedeResult {
   const target = store.findById(targetId);
   if (!target) {
     throw new Error(`Memory item "${targetId}" not found`);
@@ -346,11 +416,17 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason, options.channel));
 
     const newId = `ms_${ulid()}`;
+    const collapsedIds = [target.id, ...mergeItems.map((i) => i.id)];
+    const replacementTitle = options.title ?? target.title;
+    const overrides = assertNoRejectedValue(
+      store,
+      { title: replacementTitle, body: options.body },
+      { newId, replaced: [target.id], merged: mergeItems.map((i) => i.id) },
+      options,
+    );
     const now = new Date().toISOString();
     const expires = new Date();
     expires.setUTCDate(expires.getUTCDate() + decayDaysFor(target.type, store.root));
-
-    const collapsedIds = [target.id, ...mergeItems.map((i) => i.id)];
 
     const replacement: Parameters<typeof store.writeItem>[0] = {
       id: newId,
@@ -364,7 +440,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       last_verified: now,
       supersedes: collapsedIds,
       supersede_reason: baseReason,
-      title: options.title ?? target.title,
+      title: replacementTitle,
       body: options.body,
     };
     // A correction to a scoped claim is still that scope's knowledge. Omitted
@@ -383,19 +459,19 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
     if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
     if (claimed) replacement.ext = { claimed_source: claimed };
+    if (overrides.length > 0) {
+      replacement.ext = { ...(replacement.ext ?? {}), rejected_value_overrides: rejectedValueOverrides(overrides, now, source) };
+    }
     store.writeItem(replacement);
 
-    // A replacement body is new content the caller wrote, with or without
-    // merge_from: memspec cannot tell a union of the collapsed records from a
-    // correction of them ("collapse the TTL-30 twins into TTL 15"), so every
-    // collapsed record is stamped `replace` and keeps the tombstone. Only a
-    // merge into an existing survivor (no body) is consolidation: the caller
-    // declares the pieces duplicates of a record whose content is unchanged.
-    const kind: SupersedeKind = 'replace';
+    // Per record: the target's value is what the body corrects (`replace`,
+    // tombstoned); each merge_from id is consolidated into the new record
+    // (`merge`: restating it is a near-duplicate of the survivor). A caller
+    // correcting twins names the wrong one as the target, or supersedes each.
     target.state = 'superseded';
     target.superseded_by = newId;
     target.supersede_reason = targetReason;
-    markSuperseded(target, kind);
+    markSuperseded(target, 'replace');
     store.moveToArchive(target, 'superseded');
 
     for (let i = 0; i < mergeItems.length; i++) {
@@ -403,7 +479,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       item.state = 'superseded';
       item.superseded_by = newId;
       item.supersede_reason = mergeReasons[i];
-      markSuperseded(item, kind);
+      markSuperseded(item, 'merge');
       store.moveToArchive(item, 'superseded');
     }
 
@@ -421,7 +497,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       superseded_ids: collapsedIds,
       reason: baseReason,
       ...warningField,
-      message: `Superseded ${collapsedIds.join(', ')} → ${newId}${mergedNote}\nReason: ${baseReason}${carriedLine}${downgradeNote}`,
+      message: `Superseded ${collapsedIds.join(', ')} → ${newId}${mergedNote}\nReason: ${baseReason}${carriedLine}${downgradeNote}${overrideNote(overrides, newId)}`,
     };
   }
 

@@ -53,10 +53,13 @@ test('a genuinely new claim on the same topic is written', async () => {
   assert.ok(new MemspecStore(cwd).findById(fresh.id));
 });
 
-test('a value that also matches the live survivor is not a rejected value', async () => {
-  // A wording-only supersede: old and survivor say the same thing, so a claim
-  // matching the old record matches the survivor too. The tombstone stands
-  // aside; the claim is then judged against the survivor like any active record.
+test('a wording-only supersede: a same-type restatement is a twin of the survivor; the old wording stays rejected', async () => {
+  // Old and survivor say the same thing, so a claim matching the old record
+  // matches the survivor too: the active near-duplicate band (checked first)
+  // points at the survivor. A declared edge skips that band but not the
+  // tombstone, which has no rewording exemption: the old wording is closer to
+  // the archived record than to the survivor, so it stays refused. A
+  // refinement in the survivor's terms is written.
   const cwd = await makeTempProject();
   await runCli(['init', '--cwd', cwd]);
   const old = runRemember('fact', 'Gateway uses mTLS for upstream authentication', {
@@ -73,8 +76,13 @@ test('a value that also matches the live survivor is not a rejected value', asyn
     () => runRemember('fact', restated.title, { cwd, body: restated.body, source: 'agent-b' }),
     (err: Error) => err.message.startsWith('remember refuses near-duplicate') && err.message.includes(survivor),
   );
-  // A refinement of the survivor (declared, so not a twin) is written.
-  const child = runRemember('fact', restated.title, { cwd, body: restated.body, source: 'agent-b', refines: [survivor] });
+  assert.throws(
+    () => runRemember('fact', restated.title, { cwd, body: restated.body, source: 'agent-b', refines: [survivor] }),
+    (err: Error) => err.message.startsWith('remember refuses rejected value:') && err.message.includes(old.id),
+  );
+  const child = runRemember('fact', 'The gateway authenticates to upstreams with mTLS from every pod', {
+    cwd, body: 'Upstream calls from each gateway pod present a client certificate (mutual TLS).', source: 'agent-b', refines: [survivor],
+  });
   assert.ok(new MemspecStore(cwd).findById(child.id));
 });
 

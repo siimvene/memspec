@@ -9,9 +9,10 @@ import {
 } from '../lib/inference.js';
 import { effectiveSourceKind, inferSourceKind, operatorOverMcpError, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
 import { withFileLock } from '../lib/lock.js';
-import { assertKnownScope, assertScopeRequired, isVisibleFromScope, resolveScopeForCwd, SCOPE_UNIVERSAL } from '../lib/scope.js';
+import { assertKnownScope, assertScopeRequired, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
 import { CLAIM_SIMILARITY_THRESHOLD, claimTokens, tokenWeight, weightedSimilarity } from '../lib/similarity.js';
-import { loadClaimIndex, type ClaimIndexEntry } from '../lib/claim-index.js';
+import { loadClaimIndex } from '../lib/claim-index.js';
+import { CLAIM_WRITE_LOCK, describeRejection, mergedPieceError, rejectedValueError, rejectedValueOverrides, scanArchive, type RejectedValueMatch } from '../lib/tombstone.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
 import { addAnswers, loadQuestion } from '../lib/questions.js';
@@ -165,70 +166,6 @@ function isHighBand(existingTitle: string, incomingTitle: string): boolean {
   return normaliseTitle(existingTitle) === normaliseTitle(incomingTitle);
 }
 
-/** An archived record whose value the incoming claim re-asserts (tombstone hit). */
-interface RejectedValueMatch {
-  id: string;
-  reason: string;
-  /** Direct `superseded_by`; absent for a retraction. */
-  supersededBy?: string;
-  /** The live end of the `superseded_by` chain, when one is still active. */
-  survivor?: string;
-  similarity: number;
-}
-
-/** Follow `superseded_by` from an archived record to the active record that now holds its place, if any. */
-function activeSurvivor(item: ClaimIndexEntry, byId: Map<string, ClaimIndexEntry>): ClaimIndexEntry | undefined {
-  const seen = new Set<string>();
-  let cur: ClaimIndexEntry | undefined = item;
-  while (cur && cur.state !== 'active' && cur.superseded_by && !seen.has(cur.id)) {
-    seen.add(cur.id);
-    cur = byId.get(cur.superseded_by);
-  }
-  return cur && cur.state === 'active' ? cur : undefined;
-}
-
-/**
- * The active record that still holds `old`'s value through consolidation
- * alone, if any: `superseded_by` is followed only while every hop was stamped
- * `ext.supersede_kind: merge` (a merge into an existing survivor, whose own
- * content did not change). One replacement or retraction anywhere on the way
- * means the value was rejected at that hop, so the tombstone applies (a piece
- * merged into S, then S replaced by T, is not held by T). A record archived
- * before the marker existed carries none and counts as rejected: the
- * survivor's `supersedes` length cannot tell a merge from a replacement, and
- * any later merge into that survivor would lengthen it.
- */
-function mergeHolder(old: ClaimIndexEntry, byId: Map<string, ClaimIndexEntry>): ClaimIndexEntry | undefined {
-  const seen = new Set<string>();
-  let cur: ClaimIndexEntry = old;
-  while (cur.state !== 'active') {
-    if (seen.has(cur.id) || cur.supersede_kind !== 'merge' || !cur.superseded_by) return undefined;
-    seen.add(cur.id);
-    const next = byId.get(cur.superseded_by);
-    if (!next) return undefined;
-    cur = next;
-  }
-  return cur;
-}
-
-/** A merged-away record the incoming claim restates, and the active survivor that now holds it. */
-interface MergedPieceMatch {
-  piece: ClaimIndexEntry;
-  survivor: ClaimIndexEntry;
-  similarity: number;
-}
-
-function describeRejection(m: RejectedValueMatch): string {
-  const fate = m.supersededBy === undefined
-    ? 'retracted with no replacement'
-    : m.survivor === undefined
-      ? `superseded by ${m.supersededBy} (no longer active)`
-      : m.survivor === m.supersededBy
-        ? `superseded by ${m.supersededBy}`
-        : `superseded by ${m.supersededBy} (now ${m.survivor})`;
-  return `this value was rejected in ${m.id} (reason: ${m.reason}), ${fate}`;
-}
-
 function assertMemoryType(input: string): MemoryType {
   if ((MEMORY_TYPES as readonly string[]).includes(input)) {
     return input as MemoryType;
@@ -338,10 +275,11 @@ export function runRemember(typeInput: string, title: string, options: RememberO
 
   // The duplicate / tombstone checks read the store and the write lands after
   // them: two concurrent remembers of one claim would both pass. One
-  // store-wide lock (lib/lock.ts, exclusive create) serializes check + write.
+  // store-wide lock (lib/lock.ts, exclusive create), also held by `supersede`,
+  // serializes check + write against every other claim write.
   return withFileLock(
     store.root,
-    'remember',
+    CLAIM_WRITE_LOCK,
     () => rememberInStore(type, title, options, source, claimedSource, store, storeSelectionCwd),
     { waitMs: 10_000 },
   );
@@ -457,11 +395,9 @@ function rememberInStore(
     const comparable = all.filter((item) =>
       item.kind === 'claim' && item.type === type && isVisibleFromScope(item.scope, scope),
     );
-    const similarityTo = (item: ClaimIndexEntry): number =>
-      weightedSimilarity(incoming, incomingWeight, item.tokens, item.weight, CLAIM_SIMILARITY_THRESHOLD);
     const nearMatches = comparable
       .filter((item) => item.state === 'active' && !callerDeclared.has(item.id))
-      .map((item) => ({ item, similarity: similarityTo(item) }))
+      .map((item) => ({ item, similarity: weightedSimilarity(incoming, incomingWeight, item.tokens, item.weight, CLAIM_SIMILARITY_THRESHOLD) }))
       .filter((m) => m.similarity >= CLAIM_SIMILARITY_THRESHOLD)
       .sort((a, b) => b.similarity - a.similarity);
     if (nearMatches.length > 0) {
@@ -475,89 +411,28 @@ function rememberInStore(
       );
     }
 
-    // Tombstone — a value that a supersede or retraction rejected must not
-    // come back through a fresh remember. Derived from the archive records
-    // themselves (the claim index only caches them by mtime). An archived record counts
-    // only while its live successor says something else: when the incoming
-    // claim also matches the survivor, the old value was rewritten rather
-    // than rejected (a merge, a wording fix), and the near-duplicate band
-    // above already pointed the caller at that survivor. Declared edges do
-    // not exempt an archived record: over MCP this refusal is final, and a
-    // distinct_from to the rejected id must not become the way around it.
+    // Tombstone — a value a supersede replaced or retracted must not come
+    // back through a fresh remember. One rule, shared with the supersede
+    // replacement path (lib/tombstone.ts): every archived rejection in the
+    // store, all types and all scopes, refuses a claim that near-matches it
+    // unless the claim is measurably closer to the live survivor and carries
+    // none of the identifiers the correction removed. Declared edges exempt
+    // nothing; over MCP the refusal is final, on the CLI --allow-rejected
+    // writes anyway and logs the override.
     //
-    // A merge is consolidation, not rejection: the survivor of a merge is a
-    // union of its pieces, so a piece scores below the threshold against it
-    // while the value is still held. A claim restating a merged-away record is
-    // a near-duplicate of that live survivor (refused below, pointing at it);
-    // the tombstone only applies when the merge survivor is itself gone.
-    //
-    // The archive scan is wider than the near-duplicate band: every claim
-    // type, and every scope the new record would be visible from (a
-    // `universal` or unscoped record is visible from all of them). A rejected
-    // value must not come back by being re-typed or re-scoped.
-    const byId = new Map(all.map((item) => [item.id, item]));
-    const archived = all.filter((item) =>
-      item.kind === 'claim' && item.state === 'superseded' &&
-      (scope === SCOPE_UNIVERSAL || isVisibleFromScope(item.scope, scope)),
-    );
-    const mergedPieces: MergedPieceMatch[] = [];
-    for (const old of archived) {
-      const similarity = similarityTo(old);
-      if (similarity < CLAIM_SIMILARITY_THRESHOLD) continue;
-      const survivor = activeSurvivor(old, byId);
-      if (survivor) {
-        const toSurvivor = similarityTo(survivor);
-        // Also matches the live survivor: rewritten, not rejected, and the
-        // near-duplicate band above already refused it. A declared edge to the
-        // survivor skipped that band, so it must not also launder the old
-        // value (a claim mixing the rejected and the current value scores high
-        // against both): the exemption then holds only when the claim is
-        // closer to the survivor than to the rejected record, or when the
-        // supersede was a rewording (old and survivor are themselves the same
-        // claim by this measure, so no value was rejected).
-        if (toSurvivor >= CLAIM_SIMILARITY_THRESHOLD) {
-          if (!callerDeclared.has(survivor.id) || toSurvivor > similarity) continue;
-          const reworded = weightedSimilarity(new Set(old.tokens), old.weight, survivor.tokens, survivor.weight, CLAIM_SIMILARITY_THRESHOLD);
-          if (reworded >= CLAIM_SIMILARITY_THRESHOLD) continue;
-        }
-      }
-      const holder = mergeHolder(old, byId);
-      if (holder) {
-        // Same exemption as the active near-duplicate band: a declared edge to
-        // the survivor (refines, distinct_from, ...) records the judgement.
-        if (!callerDeclared.has(holder.id)) mergedPieces.push({ piece: old, survivor: holder, similarity });
-        continue;
-      }
-      rejectedValues.push({
-        id: old.id,
-        reason: old.supersede_reason ?? '(no reason recorded)',
-        supersededBy: old.superseded_by,
-        survivor: survivor?.id,
-        similarity,
-      });
-    }
-    rejectedValues.sort((a, b) => b.similarity - a.similarity);
+    // A merge is consolidation, not rejection: a claim restating a merged-away
+    // record is a near-duplicate of the live survivor that holds it (refused
+    // below, pointing at it). On the CLI a declared edge to that survivor
+    // exempts it, as on the active near-duplicate band; over MCP it is final.
+    const scan = scanArchive(all, { tokens: incoming, weight: incomingWeight });
+    rejectedValues.push(...scan.rejected);
     if (rejectedValues.length > 0 && !allowRejected) {
-      const detail = rejectedValues.map(describeRejection).join('; ');
-      throw new Error(
-        `remember refuses rejected value: ${detail}. ` +
-          (viaMcp
-            ? 'This refusal is final over MCP. If new evidence shows the rejection was wrong, supersede the record that replaced it, or have a human run `memspec remember ... --allow-rejected` at a terminal.'
-            : 'If new evidence shows the rejection was wrong, supersede the record that replaced it, or pass --allow-rejected to write it anyway (the override is logged into the new record).'),
-      );
+      throw rejectedValueError('remember', rejectedValues, viaMcp);
     }
 
+    const mergedPieces = scan.merged.filter((m) => viaMcp || !callerDeclared.has(m.survivor.id));
     if (mergedPieces.length > 0) {
-      mergedPieces.sort((a, b) => b.similarity - a.similarity);
-      const survivors = [...new Map(mergedPieces.map((m) => [m.survivor.id, m.survivor])).values()];
-      const pieceList = mergedPieces
-        .map((m) => `${m.piece.id} "${m.piece.title}" (similarity ${m.similarity.toFixed(2)}), merged into the active ${m.survivor.type ?? type} ${m.survivor.id} "${m.survivor.title}"`)
-        .join('; ');
-      throw new Error(
-        `remember refuses near-duplicate: this claim restates a record consolidated by a merge (${pieceList}). ` +
-          `The survivor already holds it: update it with ${survivors.map((s) => `\`memspec supersede ${s.id}\``).join(' or ')} instead of writing the piece back as a twin. ` +
-          `If you compared them and this is a different claim, declare it with distinct_from (--distinct-from ${survivors.map((s) => s.id).join(' ')}).`,
-      );
+      throw mergedPieceError('remember', mergedPieces, viaMcp);
     }
 
     // Mid band — apply the lexical conflict-inference rule, but only SUGGEST
@@ -814,14 +689,7 @@ function rememberInStore(
   if (rejectedValues.length > 0) {
     itemData.ext = {
       ...(itemData.ext ?? {}),
-      rejected_value_overrides: rejectedValues.map((m) => ({
-        id: m.id,
-        reason: m.reason,
-        ...(m.supersededBy ? { superseded_by: m.supersededBy } : {}),
-        similarity: Number(m.similarity.toFixed(2)),
-        overridden_at: created,
-        overridden_by: source,
-      })),
+      rejected_value_overrides: rejectedValueOverrides(rejectedValues, created, source),
     };
   }
 

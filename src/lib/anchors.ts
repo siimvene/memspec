@@ -19,6 +19,14 @@ export interface AnchorStatus extends CodeAnchor {
    * `repo_unavailable` (nothing was compared).
    */
   compared_to?: string;
+  /**
+   * Set on a `changed` anchor whose file is absent from the working tree but
+   * present (with another blob) on the default branch: `currentSha` is then
+   * the ref's blob, which this checkout does not hold. `verify --reanchor`
+   * refuses to re-baseline to it (the caller cannot have checked code that
+   * is not in front of them).
+   */
+  worktree_missing?: true;
 }
 
 export interface AnchorCheckOptions {
@@ -323,6 +331,8 @@ export interface ReadPathComparison {
   currentSha: string | null;
   /** `worktree+<ref>` / `worktree` for a drifted anchor; the side that matched for an unchanged one. */
   compared_to: string;
+  /** `changed` only: the file is absent from the working tree, `currentSha` is the ref's blob. */
+  worktree_missing?: true;
 }
 
 /**
@@ -356,6 +366,7 @@ export function compareAnchorReadPath(
     status: absent ? 'missing' : 'changed',
     currentSha: worktree ?? onRef?.sha ?? null,
     compared_to: onRef ? `worktree+${onRef.ref}` : 'worktree',
+    ...(worktree === null && !absent ? { worktree_missing: true as const } : {}),
   };
 }
 
@@ -437,9 +448,17 @@ function crossRepoAnchor(
     return { error: `Skipped ${abs}: resolves outside its git repository (${repoRoot})` };
   }
   const identityRoot = repoIdentityRoot(repoRoot);
+  const unmerged = unmergedWorktreeWarning(repoRoot, identityRoot, abs, toPosix(relToRepo), sha);
+  // A linked worktree of the store's own project repo: the identity root IS
+  // the project root, so the anchor is the project's own repo-less form (the
+  // read side resolves both the same way, but a `repo` field would key a
+  // second anchor next to an existing repo-less one for the same file).
+  if (canonicalize(identityRoot) === canonicalize(projectRoot)) {
+    const anchor: CodeAnchor = { file: toPosix(relToRepo), sha };
+    return unmerged ? { anchor, warning: unmerged } : { anchor };
+  }
   const repo = basename(identityRoot);
   const anchor: CodeAnchor = { file: toPosix(relToRepo), sha, repo };
-  const unmerged = unmergedWorktreeWarning(repoRoot, identityRoot, abs, anchor.file, sha);
   const resolved = resolveRepoRoot(projectRoot, repo, searchPaths);
   if (resolved && canonicalize(resolved) === canonicalize(identityRoot)) {
     return unmerged ? { anchor, warning: unmerged } : { anchor };

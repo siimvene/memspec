@@ -141,8 +141,9 @@ program
   .option('--override-operator', 'required to supersede operator-sourced records; logged into the reason')
   .option('--source <source>', 'corrector identifier')
   .option('--scope <name>', 'scope for the survivor; overrides the scope inherited from the records being collapsed ("universal" = visible everywhere)')
+  .option('--allow-rejected', 'write the replacement even though its body near-matches a value an earlier supersede or retraction rejected; the override is logged into the replacement (CLI only)')
   .action((id: string, options: {
-    cwd?: string; reason: string; body?: string; title?: string; mergeFrom?: string; overrideOperator?: boolean; source?: string; scope?: string;
+    cwd?: string; reason: string; body?: string; title?: string; mergeFrom?: string; overrideOperator?: boolean; source?: string; scope?: string; allowRejected?: boolean;
   }) => {
     const mergeFrom = options.mergeFrom?.split(',').map((s) => s.trim()).filter(Boolean);
     const result = runSupersede(id, {
@@ -154,6 +155,7 @@ program
       overrideOperator: options.overrideOperator,
       source: options.source,
       scope: options.scope,
+      allowRejected: options.allowRejected,
       channel: 'cli',
     });
     console.log(result.message);

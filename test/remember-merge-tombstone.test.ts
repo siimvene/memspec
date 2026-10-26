@@ -10,11 +10,12 @@ import { McpSession } from './mcp-session.js';
 import { makeTempProject, REPO_ROOT, runCli } from './helpers.js';
 
 /**
- * A merge into an existing survivor (no body) is consolidation, not rejection:
- * re-remembering a merged piece is a near-duplicate of the survivor (update
- * it), never "this value was rejected". A replacement body with merge_from is
- * new content (memspec cannot tell a union from a correction), so it stamps
- * `replace` and keeps the tombstone, as do replacements and retractions.
+ * A merge is consolidation, not rejection, per record: every `merge_from` id
+ * (with or without a replacement body) is stamped `merge`, and re-remembering
+ * it is a near-duplicate of the survivor (update it), never "this value was
+ * rejected". The TARGET of a supersede with a replacement body is stamped
+ * `replace`: its value is what the body corrects, and it keeps the tombstone,
+ * as do retractions.
  */
 
 const A = { title: 'Gateway uses mTLS for upstream authentication', body: 'Every upstream call from the gateway presents a client certificate.' };
@@ -65,7 +66,7 @@ test('fixture sanity: the pieces are distinct claims and each sits below the thr
   }
 });
 
-test('a replacement body with merge_from stamps replace: a piece comes back as a rejected value naming the survivor', async () => {
+test('a replacement body with merge_from: the target is replaced, each merge_from id is merged', async () => {
   const cwd = await project();
   const a = remember(cwd, A);
   const b = remember(cwd, B);
@@ -73,15 +74,16 @@ test('a replacement body with merge_from stamps replace: a piece comes back as a
     cwd, reason: 'consolidate gateway upstream facts', title: PAIR.title, body: PAIR.body, mergeFrom: [b.id], source: 'agent-a', channel: 'mcp',
   }).survivor_id;
 
-  assert.throws(() => remember(cwd, A), isRejectedInto(a.id, survivor));
-  assert.throws(() => remember(cwd, B), isRejectedInto(b.id, survivor));
-  // A declared edge to the survivor does not exempt it either (no merge marker).
-  assert.throws(() => runRemember('fact', B.title, { cwd, body: B.body, source: 'agent-a', channel: 'mcp', distinctFrom: [survivor] }), isRejectedInto(b.id, survivor));
-  assert.equal(new MemspecStore(cwd).loadActive().length, 1, 'nothing written');
-
   const store = new MemspecStore(cwd);
   assert.equal(store.findById(a.id)!.ext?.supersede_kind, 'replace');
-  assert.equal(store.findById(b.id)!.ext?.supersede_kind, 'replace');
+  assert.equal(store.findById(b.id)!.ext?.supersede_kind, 'merge');
+
+  assert.throws(() => remember(cwd, A), isRejectedInto(a.id, survivor));
+  assert.throws(() => remember(cwd, B), isMergedNearDuplicate(b.id, survivor));
+  // Over MCP a declared edge to the survivor exempts neither.
+  assert.throws(() => runRemember('fact', A.title, { cwd, body: A.body, source: 'agent-a', channel: 'mcp', distinctFrom: [survivor] }), isRejectedInto(a.id, survivor));
+  assert.throws(() => runRemember('fact', B.title, { cwd, body: B.body, source: 'agent-a', channel: 'mcp', distinctFrom: [survivor] }), isMergedNearDuplicate(b.id, survivor));
+  assert.equal(new MemspecStore(cwd).loadActive().length, 1, 'nothing written');
 });
 
 test('merge into an existing survivor (one record, no body): the merged piece is a near-duplicate of the survivor', async () => {
@@ -96,26 +98,41 @@ test('merge into an existing survivor (one record, no body): the merged piece is
   assert.throws(() => remember(cwd, B), isMergedNearDuplicate(b.id, a.id));
 });
 
-test('a declared edge to the survivor exempts the merged piece, as on the near-duplicate path', async () => {
+test('a declared edge to the survivor exempts the merged piece on the CLI only; over MCP the refusal is final', async () => {
   const cwd = await project();
   const a = remember(cwd, A);
   const b = remember(cwd, B);
   runSupersede(a.id, { cwd, reason: 'fold', mergeFrom: [b.id], source: 'agent-a' });
-  const child = runRemember('fact', B.title, { cwd, body: B.body, source: 'agent-a', channel: 'mcp', refines: [a.id] });
+  assert.throws(
+    () => runRemember('fact', B.title, { cwd, body: B.body, source: 'agent-a', channel: 'mcp', refines: [a.id] }),
+    (err: Error) => isMergedNearDuplicate(b.id, a.id)(err) && /final/.test(err.message),
+  );
+  const child = runRemember('fact', B.title, { cwd, body: B.body, source: 'human:op', channel: 'cli', refines: [a.id] });
   assert.ok(new MemspecStore(cwd).findById(child.id));
 });
 
-test('dream-style merge of 3 records: a union body keeps the tombstone, a merge into a survivor is consolidation', async () => {
-  // Shape 1: one call, fresh survivor with a union body: stamped replace.
+test('dream-style merge of 3 records: summary body + merge_from merges the pieces and replaces the target', async () => {
+  // Shape 1: one call, fresh survivor with a summary body, merge_from of 3
+  // (the target named again in merge_from is ignored, as before).
   const cwd = await project();
   const pieces = [A, B, C].map((p) => remember(cwd, p));
   const survivor = runSupersede(pieces[0].id, {
     cwd, reason: 'dream: consolidate 3 gateway facts', title: UNION.title, body: UNION.body,
-    mergeFrom: [pieces[1].id, pieces[2].id], source: 'dream', channel: 'mcp',
+    mergeFrom: pieces.map((p) => p.id), source: 'dream', channel: 'mcp',
   }).survivor_id;
-  for (const [i, p] of [A, B, C].entries()) {
-    assert.throws(() => remember(cwd, p), isRejectedInto(pieces[i].id, survivor));
+  const kinds = pieces.map((p) => new MemspecStore(cwd).findById(p.id)!.ext?.supersede_kind);
+  assert.deepEqual(kinds, ['replace', 'merge', 'merge']);
+  assert.throws(() => remember(cwd, A), isRejectedInto(pieces[0].id, survivor));
+  for (const [i, p] of [B, C].entries()) {
+    assert.throws(() => remember(cwd, p), isMergedNearDuplicate(pieces[i + 1].id, survivor));
   }
+  // A reworded restatement of a merged piece: still the merge refusal, never "rejected".
+  assert.throws(
+    () => remember(cwd, { title: 'Gateway retries a failed upstream request 3 times', body: 'Failed upstream requests are retried three times (3) with exponential backoff before the gateway gives up.' }),
+    isMergedNearDuplicate(pieces[1].id, survivor),
+  );
+  // Restating the summary itself is a twin of the active survivor.
+  assert.throws(() => remember(cwd, { title: 'Edge proxy behaviour summary', body: UNION.body }), /remember refuses near-duplicate: an active fact/);
 
   // Shape 2: two pieces merged into the third, which survives.
   const cwd2 = await project();

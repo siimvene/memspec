@@ -95,7 +95,7 @@ test('--reanchor cannot re-baseline a missing file: needs_review, untouched', as
   rmSync(file);
   const result = runVerify(id, { cwd, reanchor: true, evidence: 'x' });
   assert.equal(result.status, 'needs_review');
-  assert.match(result.message, /--reanchor re-baselines changed files only/);
+  assert.match(result.message, /--reanchor re-baselines changed files in this checkout only/);
   assert.equal(record(cwd, id).anchors![0].sha, oldSha);
 });
 
