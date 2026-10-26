@@ -4,6 +4,55 @@ Defects and improvements observed in real agent use. Newest first.
 
 ## Open
 
+### 5. Anchors are file-grain; most drift alarms are false on an active repo (HIGH)
+
+**Measured 2026-10-25/26** (`scripts/bench-wrongness`, Hono 367-commit replay):
+whole-file anchors flag 87% of still-true facts by the last checkpoint
+(`package.json` changes every release); a symbol-grain counterfactual drops
+that to 23% with stale-served still 0% on code facts. On a real personal store
+16 of 30 drifted claims were still true. Build symbol-level anchors (anchor to
+the enclosing top-level declaration's text hash, keep the blob SHA as
+fallback) and measure with the bench's symbol-grain row as the target.
+Cross-file facts (a symbol used from another file) are the stale-served hole:
+25% of changed `usage` facts slip through with subject-file anchors.
+
+### 6. `memspec check` pairs by topic, not by contradiction (MEDIUM)
+
+Same bench, Part B: 86-95% of anchored contradictions are paired with their
+target, but compatible claims are flagged 72-89% of the time. It is a
+"same topic changed, review it" gate. Telling contradictions apart needs a
+value comparison (same subject identifier, different value token) before
+pairing; the bench's controls are the acceptance test.
+
+### 7. Recency term is a same-day cliff (MEDIUM)
+
+Ranking uses `1/(1+ageDays)` at default weight 0.3. On a store that gains
+dozens of records a day, same-day records crowd the top ranks: the same build
+scores paraphrase R@1 0.06 or 0.27 depending only on the clock (real store,
+2026-10-25 vs -26). Consider a slower decay (e.g. half-life in weeks) and
+measure with the clock pinned.
+
+### 8. Rejected-value check: known lexical residuals (LOW-MEDIUM)
+
+Best-effort guardrail by design (SPEC.md §4.2.2). Open cases from the
+2026-10-26 probe rounds, all over MCP with no override log:
+- A correction whose own text mentions the old value ("15 minutes, was 30")
+  leaves `removedValues` empty; a `supersede` of it restating the old value
+  plus "(was 15)" ties on tokens and passes the margin. Proposed fix: judge
+  removed values on title identifiers (R.titleIds ∩ incoming.titleIds −
+  S.titleIds) and refuse a supersede-of-S whose token set ties S.
+- A diluted holder naming both values (similarity ~0.10 to both) absorbs S via
+  `merge_from` and the old value becomes the chain's active end.
+- "X=2 (read by `useCallback`)" written next to an active "X=2" survives a
+  later correction of X (pre-positioning).
+
+### 9. Dependency CVEs in the lockfile (MEDIUM)
+
+Trivy, 2026-10-25: `@modelcontextprotocol/sdk` 1.30.0 (3 high, 2 medium),
+`zod` 4.4.3 (high), `body-parser` 2.3.0 (high), plus medium/low in
+`ip-address`, `fast-uri`, `hono`. Bump through the supply-chain rules (age
+gate, lockfile review) in its own PR.
+
 ### 3. `anchor` input silently dropped on MCP `memspec_remember` (MEDIUM)
 
 **Observed 2026-08-08**: two `memspec_remember` calls passed `anchor` as a
