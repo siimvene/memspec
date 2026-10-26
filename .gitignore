@@ -3,3 +3,4 @@ dist/
 .memspec/.index.db
 .omc/
 coverage/
+*.tgz

@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+Measured against a 2,366-record real store and a new wrongness benchmark; numbers in BENCHMARK.md.
+
+### Security
+
+- **Write authority comes from the channel (#12).** No MCP path can create, modify, re-anchor, re-witness, merge into or retract an operator-tier record (`remember`, `supersede` in every branch, `verify`, `anchor`, `reconcile` apply, `relate`, `question`; `unrelate` already refused). `override_operator` is removed from the MCP schema. An operator-looking `source` over MCP (`siim`, `user...`, `human:...`) is stored as `mcp:<source>` at agent tier with the claim kept in `ext.claimed_source`. **Behaviour change:** an agent relaying "the user says X" now writes an agent-tier record; operator records come from the CLI.
+- **OKF import re-derives trust (#10).** A bundle cannot grant operator tier, `pinned`, a strong witness or a future `last_verified`; `--trusted` keeps them for your own backups.
+
+### Features
+
+- **Tiered matching (#9).** Records carrying every query term rank first; a short page is topped up with partial matches below them. A query with one word the right record lacks no longer drops it (real store: R@10 0.95 -> 1.00).
+- **Calibrated coverage (#9).** With no full-term hit, coverage is `weak` unless the best hit carries 3/4 of the content terms (paraphrase misses read `weak` 32/41 times, was 0/41).
+- **Near-duplicate and rejected-value refusals (#12, #13).** `remember` refuses a claim with the same identifiers and wording as an active one (was exact title only); claims that name different identifiers (symbols, paths, numbers, quoted literals) are different claims, so templated facts about different symbols are written. Over MCP, re-asserting a value a supersede replaced or retracted is refused across types, scopes and store layers unless the claim is measurably closer to the current value. Merges are consolidation, not rejection. CLI `--allow-rejected` overrides with a log. Lexical and best-effort; limits listed in SPEC.md.
+- **`verify --reanchor` (#12)** re-baselines anchors on a claim that still holds, keeping the old SHAs in `ext.anchor_history`.
+- **OKF v0.2 export/import (#10).** `export --format okf --out <dir>`, `import --format okf <dir>`; lossless round trip, evidence blobs travel with the bundle.
+- **Wrongness benchmark (#11)** in `scripts/bench-wrongness/`: stale-served and false-alarm rates on a 367-commit Hono replay, plus a planted-contradiction test of `memspec check`.
+
+### Fixes
+
+- **Search is ~7x faster on large stores (#9).** Parsed records are cached per file; 0.13.0 re-read and YAML-parsed every record on every query (295 ms -> 38 ms warm at 2,366 records). The 0.11.0 latency step (coverage reading back every hit token) is gone.
+- **Worktree anchors (#12)** record the main repository, not the worktree folder name (they read `repo_unavailable` once the worktree was removed), and warn when anchoring an unmerged change.
+- `min_confidence` removed (retired in v0.3, never read); old configs still load.
+- **MCP input limits (#13):** titles <= 1,000 characters, bodies and observation text <= 20,000; claim tokenizing is linear-time (a quadratic trim regex reachable from any MCP body took 38.5 s on 200,000 characters).
+- Release tarballs no longer committed.
+
 ## 0.13.0 — 2026-10-19
 
 ### Security
