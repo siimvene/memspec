@@ -4,7 +4,7 @@ import { appendOutcome } from '../lib/outcomes.js';
 import { effectiveSourceKind, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
 import { assertKnownScope } from '../lib/scope.js';
 import { withFileLock } from '../lib/lock.js';
-import { claimTokens, tokenWeight } from '../lib/similarity.js';
+import { claimShape, claimTokens, tokenWeight } from '../lib/similarity.js';
 import {
   CLAIM_WRITE_LOCK,
   mergedPieceError,
@@ -149,7 +149,11 @@ function assertNoRejectedValue(
 ): RejectedValueMatch[] {
   const viaMcp = options.channel === 'mcp';
   const tokens = claimTokens(claim.title, claim.body);
-  const scan = scanArchive(readViewClaimIndex(store, [view]), { tokens, weight: tokenWeight(tokens) }, pending);
+  const scan = scanArchive(
+    readViewClaimIndex(store, [view]),
+    { tokens, weight: tokenWeight(tokens), shape: claimShape(claim.title, claim.body) },
+    pending,
+  );
   if (scan.rejected.length > 0 && (viaMcp || !options.allowRejected)) {
     throw rejectedValueError('supersede', scan.rejected, viaMcp);
   }

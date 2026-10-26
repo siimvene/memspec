@@ -25,9 +25,16 @@ import { COVERAGE_STOPWORDS } from './stopwords.js';
  * different claims <= 0.36, and a value change in a short claim 0.60.
  * Known limit, lexical by construction: two short claims that differ only by
  * one swapped qualifier ("staging runs Postgres 16" vs "production runs
- * Postgres 16") score 0.67-0.71 and read as near-duplicates. `remember`'s
- * refusal therefore names the escape: declare the pair `distinct_from`, which
- * records the judgement and exempts that target.
+ * Postgres 16") score 0.67-0.71 here. `sameClaim`'s wording check (below)
+ * separates the shortest of them; in a longer claim one swapped word still
+ * reads as a near-duplicate, so `remember`'s refusal names the escape:
+ * declare the pair `distinct_from`, which records the judgement and exempts
+ * that target.
+ *
+ * The score alone is not the near-duplicate verdict: a templated claim about
+ * a different identifier scores high on shared wording, so `remember` also
+ * requires the same identifiers and the same wording about them
+ * (`claimShape` / `sameClaim`, below).
  */
 
 /** Weight of an identifier token (see `isIdentifier`); every other token weighs 1. */
@@ -142,4 +149,266 @@ export function claimSimilarity(
   b: { title: string; body?: string },
 ): number {
   return tokenSetSimilarity(claimTokens(a.title, a.body), claimTokens(b.title, b.body));
+}
+
+/*
+ * Claim shape: WHAT a claim is about (its identifiers) and WHAT it says about
+ * them (its wording). The weighted Jaccard above mixes the two, so a template
+ * reads as the claim: "`A` in src/a.ts is set to 2" and "`B` in src/a.ts is
+ * set to 3" score 0.68, and a signature fact and an export fact about one
+ * symbol in one file score 0.72. `sameClaim` separates them: two claims are
+ * the same claim only when neither title names an identifier the other claim
+ * does not mention AND they say the same thing (`wording`) about them.
+ *
+ * An identifier is (raw text, before tokenizing):
+ *   - a backticked span or a quoted literal ('...', "...", curly quotes);
+ *   - a code symbol: camelCase / PascalCase (a lower-or-digit to upper
+ *     transition: useState, HttpClient, mTLS), snake_case / UPPER_CASE (an
+ *     underscore), a dotted or path-like token (session.ttl, src/a/b.ts);
+ *   - anything carrying a digit: a number, a version (v1.2.3, ^4.17.21), a
+ *     port, a duration (30s, 30-minute);
+ *   - a single-capital label ("Option B"), as in `isIdentifierToken`, except
+ *     a sentence-initial "A" and the pronoun "I".
+ * Not identifiers: prose slash pairs ("and/or") and provenance pointers (an
+ * ISO date or date range, a hex hash of 7+ characters, a memspec id or ULID):
+ * a later session restating a fact carries a new date or commit, which does
+ * not make it a different claim.
+ *
+ * Identifiers keep their case (code is case-sensitive: `jsx` and `JSX` are
+ * two exports; numbers are lowercased). Two kinds, by how a mention in the
+ * other claim is recognised:
+ *   - strict (code symbols, labels, versions, paths): the same identifier; a
+ *     file path also matches the same file named by a shorter or longer path
+ *     (hooks/index.ts vs src/jsx/hooks/index.ts), and a directory path a file
+ *     inside it;
+ *   - loose (`LOOSE_PREFIX`: a plain word or phrase in backticks or quotes,
+ *     a number with no `_ . /`): also matched when each of its words
+ *     stands alone, same case, in the other claim (`main` vs main). A word
+ *     inside a path or a symbol does not count: `css` is not mentioned by
+ *     'hono/css', `SELECTORS` not by PSEUDO_GLOBAL_SELECTOR.
+ *
+ * Wording: the similarity tokens of what is left once identifiers, labels and
+ * provenance pointers are taken out ("is set to", "takes parameters",
+ * "exports ... as a runtime value").
+ */
+
+/** Prefix of a loose identifier (see above); never produced by the tokenizer. */
+const LOOSE_PREFIX = '~';
+
+/**
+ * Below this many wording tokens on either side, a claim says nothing beyond
+ * its identifiers ("`X` = 2"): the identifiers alone decide.
+ */
+const MIN_WORDING_WEIGHT = 3;
+
+const FILE_EXT = /\.(?:[cm]?[jt]sx?|json5?|ya?ml|toml|md|mdx|py|go|rs|java|kt|rb|php|cs|swift|sh|sql|css|scss|html?|txt|lock|cfg|ini|conf|xml|csv|env)$/;
+const CODE_SYMBOL = /[\p{Ll}\p{N}]\p{Lu}|_|[\p{L}\p{N}][./][\p{L}\p{N}]/u;
+const LEAD_PUNCT = /^[([{<"'`“‘^~=>!*]+/u;
+const TRAIL_PUNCT = /[)\]}>"'`”’.,;:!?*…]+$/u;
+const BACKTICK_SPAN = /`([^`\n]+)`/g;
+const QUOTED_SPAN = /(?<![\p{L}\p{N}])(?:"([^"\n]{1,120})"|'([^'\n]{1,120})'|“([^”\n]{1,120})”|‘([^’\n]{1,120})’)(?![\p{L}\p{N}])/gu;
+const STANDALONE = /^[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*$/u;
+const NO_SIGNAL_DOTTED = new Set(['e.g', 'i.e', 'etc', 'vs']);
+const PROSE_SLASH = /^\p{L}+\/\p{L}+$/u;
+/** ISO date (timestamp, or range: 2026-09-21/22), hex hash of 7+ characters, memspec id or bare ULID: where a claim came from, not what it is about. */
+const PROVENANCE = /^(?:\d{4}-\d{2}-\d{2}(?:t[\d:.]+z?)?(?:(?:\/|\.\.|–)\d{1,4}(?:-\d{2}){0,2})?|(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}|ms_[0-9a-z]{20,}|(?=[0-9a-z]*\d)[0-9a-hjkmnp-tv-z]{26})$/;
+
+const strip = (chunk: string): string => chunk.replace(LEAD_PUNCT, '').replace(TRAIL_PUNCT, '');
+const alnumRuns = (s: string): string[] => s.match(WORD) ?? [];
+
+/**
+ * Classify one whitespace-free chunk: an identifier, provenance (not one, not
+ * wording), or null (wording). Code is case-sensitive (`jsx` and `JSX` are
+ * two exports), so identifiers keep their case; only numbers are lowercased.
+ */
+function chunkIdentifier(chunk: string, markup: boolean): string | 'provenance' | null {
+  const c = strip(chunk);
+  if (!c || !/[\p{L}\p{N}]/u.test(c)) return null;
+  const lower = c.toLowerCase();
+  if (PROVENANCE.test(lower)) return 'provenance';
+  if (NO_SIGNAL_DOTTED.has(lower)) return null;
+  if (HAS_DIGIT.test(c)) {
+    const value = lower.replace(/^v(?=\d)/, '');
+    return /[_./]/.test(value) ? value : LOOSE_PREFIX + value;
+  }
+  // Prose slash pairs ("and/or", "read/write", "TCP/UDP") are wording, not paths.
+  if (CODE_SYMBOL.test(c) && (markup || !PROSE_SLASH.test(c))) return c;
+  return markup ? LOOSE_PREFIX + c : null;
+}
+
+/** What `sameClaim` and the tombstone read from a claim; see the section note. */
+export interface ClaimShape {
+  /** Identifiers in title + body. */
+  ids: Set<string>;
+  /** Identifiers in the title alone (what the claim names; the body is detail). */
+  titleIds: Set<string>;
+  /** Lowercased words that stand alone in the text (not inside a path or symbol), for loose mentions. */
+  words: Set<string>;
+  /** Similarity tokens of the text with identifiers, labels and provenance pointers taken out. */
+  wording: Set<string>;
+}
+
+function scanText(text: string, ids: Set<string>, words: Set<string>, residual: string[]): void {
+  const add = (id: string | null) => {
+    if (id && id !== 'provenance') ids.add(id);
+  };
+  // Markup spans are identifiers whole; their words are not wording.
+  const spans = [
+    ...[...text.matchAll(BACKTICK_SPAN)].map((m) => m[1]),
+    ...[...text.matchAll(QUOTED_SPAN)].map((m) => m[1] ?? m[2] ?? m[3] ?? m[4]),
+  ];
+  for (const raw of spans) {
+    const span = raw.trim();
+    if (!span) continue;
+    if (/\s/.test(span)) add(LOOSE_PREFIX + span.replace(/\s+/g, ' '));
+    else add(chunkIdentifier(span, true));
+  }
+  const prose = text.replace(BACKTICK_SPAN, ' ').replace(QUOTED_SPAN, ' ');
+  for (const chunk of text.split(/\s+/)) {
+    const bare = strip(chunk);
+    if (STANDALONE.test(bare)) for (const w of alnumRuns(bare)) words.add(w);
+  }
+  let sentenceStart = true;
+  for (const chunk of prose.split(/\s+/)) {
+    if (!chunk) continue;
+    const bare = strip(chunk);
+    if (/^\p{Lu}$/u.test(bare)) {
+      if (bare !== 'I' && !(bare === 'A' && sentenceStart)) ids.add(LABEL_PREFIX + bare.toLowerCase());
+    } else {
+      const id = chunkIdentifier(chunk, false);
+      add(id);
+      if (id === null) residual.push(bare);
+    }
+    sentenceStart = /[.!?:]["')\]]*$/.test(chunk);
+  }
+}
+
+/** The shape of a claim (title + body); see the section note. */
+export function claimShape(title: string, body = ''): ClaimShape {
+  const titleIds = new Set<string>();
+  const words = new Set<string>();
+  const residual: string[] = [];
+  scanText(title, titleIds, words, residual);
+  const ids = new Set(titleIds);
+  if (body) scanText(body, ids, words, residual);
+  const wording = new Set([...claimTokens(residual.join(' '))].filter((t) => !t.startsWith(LABEL_PREFIX)));
+  return { ids, titleIds, words, wording };
+}
+
+/** Identifiers a claim names (title + body). */
+export function claimIdentifiers(title: string, body = ''): Set<string> {
+  return claimShape(title, body).ids;
+}
+
+/** Path segments and extension of a file-like identifier (one with a `/` or a known file extension), else null. */
+function fileRef(id: string): { segments: string[]; ext: string | null } | null {
+  if (id.startsWith(LOOSE_PREFIX) || id.startsWith(LABEL_PREFIX)) return null;
+  const ext = FILE_EXT.exec(id)?.[0] ?? null;
+  if (!ext && !id.includes('/')) return null;
+  const stem = ext ? id.slice(0, -ext.length) : id;
+  const segments = stem.split('/').filter((s) => s && s !== '.');
+  return segments.length > 0 ? { segments, ext } : null;
+}
+
+/** The same file named by paths of different length: one segment list ends the other, extensions agree when both carry one. */
+function sameFile(a: { segments: string[]; ext: string | null }, b: { segments: string[]; ext: string | null }): boolean {
+  if (a.ext && b.ext && a.ext !== b.ext) return false;
+  const [short, long] = a.segments.length <= b.segments.length ? [a.segments, b.segments] : [b.segments, a.segments];
+  const offset = long.length - short.length;
+  return short.every((s, i) => s === long[offset + i]);
+}
+
+/**
+ * A directory path (no extension, 2+ segments) that contains a FILE the other
+ * claim names: the folder of a mentioned file. Not a path without an
+ * extension: 'hono/jsx' and 'hono/jsx/dom' are two module specifiers.
+ */
+function containsPath(dir: { segments: string[]; ext: string | null }, f: { segments: string[]; ext: string | null }): boolean {
+  if (dir.ext || !f.ext || dir.segments.length < 2 || dir.segments.length >= f.segments.length) return false;
+  for (let start = 0; start + dir.segments.length <= f.segments.length; start++) {
+    if (dir.segments.every((s, i) => s === f.segments[start + i])) return true;
+  }
+  return false;
+}
+
+/** What `newIdentifiers` reads from the other claim (a `ClaimShape`, or a claim-index entry). */
+export interface IdentifierContext {
+  /** Identifiers of the claim; absent when unknown (no exemption is then granted). */
+  ids?: readonly string[] | ReadonlySet<string>;
+  /** Standalone words of the claim (`ClaimShape.words`). */
+  words?: readonly string[] | ReadonlySet<string>;
+}
+
+const asSet = (v: readonly string[] | ReadonlySet<string> | undefined): ReadonlySet<string> =>
+  v instanceof Set ? v : new Set(v ?? []);
+
+/** Whether `other` mentions identifier `id` (see the section note for strict vs loose). */
+export function mentionsIdentifier(id: string, other: IdentifierContext): boolean {
+  const ids = asSet(other.ids);
+  if (ids.has(id)) return true;
+  if (id.startsWith(LOOSE_PREFIX)) {
+    const words = asSet(other.words);
+    const runs = alnumRuns(id.slice(LOOSE_PREFIX.length));
+    return runs.length > 0 && runs.every((w) => words.has(w));
+  }
+  const file = fileRef(id);
+  if (!file) return false;
+  for (const o of ids) {
+    const f = fileRef(o);
+    if (f && (sameFile(file, f) || containsPath(file, f))) return true;
+  }
+  return false;
+}
+
+/**
+ * Identifiers of `ids` that `other` does not mention, in display form. Empty
+ * when `other.ids` is unknown (an entry from before identifiers were indexed):
+ * no exemption is granted on missing data.
+ */
+export function newIdentifiers(ids: Iterable<string>, other: IdentifierContext): string[] {
+  if (other.ids === undefined) return [];
+  const out: string[] = [];
+  for (const id of ids) if (!mentionsIdentifier(id, other)) out.push(displayIdentifier(id));
+  return out;
+}
+
+/** An identifier as a reader would recognise it. */
+export function displayIdentifier(id: string): string {
+  return id.startsWith(LOOSE_PREFIX) ? id.slice(LOOSE_PREFIX.length) : displayToken(id);
+}
+
+/**
+ * Whether two claims say the same thing about their identifiers: wording
+ * Jaccard at or above CLAIM_SIMILARITY_THRESHOLD, or either side too thin
+ * (< MIN_WORDING_WEIGHT tokens) to say anything beyond its identifiers.
+ */
+export function wordingAgrees(a: ReadonlySet<string> | readonly string[], b: ReadonlySet<string> | readonly string[]): boolean {
+  const sa = asSet(a);
+  const sb = asSet(b);
+  if (sa.size < MIN_WORDING_WEIGHT || sb.size < MIN_WORDING_WEIGHT) return true;
+  let shared = 0;
+  for (const t of sb) if (sa.has(t)) shared++;
+  return shared / (sa.size + sb.size - shared) >= CLAIM_SIMILARITY_THRESHOLD;
+}
+
+/** A claim's shape as `sameClaim` reads it: a `ClaimShape`, or a claim-index entry (fields absent before shapes were indexed). */
+export interface ShapeContext extends IdentifierContext {
+  titleIds?: readonly string[] | ReadonlySet<string>;
+  wording?: readonly string[] | ReadonlySet<string>;
+}
+
+/**
+ * The near-duplicate verdict for a pair already at or above the similarity
+ * threshold: each title names no identifier the other claim does not mention
+ * (in its title or body), and the wording agrees. Titles name the claim, the
+ * body is detail: a restatement that only adds body detail (more symbols, a
+ * date, a commit) is the same claim, and so is a paraphrase whose title moves
+ * an identifier into its body. A record whose shape is unknown is judged by
+ * similarity alone.
+ */
+export function sameClaim(incoming: ClaimShape, record: ShapeContext): boolean {
+  if (record.ids === undefined || record.titleIds === undefined || record.wording === undefined) return true;
+  return newIdentifiers(incoming.titleIds, record).length === 0 &&
+    newIdentifiers(record.titleIds, incoming).length === 0 &&
+    wordingAgrees(incoming.wording, record.wording);
 }

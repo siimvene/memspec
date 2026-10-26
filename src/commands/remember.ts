@@ -10,7 +10,7 @@ import {
 import { effectiveSourceKind, inferSourceKind, operatorOverMcpError, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
 import { withFileLock } from '../lib/lock.js';
 import { assertKnownScope, assertScopeRequired, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
-import { CLAIM_SIMILARITY_THRESHOLD, claimTokens, tokenWeight, weightedSimilarity } from '../lib/similarity.js';
+import { CLAIM_SIMILARITY_THRESHOLD, claimShape, claimTokens, sameClaim, tokenWeight, weightedSimilarity } from '../lib/similarity.js';
 import { loadClaimIndex } from '../lib/claim-index.js';
 import { CLAIM_WRITE_LOCK, describeRejection, mergedPieceError, readViewClaimIndex, rejectedValueError, rejectedValueOverrides, scanArchive, type RejectedValueMatch } from '../lib/tombstone.js';
 import { CompositeStore } from '../lib/composite-store.js';
@@ -396,16 +396,27 @@ function rememberInStore(
     // visible from this scope, not just the BM25 window above: a paraphrase
     // ranks poorly on a title query by construction. Records come from the
     // mtime-keyed claim index (lib/claim-index.ts), not a second full parse.
+    //
+    // Same claim = similar text AND the same identifiers AND the same
+    // wording about them (lib/similarity.ts `sameClaim`): "`B` in a.ts is set
+    // to 3" is a different fact from "`A` in a.ts is set to 2" however much
+    // template they share, "A is set to 3" is a value change, not a twin of
+    // "A is set to 2", and a signature of X is not its export. Identifiers
+    // are read from each TITLE (what a claim names) and looked up in the
+    // other claim's title + body: a restatement that only adds body detail
+    // (more symbols, a date, a commit) is still the same claim, refused;
+    // supersede the record instead.
     const all = loadClaimIndex(store);
     const incoming = claimTokens(title, options.body ?? '');
     const incomingWeight = tokenWeight(incoming);
+    const incomingShape = claimShape(title, options.body ?? '');
     const comparable = all.filter((item) =>
       item.kind === 'claim' && item.type === type && isVisibleFromScope(item.scope, scope),
     );
     const nearMatches = comparable
       .filter((item) => item.state === 'active' && !callerDeclared.has(item.id))
       .map((item) => ({ item, similarity: weightedSimilarity(incoming, incomingWeight, item.tokens, item.weight, CLAIM_SIMILARITY_THRESHOLD) }))
-      .filter((m) => m.similarity >= CLAIM_SIMILARITY_THRESHOLD)
+      .filter((m) => m.similarity >= CLAIM_SIMILARITY_THRESHOLD && sameClaim(incomingShape, m.item))
       .sort((a, b) => b.similarity - a.similarity);
     if (nearMatches.length > 0) {
       const survivorList = nearMatches
@@ -434,7 +445,7 @@ function rememberInStore(
     // The archive scan reads every layer of the read view this write is made
     // from, not only the write target: `store: "global"` must not re-assert a
     // value rejected in the project layer (tombstone.ts `readViewClaimIndex`).
-    const scan = scanArchive(readViewClaimIndex(store, readViews), { tokens: incoming, weight: incomingWeight });
+    const scan = scanArchive(readViewClaimIndex(store, readViews), { tokens: incoming, weight: incomingWeight, shape: incomingShape });
     rejectedValues.push(...scan.rejected);
     if (rejectedValues.length > 0 && !allowRejected) {
       throw rejectedValueError('remember', rejectedValues, viaMcp);

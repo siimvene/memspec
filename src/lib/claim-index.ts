@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseMemoryFile } from './frontmatter.js';
-import { claimTokens, tokenWeight } from './similarity.js';
+import { claimShape, claimTokens, tokenWeight } from './similarity.js';
 import type { MemspecStore } from './store.js';
 import type { MemoryItem } from './types.js';
 
@@ -32,6 +32,17 @@ export interface ClaimIndexEntry {
   supersede_kind?: string;
   tokens: string[];
   weight: number;
+  /**
+   * `claimShape` of title + body (similarity.ts): the identifiers the claim
+   * names (all, and the title's), its standalone words, and its wording
+   * without the identifiers.
+   * Optional only for hand-built entries in tests: an entry without them is
+   * judged by similarity alone, as before claim shapes existed.
+   */
+  ids?: string[];
+  titleIds?: string[];
+  words?: string[];
+  wording?: string[];
 }
 
 /** A file that did not parse is cached too (`invalid`), so it is not re-read on every call. */
@@ -41,7 +52,7 @@ type CachedEntry = (ClaimIndexEntry & { invalid?: undefined } | { invalid: true 
 };
 
 /** Bump when the token rules or the entry shape change: an old cache is then discarded whole. */
-const CLAIM_INDEX_VERSION = 2;
+const CLAIM_INDEX_VERSION = 3;
 
 export function claimIndexPath(storeRoot: string): string {
   return join(storeRoot, 'local', 'cache', 'claim-index.json');
@@ -67,6 +78,11 @@ function entryFor(item: MemoryItem): ClaimIndexEntry {
     tokens,
     weight: tokenWeight(tokens),
   };
+  const shape = claimShape(item.title, item.body);
+  entry.ids = [...shape.ids];
+  entry.titleIds = [...shape.titleIds];
+  entry.words = [...shape.words];
+  entry.wording = [...shape.wording];
   if (item.type) entry.type = item.type;
   if (item.scope) entry.scope = item.scope;
   if (item.superseded_by) entry.superseded_by = item.superseded_by;
