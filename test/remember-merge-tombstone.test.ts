@@ -10,10 +10,11 @@ import { McpSession } from './mcp-session.js';
 import { makeTempProject, REPO_ROOT, runCli } from './helpers.js';
 
 /**
- * A merge is consolidation, not rejection. Merging true facts into one
- * survivor and later re-remembering one of the pieces is a near-duplicate of
- * the survivor (update it), never "this value was rejected". Replacements and
- * retractions keep the tombstone.
+ * A merge into an existing survivor (no body) is consolidation, not rejection:
+ * re-remembering a merged piece is a near-duplicate of the survivor (update
+ * it), never "this value was rejected". A replacement body with merge_from is
+ * new content (memspec cannot tell a union from a correction), so it stamps
+ * `replace` and keeps the tombstone, as do replacements and retractions.
  */
 
 const A = { title: 'Gateway uses mTLS for upstream authentication', body: 'Every upstream call from the gateway presents a client certificate.' };
@@ -33,6 +34,14 @@ async function project(): Promise<string> {
 
 function remember(cwd: string, piece: { title: string; body: string }, channel: 'cli' | 'mcp' = 'mcp') {
   return runRemember('fact', piece.title, { cwd, body: piece.body, source: 'agent-a', channel });
+}
+
+/** The tombstone refusal for a collapsed piece, naming the survivor that replaced it. */
+function isRejectedInto(pieceId: string, survivorId: string) {
+  return (err: Error) =>
+    err.message.startsWith('remember refuses rejected value:') &&
+    err.message.includes(`this value was rejected in ${pieceId}`) &&
+    err.message.includes(`superseded by ${survivorId}`);
 }
 
 /** The near-duplicate-of-survivor refusal, never the tombstone. */
@@ -56,7 +65,7 @@ test('fixture sanity: the pieces are distinct claims and each sits below the thr
   }
 });
 
-test('merge into a fresh survivor, then re-remember a piece over MCP: near-duplicate of the survivor, not rejected', async () => {
+test('a replacement body with merge_from stamps replace: a piece comes back as a rejected value naming the survivor', async () => {
   const cwd = await project();
   const a = remember(cwd, A);
   const b = remember(cwd, B);
@@ -64,14 +73,15 @@ test('merge into a fresh survivor, then re-remember a piece over MCP: near-dupli
     cwd, reason: 'consolidate gateway upstream facts', title: PAIR.title, body: PAIR.body, mergeFrom: [b.id], source: 'agent-a', channel: 'mcp',
   }).survivor_id;
 
-  assert.throws(() => remember(cwd, A), isMergedNearDuplicate(a.id, survivor));
-  assert.throws(() => remember(cwd, B), isMergedNearDuplicate(b.id, survivor));
+  assert.throws(() => remember(cwd, A), isRejectedInto(a.id, survivor));
+  assert.throws(() => remember(cwd, B), isRejectedInto(b.id, survivor));
+  // A declared edge to the survivor does not exempt it either (no merge marker).
+  assert.throws(() => runRemember('fact', B.title, { cwd, body: B.body, source: 'agent-a', channel: 'mcp', distinctFrom: [survivor] }), isRejectedInto(b.id, survivor));
   assert.equal(new MemspecStore(cwd).loadActive().length, 1, 'nothing written');
 
-  // The archived pieces carry the merge marker.
   const store = new MemspecStore(cwd);
-  assert.equal(store.findById(a.id)!.ext?.supersede_kind, 'merge');
-  assert.equal(store.findById(b.id)!.ext?.supersede_kind, 'merge');
+  assert.equal(store.findById(a.id)!.ext?.supersede_kind, 'replace');
+  assert.equal(store.findById(b.id)!.ext?.supersede_kind, 'replace');
 });
 
 test('merge into an existing survivor (one record, no body): the merged piece is a near-duplicate of the survivor', async () => {
@@ -95,8 +105,8 @@ test('a declared edge to the survivor exempts the merged piece, as on the near-d
   assert.ok(new MemspecStore(cwd).findById(child.id));
 });
 
-test('dream-style merge of 3 records: every piece is a near-duplicate of the survivor, in both merge shapes', async () => {
-  // Shape 1: one call, fresh survivor with a union body.
+test('dream-style merge of 3 records: a union body keeps the tombstone, a merge into a survivor is consolidation', async () => {
+  // Shape 1: one call, fresh survivor with a union body: stamped replace.
   const cwd = await project();
   const pieces = [A, B, C].map((p) => remember(cwd, p));
   const survivor = runSupersede(pieces[0].id, {
@@ -104,7 +114,7 @@ test('dream-style merge of 3 records: every piece is a near-duplicate of the sur
     mergeFrom: [pieces[1].id, pieces[2].id], source: 'dream', channel: 'mcp',
   }).survivor_id;
   for (const [i, p] of [A, B, C].entries()) {
-    assert.throws(() => remember(cwd, p), isMergedNearDuplicate(pieces[i].id, survivor));
+    assert.throws(() => remember(cwd, p), isRejectedInto(pieces[i].id, survivor));
   }
 
   // Shape 2: two pieces merged into the third, which survives.
@@ -115,13 +125,16 @@ test('dream-style merge of 3 records: every piece is a near-duplicate of the sur
   assert.throws(() => remember(cwd2, C), isMergedNearDuplicate(pieces2[2].id, pieces2[0].id));
 });
 
-test('a record merged before the marker existed is still recognised when its survivor supersedes several records', async () => {
+test('a record archived before the marker existed counts as rejected, whatever its survivor supersedes', async () => {
+  // The legacy "successor supersedes several records" inference is gone: any
+  // later merge into that successor would lengthen the list and turn an old
+  // rejection into a merge. Unmarked archives fail closed.
   const cwd = await project();
   const a = remember(cwd, A);
   const b = remember(cwd, B);
-  const survivor = runSupersede(a.id, {
-    cwd, reason: 'consolidate', title: PAIR.title, body: PAIR.body, mergeFrom: [b.id], source: 'agent-a',
-  }).survivor_id;
+  const c = remember(cwd, C);
+  runSupersede(a.id, { cwd, reason: 'consolidate', mergeFrom: [b.id, c.id], source: 'agent-a' });
+  const survivor = a.id;
   // Strip the marker from the archived piece, as a pre-marker store has it.
   const path = join(cwd, '.memspec', 'archive', `${b.id}.md`);
   const text = readFileSync(path, 'utf8');
@@ -129,8 +142,11 @@ test('a record merged before the marker existed is still recognised when its sur
   assert.notEqual(stripped, text, 'marker removed');
   writeFileSync(path, stripped);
   assert.equal(new MemspecStore(cwd).findById(b.id)!.ext?.supersede_kind, undefined);
+  assert.equal(new MemspecStore(cwd).findById(survivor)!.supersedes!.length, 2);
 
-  assert.throws(() => remember(cwd, B), isMergedNearDuplicate(b.id, survivor));
+  assert.throws(() => remember(cwd, B), isRejectedInto(b.id, survivor));
+  // The marked sibling is still consolidation.
+  assert.throws(() => remember(cwd, C), isMergedNearDuplicate(c.id, survivor));
 });
 
 test('replace and retract keep the tombstone and carry their own marker', async () => {
@@ -173,9 +189,8 @@ test('memspec_remember MCP tool: a merged piece comes back as a near-duplicate o
   const cwd = await project();
   const a = remember(cwd, A);
   const b = remember(cwd, B);
-  const survivor = runSupersede(a.id, {
-    cwd, reason: 'consolidate', title: PAIR.title, body: PAIR.body, mergeFrom: [b.id], source: 'agent-a', channel: 'mcp',
-  }).survivor_id;
+  runSupersede(b.id, { cwd, reason: 'consolidate', mergeFrom: [a.id], source: 'agent-a', channel: 'mcp' });
+  const survivor = b.id;
 
   const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', cwd]);
   try {

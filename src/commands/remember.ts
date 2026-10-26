@@ -7,8 +7,9 @@ import {
   normaliseTitle,
   rankByLexicalCloseness,
 } from '../lib/inference.js';
-import { effectiveSourceKind, inferSourceKind } from '../lib/source.js';
-import { assertKnownScope, assertScopeRequired, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
+import { effectiveSourceKind, inferSourceKind, operatorOverMcpError, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
+import { withFileLock } from '../lib/lock.js';
+import { assertKnownScope, assertScopeRequired, isVisibleFromScope, resolveScopeForCwd, SCOPE_UNIVERSAL } from '../lib/scope.js';
 import { CLAIM_SIMILARITY_THRESHOLD, claimTokens, tokenWeight, weightedSimilarity } from '../lib/similarity.js';
 import { loadClaimIndex, type ClaimIndexEntry } from '../lib/claim-index.js';
 import { CompositeStore } from '../lib/composite-store.js';
@@ -133,6 +134,10 @@ export interface RememberResult {
   answeredQuestion?: string;
   /** v0.11 — true when adding this record reopened a previously resolved question. */
   reopenedQuestion?: boolean;
+  /** The stored source string (differs from the caller's when an operator-pattern source was downgraded over MCP). */
+  source: string;
+  /** Set when an operator-pattern source was downgraded to agent tier (MCP channel). */
+  sourceWarning?: string;
 }
 
 /**
@@ -183,16 +188,27 @@ function activeSurvivor(item: ClaimIndexEntry, byId: Map<string, ClaimIndexEntry
 }
 
 /**
- * True when `old` left the active set by a merge (consolidation) rather than
- * a replacement or retraction. Read from the `ext.supersede_kind` marker
- * `supersede` stamps; a record archived before the marker existed counts as
- * merged when its direct successor supersedes more than one record (every
- * merge with a fresh survivor, and most merges into an existing one).
+ * The active record that still holds `old`'s value through consolidation
+ * alone, if any: `superseded_by` is followed only while every hop was stamped
+ * `ext.supersede_kind: merge` (a merge into an existing survivor, whose own
+ * content did not change). One replacement or retraction anywhere on the way
+ * means the value was rejected at that hop, so the tombstone applies (a piece
+ * merged into S, then S replaced by T, is not held by T). A record archived
+ * before the marker existed carries none and counts as rejected: the
+ * survivor's `supersedes` length cannot tell a merge from a replacement, and
+ * any later merge into that survivor would lengthen it.
  */
-function wasMergedAway(old: ClaimIndexEntry, byId: Map<string, ClaimIndexEntry>): boolean {
-  if (old.supersede_kind !== undefined) return old.supersede_kind === 'merge';
-  const successor = old.superseded_by ? byId.get(old.superseded_by) : undefined;
-  return (successor?.supersedes?.length ?? 0) > 1;
+function mergeHolder(old: ClaimIndexEntry, byId: Map<string, ClaimIndexEntry>): ClaimIndexEntry | undefined {
+  const seen = new Set<string>();
+  let cur: ClaimIndexEntry = old;
+  while (cur.state !== 'active') {
+    if (seen.has(cur.id) || cur.supersede_kind !== 'merge' || !cur.superseded_by) return undefined;
+    seen.add(cur.id);
+    const next = byId.get(cur.superseded_by);
+    if (!next) return undefined;
+    cur = next;
+  }
+  return cur;
 }
 
 /** A merged-away record the incoming claim restates, and the active survivor that now holds it. */
@@ -283,12 +299,16 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     throw new Error(`--requires-human is only valid on a procedure (got ${type})`);
   }
 
-  const source = options.source?.trim();
-  if (!source || source.toLowerCase() === 'unknown') {
+  const rawSource = options.source?.trim();
+  if (!rawSource || rawSource.toLowerCase() === 'unknown') {
     throw new Error(
       'source is required and may not be "unknown" — pass --source <who-is-writing> (e.g. --source human:siim, --source claude-code)',
     );
   }
+  // Operator tier derives from the channel: over MCP an operator-pattern
+  // source is stored at agent tier, the claimed string kept in
+  // ext.claimed_source (lib/source.ts).
+  const { source, claimed: claimedSource } = sourceForChannel(rawSource, options.channel);
 
   // Pointer-file repos (no local .memspec) declare their layers explicitly.
   // Writes must name a target when more than one writable layer is in scope —
@@ -316,6 +336,27 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const store = resolvedWrite.layer.store;
   store.init();
 
+  // The duplicate / tombstone checks read the store and the write lands after
+  // them: two concurrent remembers of one claim would both pass. One
+  // store-wide lock (lib/lock.ts, exclusive create) serializes check + write.
+  return withFileLock(
+    store.root,
+    'remember',
+    () => rememberInStore(type, title, options, source, claimedSource, store, storeSelectionCwd),
+    { waitMs: 10_000 },
+  );
+}
+
+/** The check + write half of `runRemember`, run under the store's remember lock. */
+function rememberInStore(
+  type: MemoryType,
+  title: string,
+  options: RememberOptions,
+  source: string,
+  claimedSource: string | undefined,
+  store: ReturnType<typeof CompositeStore.resolveWritableWithDefaults>['layer']['store'],
+  storeSelectionCwd: string | undefined,
+): RememberResult {
   const config = loadConfig(store.root);
   const decayDays = getDecayDays(config, type);
 
@@ -349,7 +390,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   // MCP can never override a tombstone; the flag is honoured only on the CLI.
   const allowRejected = !viaMcp && (options.allowRejected ?? false);
   const rejectedValues: RejectedValueMatch[] = [];
-  try {
+  {
     // Scoped so a same-titled record in another project isn't treated as a
     // duplicate of this one. Unscoped and universal records stay visible.
     // Widen the window by the caller's declared targets: they are excluded
@@ -359,7 +400,16 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // are excluded from suggestions below, so widen the window by their count
     // as well or a genuine different conflict could be pushed out of it.
     const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0) + (options.derivedFrom?.length ?? 0) + (options.conflictsWith?.length ?? 0) + (options.distinctFrom?.length ?? 0);
-    const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
+    // A search index hiccup (missing or corrupt fts.db) costs the exact-title
+    // refusal and the conflict suggestions, never the write; the
+    // near-duplicate and tombstone checks below read the claim index and fail
+    // closed (an error there refuses the write).
+    let candidates: MemoryItem[] = [];
+    try {
+      candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
+    } catch {
+      candidates = [];
+    }
 
     // High band — exact-title refusal. The v0.3 dedup-refusal promise lives
     // here. Surfaces every same-type record that normalises to the same title.
@@ -440,18 +490,42 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // while the value is still held. A claim restating a merged-away record is
     // a near-duplicate of that live survivor (refused below, pointing at it);
     // the tombstone only applies when the merge survivor is itself gone.
+    //
+    // The archive scan is wider than the near-duplicate band: every claim
+    // type, and every scope the new record would be visible from (a
+    // `universal` or unscoped record is visible from all of them). A rejected
+    // value must not come back by being re-typed or re-scoped.
     const byId = new Map(all.map((item) => [item.id, item]));
+    const archived = all.filter((item) =>
+      item.kind === 'claim' && item.state === 'superseded' &&
+      (scope === SCOPE_UNIVERSAL || isVisibleFromScope(item.scope, scope)),
+    );
     const mergedPieces: MergedPieceMatch[] = [];
-    for (const old of comparable) {
-      if (old.state !== 'superseded') continue;
+    for (const old of archived) {
       const similarity = similarityTo(old);
       if (similarity < CLAIM_SIMILARITY_THRESHOLD) continue;
       const survivor = activeSurvivor(old, byId);
-      if (survivor && similarityTo(survivor) >= CLAIM_SIMILARITY_THRESHOLD) continue;
-      if (survivor && wasMergedAway(old, byId)) {
+      if (survivor) {
+        const toSurvivor = similarityTo(survivor);
+        // Also matches the live survivor: rewritten, not rejected, and the
+        // near-duplicate band above already refused it. A declared edge to the
+        // survivor skipped that band, so it must not also launder the old
+        // value (a claim mixing the rejected and the current value scores high
+        // against both): the exemption then holds only when the claim is
+        // closer to the survivor than to the rejected record, or when the
+        // supersede was a rewording (old and survivor are themselves the same
+        // claim by this measure, so no value was rejected).
+        if (toSurvivor >= CLAIM_SIMILARITY_THRESHOLD) {
+          if (!callerDeclared.has(survivor.id) || toSurvivor > similarity) continue;
+          const reworded = weightedSimilarity(new Set(old.tokens), old.weight, survivor.tokens, survivor.weight, CLAIM_SIMILARITY_THRESHOLD);
+          if (reworded >= CLAIM_SIMILARITY_THRESHOLD) continue;
+        }
+      }
+      const holder = mergeHolder(old, byId);
+      if (holder) {
         // Same exemption as the active near-duplicate band: a declared edge to
         // the survivor (refines, distinct_from, ...) records the judgement.
-        if (!callerDeclared.has(survivor.id)) mergedPieces.push({ piece: old, survivor, similarity });
+        if (!callerDeclared.has(holder.id)) mergedPieces.push({ piece: old, survivor: holder, similarity });
         continue;
       }
       rejectedValues.push({
@@ -477,7 +551,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       mergedPieces.sort((a, b) => b.similarity - a.similarity);
       const survivors = [...new Map(mergedPieces.map((m) => [m.survivor.id, m.survivor])).values()];
       const pieceList = mergedPieces
-        .map((m) => `${m.piece.id} "${m.piece.title}" (similarity ${m.similarity.toFixed(2)}), merged into the active ${type} ${m.survivor.id} "${m.survivor.title}"`)
+        .map((m) => `${m.piece.id} "${m.piece.title}" (similarity ${m.similarity.toFixed(2)}), merged into the active ${m.survivor.type ?? type} ${m.survivor.id} "${m.survivor.title}"`)
         .join('; ');
       throw new Error(
         `remember refuses near-duplicate: this claim restates a record consolidated by a merge (${pieceList}). ` +
@@ -528,12 +602,6 @@ export function runRemember(typeInput: string, title: string, options: RememberO
         title: item.title,
         score: 1,
       }));
-    }
-  } catch (err) {
-    // Refusal is the one error we want to propagate — everything else
-    // (search index hiccup, missing fts.db, etc.) must not block the write.
-    if (err instanceof Error && err.message.startsWith('remember refuses')) {
-      throw err;
     }
   }
 
@@ -591,6 +659,11 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const answeredQuestionBefore = options.answersQuestion
     ? loadQuestion(store, options.answersQuestion)
     : undefined;
+  // Adding an answer rewrites the question record: over MCP an operator
+  // question is read-only, like every other operator record.
+  if (answeredQuestionBefore && options.channel === 'mcp' && effectiveSourceKind(answeredQuestionBefore) === 'operator') {
+    throw operatorOverMcpError(answeredQuestionBefore, 'Adding an answer to', `memspec question ${answeredQuestionBefore.id} --add <id>`);
+  }
 
   // Witness (descending strength anchor > operator > evidence > assertion):
   // anchors resolved → anchor; operator source → operator; file-backed evidence
@@ -625,6 +698,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
 
   if (scope) {
     itemData.scope = scope;
+  }
+
+  if (claimedSource) {
+    itemData.ext = { ...(itemData.ext ?? {}), claimed_source: claimedSource };
   }
 
   if (anchorResolution.anchors.length > 0) {
@@ -789,6 +866,8 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   }
 
   const lines = [`Created ${type} memory ${id} at ${filePath}`];
+  const sourceWarning = claimedSource ? sourceDowngradeWarning(claimedSource, source) : undefined;
+  if (sourceWarning) lines.push(`⚠ ${sourceWarning}`);
   if (scope) {
     lines.push(`Scope: ${scope}`);
   }
@@ -854,5 +933,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     requiresHuman: requiresHuman ?? undefined,
     answeredQuestion,
     reopenedQuestion: reopenedQuestion || undefined,
+    source,
+    ...(sourceWarning ? { sourceWarning } : {}),
   };
 }

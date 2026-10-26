@@ -4,7 +4,8 @@ import { getProbe } from '../lib/probe.js';
 import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
-import { effectiveSourceKind } from '../lib/source.js';
+import { effectiveSourceKind, operatorOverMcpError, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
+import { withFileLock } from '../lib/lock.js';
 import { DEFAULT_DECAY_DAYS, type CodeAnchor, type EvidenceEntry, type VerifiedWith } from '../lib/types.js';
 
 export interface VerifyOptions {
@@ -31,10 +32,13 @@ export interface VerifyOptions {
    */
   reanchor?: boolean;
   /**
-   * Which surface invoked this. On `mcp`, re-anchoring an operator-sourced
-   * record is refused: rewriting its anchor witness is a change to operator
-   * memory, which only a human at a terminal authorizes (same channel rule
-   * as `supersede`). A plain verify is unaffected.
+   * Which surface invoked this. On `mcp`, a verify that would rewrite an
+   * operator-sourced record (plain re-witness or re-anchor) is refused: its
+   * witness, review clock and anchors are operator memory, which only a human
+   * at a terminal changes (same channel rule as `supersede`). A needs_review
+   * result writes nothing and is still returned. An operator-pattern `source`
+   * is recorded at agent tier over MCP and never yields verified_with
+   * `operator`.
    */
   channel?: 'cli' | 'mcp';
 }
@@ -56,6 +60,8 @@ export interface VerifyResult {
   /** Anchors re-baselined by `reanchor`; absent when none were. */
   reanchored?: ReanchoredAnchor[];
   message: string;
+  /** Set when an operator-pattern source was downgraded to agent tier (MCP channel). */
+  source_warning?: string;
 }
 
 export function runVerify(id: string, options: VerifyOptions): VerifyResult {
@@ -66,6 +72,13 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   // store is byte-identical to `new MemspecStore(options.cwd)`.
   const owner = CompositeStore.forCwd(options.cwd).assertWritableLayerForId(id);
   const store = owner ? owner.store : new MemspecStore(options.cwd);
+  // Read-modify-write of one record: a concurrent verify (or anchor) of the
+  // same id would otherwise overwrite this one's anchor_history entry or
+  // restore the anchors it re-baselined. Per-record lock (lib/lock.ts).
+  return withFileLock(store.root, `record-${id}`, () => verifyInStore(id, options, store), { waitMs: 10_000 });
+}
+
+function verifyInStore(id: string, options: VerifyOptions, store: MemspecStore): VerifyResult {
   const item = store.findById(id);
 
   if (!item) throw new Error(`Memory not found: ${id}`);
@@ -119,12 +132,6 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     ? drifted.filter((a) => a.status === 'changed' && a.currentSha !== null)
     : [];
   const blocking = drifted.filter((a) => !reanchorable.includes(a));
-  if (reanchorable.length > 0 && options.channel === 'mcp' && effectiveSourceKind(item) === 'operator') {
-    throw new Error(
-      `"${id}" is operator-sourced (source: ${item.source}). Re-anchoring operator memory is not available over MCP; ` +
-        `a human runs \`memspec verify ${id} --reanchor --evidence "..."\` from a terminal, or the memory is superseded if it is now wrong.`,
-    );
-  }
   if (reanchorable.length > 0 && !options.evidence?.trim() && !options.evidenceFile) {
     throw new Error(
       `verify --reanchor would re-baseline ${reanchorable.length} changed anchor(s) of ${id} (${reanchorable.map((a) => a.file).join(', ')}): ` +
@@ -174,6 +181,19 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     };
   }
 
+  // Every path below rewrites the record. Over MCP an operator record is
+  // read-only: no re-witness, no re-baseline.
+  if (options.channel === 'mcp' && effectiveSourceKind(item) === 'operator') {
+    throw reanchorable.length > 0
+      ? operatorOverMcpError(item, 'Re-anchoring', `memspec verify ${id} --reanchor --evidence "..."`)
+      : operatorOverMcpError(item, 'Verifying', `memspec verify ${id} --evidence "..."`);
+  }
+
+  // Over MCP an operator-pattern source is recorded at agent tier.
+  const channelSource = options.source ? sourceForChannel(options.source, options.channel) : undefined;
+  const verifier = channelSource?.source;
+  const claimed = channelSource?.claimed;
+
   const now = new Date().toISOString();
 
   // Verification resets the check_by clock: TTL counts from now, not from
@@ -195,7 +215,8 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
 
   const ext = { ...(item.ext ?? {}) } as Record<string, unknown>;
   const lastVerification: Record<string, unknown> = { at: now };
-  if (options.source) lastVerification.source = options.source;
+  if (verifier) lastVerification.source = verifier;
+  if (claimed) lastVerification.claimed_source = claimed;
   if (options.evidence) lastVerification.evidence = options.evidence;
   ext.last_verification = lastVerification;
 
@@ -225,7 +246,8 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
       return { ...anchor, sha: status.currentSha };
     });
     const entry: Record<string, unknown> = { at: now, anchors: reanchored };
-    if (options.source) entry.source = options.source;
+    if (verifier) entry.source = verifier;
+    if (claimed) entry.claimed_source = claimed;
     if (options.evidence) entry.evidence = options.evidence;
     // An evidence file alone also witnesses the re-baseline: keep the pointer
     // to the committed copy (or URL) next to the shas it justified.
@@ -241,7 +263,7 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   // itself — the entry point that actually executed the command.
   let verifiedWith: VerifiedWith;
   if (anchors.length > 0) verifiedWith = 'anchor';
-  else if (options.source && effectiveSourceKind({ source: options.source }) === 'operator') verifiedWith = 'operator';
+  else if (verifier && effectiveSourceKind({ source: verifier }) === 'operator') verifiedWith = 'operator';
   else verifiedWith = 'evidence';
 
   const evidence = attachedEvidence
@@ -284,6 +306,8 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     verified_with: verifiedWith,
     anchors: statuses,
     ...(reanchored.length > 0 ? { reanchored } : {}),
-    message: `Verified ${id} (${anchorNote}, verified_with: ${verifiedWith}, next check: ${checkBy === 'never' ? 'never' : checkBy.substring(0, 10)}${probeNote})`,
+    ...(claimed && verifier ? { source_warning: sourceDowngradeWarning(claimed, verifier, 'ext.last_verification.claimed_source') } : {}),
+    message: `Verified ${id} (${anchorNote}, verified_with: ${verifiedWith}, next check: ${checkBy === 'never' ? 'never' : checkBy.substring(0, 10)}${probeNote})` +
+      (claimed && verifier ? `\n⚠ ${sourceDowngradeWarning(claimed, verifier, 'ext.last_verification.claimed_source')}` : ''),
   };
 }

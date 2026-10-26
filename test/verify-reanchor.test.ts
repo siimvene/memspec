@@ -152,9 +152,16 @@ test('MCP channel: reanchor of an operator-sourced record is refused, naming the
   assert.equal(after.anchors![0].sha, oldSha);
   assert.equal(after.ext?.anchor_history, undefined);
 
-  // A plain verify of the same operator record over MCP is unaffected (clean anchors).
+  // A plain verify of the same operator record over MCP re-witnesses it, so it
+  // is refused too (clean anchors); the CLI still verifies it.
   writeFileSync(file, 'export const MAX_UPLOAD_MB = 5;\n');
-  assert.equal(runVerify(id, { cwd, reanchor: true, channel: 'mcp' }).status, 'verified');
+  const before = record(cwd, id);
+  assert.throws(
+    () => runVerify(id, { cwd, reanchor: true, channel: 'mcp' }),
+    (err: Error) => err.message.includes('Verifying operator memory is not available over MCP') && err.message.includes(`memspec verify ${id} --evidence`),
+  );
+  assert.equal(record(cwd, id).last_verified, before.last_verified);
+  assert.equal(runVerify(id, { cwd, channel: 'cli' }).status, 'verified');
 });
 
 test('CLI channel: reanchor of an operator-sourced record is allowed', async () => {

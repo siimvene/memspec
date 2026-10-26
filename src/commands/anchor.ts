@@ -1,6 +1,8 @@
 import { getCodeAnchors, projectRootForStore, resolveAnchorForWrite } from '../lib/anchors.js';
 import { loadConfig } from '../lib/config.js';
 import { CompositeStore } from '../lib/composite-store.js';
+import { withFileLock } from '../lib/lock.js';
+import { effectiveSourceKind, operatorOverMcpError, type WriteChannel } from '../lib/source.js';
 import { MemspecStore } from '../lib/store.js';
 import type { CodeAnchor } from '../lib/types.js';
 
@@ -10,6 +12,12 @@ export interface AnchorOptions {
   source?: string;
   /** Checkout directory a repo-relative path belongs to when it lives outside the store's project root. */
   anchorRoot?: string;
+  /**
+   * Which surface invoked this. Anchoring re-baselines a record's witness and
+   * sets `last_verified`, so on `mcp` an operator-sourced record is refused
+   * (same channel rule as `supersede` and `verify --reanchor`).
+   */
+  channel?: WriteChannel;
 }
 
 export interface AnchorResult {
@@ -25,6 +33,11 @@ export function runAnchor(id: string, files: string[], options: AnchorOptions): 
   // layer, keeping the resolved store identical to `new MemspecStore(cwd)`.
   const owner = CompositeStore.forCwd(options.cwd).assertWritableLayerForId(id);
   const store = owner ? owner.store : new MemspecStore(options.cwd);
+  // Same per-record lock as verify: both rewrite the anchors.
+  return withFileLock(store.root, `record-${id}`, () => anchorInStore(id, files, options, store), { waitMs: 10_000 });
+}
+
+function anchorInStore(id: string, files: string[], options: AnchorOptions, store: MemspecStore): AnchorResult {
   const item = store.findById(id);
 
   if (!item) throw new Error(`Memory not found: ${id}`);
@@ -32,6 +45,9 @@ export function runAnchor(id: string, files: string[], options: AnchorOptions): 
     throw new Error(`Cannot anchor memory in state: ${item.state} (only active memories can be anchored)`);
   }
   if (files.length === 0) throw new Error('No files given to anchor');
+  if (options.channel === 'mcp' && effectiveSourceKind(item) === 'operator') {
+    throw operatorOverMcpError(item, 'Re-anchoring', `memspec anchor ${id} <files...>`);
+  }
 
   const projectRoot = projectRootForStore(store.root);
   const repoSearchPaths = loadConfig(store.root).anchors?.repo_search_paths;

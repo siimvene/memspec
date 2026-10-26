@@ -233,7 +233,14 @@ Historical correction reasons whose values the v0.2 bug dropped come back from m
 
 ### 4.2.1 Operator Record Protection
 
-Records whose effective `source_kind` is `operator` (the stored field, or inferred from the source string for records that predate it) MUST NOT be superseded without an explicit override flag (`--override-operator` / `override_operator`). When the override is used, that fact is appended to the persisted reason — overriding operator knowledge leaves a trace.
+Records whose effective `source_kind` is `operator` (the stored field, or inferred from the source string for records that predate it) MUST NOT be superseded without an explicit override flag (CLI `--override-operator`). This covers every supersede branch: replacement, retraction, `merge_from` naming an operator record, and a merge INTO an operator survivor (the survivor is rewritten). When the override is used, that fact is appended to the persisted reason — overriding operator knowledge leaves a trace.
+
+**Authority derives from the channel.** A caller-supplied flag or source string is never operator authority; only a human at the CLI is. Over MCP:
+
+- No tool creates, modifies, re-anchors, re-witnesses, merges into or retracts an operator-sourced record, and none takes an override parameter. `memspec_supersede` (every branch), `memspec_unrelate` and `memspec_relate` (edges are written into `from`), `memspec_verify` (a plain re-witness and `reanchor` alike; a needs_review result writes nothing and is still returned), `memspec_anchor`, `memspec_question` edits (`add` / `close` / `open` / `resolve`) and `memspec_remember` with `answers_question` refuse an operator record, naming the CLI command a human runs instead. `memspec_reconcile` with `repair_renames` + `apply` lists an operator record's re-point with `applied: false` and a `skipped` reason, never writes it.
+- No write produces operator tier. A source matching the operator pattern (`siim|user|human:*`) on `memspec_remember`, a `memspec_supersede` replacement, `memspec_question` create or `memspec_verify` is stored as `mcp:<source>` (which infers `agent`), the caller's string kept in `ext.claimed_source` (on `ext.last_verification` / `ext.anchor_history` entries for a verify), and the response carries `source_warning`. A verify over MCP never yields `verified_with: operator`.
+
+The CLI is unchanged: `--source siim` writes operator tier, and `--override-operator` is honoured.
 
 ### 4.3 Implicit Correction (optional, requires index)
 
@@ -391,7 +398,7 @@ expires: {ISO 8601}                       # observations only — hard expiry
 - `type`: One of `fact`, `decision`, `procedure`.
 - `state`: One of the defined lifecycle states.
 - `created`: ISO 8601 timestamp.
-- `source`: Who wrote the record. Required at write time; `'unknown'` is rejected. MCP implementations SHOULD default it to the connected client name. `source_kind` is inferred at write time: source matching `siim|human:*|user` → `operator`; known import names → `import`; otherwise `agent`.
+- `source`: Who wrote the record. Required at write time; `'unknown'` is rejected. MCP implementations SHOULD default it to the connected client name. `source_kind` is inferred at write time: source matching `siim|human:*|user` → `operator`; known import names → `import`; otherwise `agent`. Over MCP an operator-pattern source is stored as `mcp:<source>` at agent tier (§4.2.1).
 
 ### 6.4 ID Format
 
@@ -458,7 +465,8 @@ Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate
 - `memspec_supersede` — replace, retract, or merge a memory.
   `body` filled → replacement (new active record). `body` empty → retraction.
   `merge_from` collapses N duplicates into one survivor atomically. Reason is
-  persisted on every record involved.
+  persisted on every record involved. No `override_operator` parameter:
+  operator records are refused on every branch (§4.2.1)
 - `memspec_relate` — wire a named link from one memory to another after the
   fact: `refines`, `supports`, `depends_on`, `derived_from` (v0.11),
   `conflicts_with`, or `distinct_from` (v0.13: compared, independent;
@@ -467,7 +475,9 @@ Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate
 - `memspec_verify` — re-witness a claim; anchorless verification requires
   evidence. `check_by` (v0.11) optionally pins the next review date explicitly
   instead of resetting to the type default — `"never"` pins an
-  identity/event-shaped fact permanently
+  identity/event-shaped fact permanently. `reanchor: true` re-baselines changed
+  anchors on the caller's word (requires evidence; previous shas kept in
+  `ext.anchor_history`). Refused for an operator-sourced record (§4.2.1)
 - `memspec_unrelate` — remove a named edge from a memory (v0.10); the inverse
   of `memspec_relate`, logged durably into the record
 - `memspec_outcome` (v0.11) — record what happened after a retrieved memory
@@ -479,7 +489,8 @@ Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate
   (the listed answers are the only candidates) or open; `add` / `close` /
   `open` / `resolve` edit an existing group. Retrieval is via
   `memspec_search` with `type: "question"`
-- `memspec_anchor` — link a claim to source files (records git blob SHAs)
+- `memspec_anchor` — link a claim to source files (records git blob SHAs);
+  refused for an operator-sourced record (§4.2.1)
 - `memspec_reconcile` — list anchored claims whose files have drifted
 - `memspec_status` — store health: counts by type/state/witness, stale,
   drifted anchors, declared and inferred conflicts, schema violations,

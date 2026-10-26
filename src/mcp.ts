@@ -292,7 +292,9 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
       id: result.id,
       type,
       title,
-      source: resolvedSource ?? null,
+      // The stored source: an operator-pattern source is downgraded over MCP.
+      source: result.source,
+      ...(result.sourceWarning ? { source_warning: result.sourceWarning } : {}),
       tags: tags ?? [],
       check_by: check_by ?? null,
       anchors: result.anchors,
@@ -325,7 +327,7 @@ async function handleRemember({ type, title, body, source, tags, anchors, anchor
 
 server.tool(
   'memspec_remember',
-  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Prefer ABSOLUTE file paths in anchors (e.g. /Users/you/git/repo/src/x.ts): this server may run against a personal/global store whose project root is your home directory, so a bare repo-relative path like "src/x.ts" resolves nowhere and the claim silently degrades to an unanchored assertion. If you must pass repo-relative paths, also pass anchor_root pointing at that repo\'s checkout. A file inside a git repo other than the store\'s own is recorded as {repo, file} and resolved on read as a sibling of the project root or under anchors.repo_search_paths (default ~/git). An anchor that resolves nowhere comes back in anchor_warnings telling you what to pass; an anchor recorded against a repo this store cannot resolve on read also warns, naming the directory to add to repo_search_paths. Search first to avoid duplicates: a claim whose title + body near-matches an active same-type record in scope is refused with a pointer to it (use memspec_supersede instead), and a claim that near-matches a value a supersede or retraction rejected (and not its live survivor) is refused with the rejected record, its persisted reason and the survivor; over MCP that refusal is final. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
+  'Record new project knowledge. Call this when you learn something worth remembering: a fact about architecture/config, a decision with rationale, or a reusable procedure. If this claim describes code, anchor it now via the anchors field — the anchor is the strongest available witness. Prefer ABSOLUTE file paths in anchors (e.g. /Users/you/git/repo/src/x.ts): this server may run against a personal/global store whose project root is your home directory, so a bare repo-relative path like "src/x.ts" resolves nowhere and the claim silently degrades to an unanchored assertion. If you must pass repo-relative paths, also pass anchor_root pointing at that repo\'s checkout. A file inside a git repo other than the store\'s own is recorded as {repo, file} and resolved on read as a sibling of the project root or under anchors.repo_search_paths (default ~/git). An anchor that resolves nowhere comes back in anchor_warnings telling you what to pass; an anchor recorded against a repo this store cannot resolve on read also warns, naming the directory to add to repo_search_paths. Search first to avoid duplicates: a claim whose title + body near-matches an active same-type record in scope is refused with a pointer to it (use memspec_supersede instead), and a claim that near-matches a value a supersede or retraction rejected (and not its live survivor) is refused with the rejected record, its persisted reason and the survivor; over MCP that refusal is final. Operator tier is never available here: a source naming an operator ("siim", "user", "human:<name>") is recorded at agent tier as "mcp:<source>" (the claimed string kept in ext.claimed_source, the response carrying source_warning), and answers_question refuses an operator-sourced question. Conflict edges are never auto-written: when a lexically similar same-topic record exists the response carries a `suggested_conflicts` list (id, title, rationale) — inspect it, and only if the records genuinely contradict, wire the edge with memspec_relate (type conflicts_with) or assert it here via the conflicts_with field.',
   {
     type: z.enum(['fact', 'decision', 'procedure']).describe('Memory type'),
     title: z.string().describe('Short title for the memory'),
@@ -383,6 +385,7 @@ async function handleSupersede({ id, reason, title, body, merge_from, source, sc
         superseded_ids: result.superseded_ids,
         reason: result.reason,
         source: source ?? null,
+        ...(result.source_warning ? { source_warning: result.source_warning } : {}),
         ...(result.pending_promotion ? { pending_promotion: result.pending_promotion } : {}),
       } as Record<string, unknown>,
     };
@@ -393,7 +396,7 @@ async function handleSupersede({ id, reason, title, body, merge_from, source, sc
 
 server.tool(
   'memspec_supersede',
-  'Replace, retract, or merge memory. Body filled = replacement (new active record supersedes the old). Body empty = retraction. merge_from collapses N duplicates into one survivor atomically (use to consolidate near-duplicates surfaced by status). Reason is persisted durably on every record involved. A replacement for a record in a read-only layer (e.g. a team store) is written to the one writable layer instead, with `supersedes` pointing at the original; the original file is untouched, it drops out of this view\'s active results, and the result carries `pending_promotion: { layer, target_id }` (promote the replacement to that layer to make it stick for everyone; memspec_status lists pending promotions). Operator-sourced records are read-only over MCP: replacing, retracting or merging one (or merging into an operator survivor) is refused here and must be done with `memspec supersede --override-operator` at a terminal, where a human authorizes it.',
+  'Replace, retract, or merge memory. Body filled = replacement (new active record supersedes the old). Body empty = retraction. merge_from collapses N duplicates into one survivor atomically (use to consolidate near-duplicates surfaced by status). Reason is persisted durably on every record involved. A replacement for a record in a read-only layer (e.g. a team store) is written to the one writable layer instead, with `supersedes` pointing at the original; the original file is untouched, it drops out of this view\'s active results, and the result carries `pending_promotion: { layer, target_id }` (promote the replacement to that layer to make it stick for everyone; memspec_status lists pending promotions). Operator-sourced records are read-only over MCP: replacing, retracting or merging one (or merging into an operator survivor) is refused here and must be done with `memspec supersede --override-operator` at a terminal, where a human authorizes it. A source naming an operator is recorded at agent tier on the replacement ("mcp:<source>", source_warning in the response).',
   {
     id: z.string().describe('Memory ID to supersede (or the survivor id when merging without a replacement body)'),
     reason: z.string().describe('Why the target is wrong, stale, or being merged. Persisted on every record involved.'),
@@ -435,7 +438,7 @@ server.tool(
 
 server.tool(
   'memspec_verify',
-  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock to the type default — or to check_by if you pass one explicitly (pass "never" to pin an identity/event-shaped fact so it never comes up for review again). Pass reanchor=true when you have checked that the claim still holds against the CHANGED code: each changed anchor is re-baselined to the file\'s current blob (previous shas are kept in ext.anchor_history), evidence text stating what you checked is required, and missing files or unavailable repos still return needs_review. Re-anchoring an operator-sourced record is refused here: a human runs `memspec verify <id> --reanchor` at a terminal.',
+  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock to the type default — or to check_by if you pass one explicitly (pass "never" to pin an identity/event-shaped fact so it never comes up for review again). Pass reanchor=true when you have checked that the claim still holds against the CHANGED code: each changed anchor is re-baselined to the file\'s current blob (previous shas are kept in ext.anchor_history), evidence text stating what you checked is required, and missing files or unavailable repos still return needs_review. Operator-sourced records are read-only here: a verify that would rewrite one (re-witness or reanchor) is refused, and a human runs `memspec verify <id>` at a terminal; a drifted operator record still returns needs_review. A source naming an operator never yields verified_with operator here: it is recorded at agent tier ("mcp:<source>", source_warning in the response).',
   {
     id: z.string().describe('Memory ID to verify'),
     evidence: z.string().optional().describe('What you checked to confirm this is still true — required when the memory has no code anchors'),
@@ -456,6 +459,7 @@ server.tool(
           verified_with: result.verified_with,
           anchors: result.anchors,
           ...(result.reanchored ? { reanchored: result.reanchored } : {}),
+          ...(result.source_warning ? { source_warning: result.source_warning } : {}),
         },
       };
     } catch (err) {
@@ -491,7 +495,7 @@ server.tool(
 
 server.tool(
   'memspec_anchor',
-  'Link a memory to the source files it depends on. Records the git blob SHA of each file so verify/reconcile can detect when the code a memory describes has changed. Anchoring also asserts the memory is true against the current file state.',
+  'Link a memory to the source files it depends on. Records the git blob SHA of each file so verify/reconcile can detect when the code a memory describes has changed. Anchoring also asserts the memory is true against the current file state. Operator-sourced records are read-only over MCP: anchoring one is refused (a human runs `memspec anchor` at a terminal).',
   {
     id: z.string().describe('Memory ID to anchor'),
     files: z.array(z.string()).min(1).describe('File paths to anchor. Prefer ABSOLUTE paths — a bare repo-relative path resolves nowhere when the store\'s project root is not the repo. Repo-qualified ("repo/path") and, with anchor_root, repo-relative forms are also accepted.'),
@@ -501,7 +505,7 @@ server.tool(
   },
   async ({ id, files, anchor_root, replace, source }) => {
     try {
-      const result = runAnchor(id, files, { cwd: defaultCwd, anchorRoot: anchor_root, replace, source });
+      const result = runAnchor(id, files, { cwd: defaultCwd, anchorRoot: anchor_root, replace, source, channel: 'mcp' });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
@@ -518,7 +522,7 @@ server.tool(
 
 server.tool(
   'memspec_reconcile',
-  'Find anchored memories whose code has drifted. Compares each active memory\'s code anchors against current file content and reports candidates for review (verify, supersede, or re-anchor). Rename detection runs inside each anchor\'s own git repo, so it works for home-rooted stores whose anchors point into sibling repos. Pass repair_renames to re-point anchors whose file moved with byte-identical content (dry-run unless apply is also set); content-changed anchors stay drifted on purpose. Run after landing commits that change system behavior.',
+  'Find anchored memories whose code has drifted. Compares each active memory\'s code anchors against current file content and reports candidates for review (verify, supersede, or re-anchor). Rename detection runs inside each anchor\'s own git repo, so it works for home-rooted stores whose anchors point into sibling repos. Pass repair_renames to re-point anchors whose file moved with byte-identical content (dry-run unless apply is also set); content-changed anchors stay drifted on purpose. With apply, an operator-sourced record is never rewritten over MCP: its repair is listed with applied false and a skipped reason. Run after landing commits that change system behavior.',
   {
     since_ref: z.string().optional().describe('Git ref to diff from (default: last reconcile checkpoint, fallback HEAD~10)'),
     repair_renames: z.boolean().optional().describe('Re-point anchors whose file moved with identical content. Dry-run (lists proposed re-points) unless apply is also true.'),
@@ -526,7 +530,7 @@ server.tool(
   },
   async ({ since_ref, repair_renames, apply }) => {
     try {
-      const result = runReconcile({ cwd: defaultCwd, since: since_ref, repairRenames: repair_renames, apply });
+      const result = runReconcile({ cwd: defaultCwd, since: since_ref, repairRenames: repair_renames, apply, channel: 'mcp' });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
@@ -565,7 +569,7 @@ server.tool(
 
 server.tool(
   'memspec_relate',
-  'Wire a typed edge from one memory to another without rewriting either record. Edge types: refines (this elaborates the target; parent stays valid), supports (this is evidence for the target), depends_on (this presupposes the target), derived_from (this was INFERRED from the target rather than observed; marks the record derived), conflicts_with (declared contradiction), distinct_from (compared, and the two are independent claims: neither contradicts, refines, supports nor depends on the other; acknowledges an overlap that `memspec check` would otherwise flag, and is never followed by search expansion). A target cannot carry both a conflicts_with and a positive edge, and distinct_from cannot share a target with any other edge type. `from` must be a claim: a question group manages its answers through memspec_question, never through claim edges. Dedupes silently; replaying the same call is a no-op.',
+  'Wire a typed edge from one memory to another without rewriting either record. Edge types: refines (this elaborates the target; parent stays valid), supports (this is evidence for the target), depends_on (this presupposes the target), derived_from (this was INFERRED from the target rather than observed; marks the record derived), conflicts_with (declared contradiction), distinct_from (compared, and the two are independent claims: neither contradicts, refines, supports nor depends on the other; acknowledges an overlap that `memspec check` would otherwise flag, and is never followed by search expansion). A target cannot carry both a conflicts_with and a positive edge, and distinct_from cannot share a target with any other edge type. `from` must be a claim: a question group manages its answers through memspec_question, never through claim edges. Dedupes silently; replaying the same call is a no-op. The edge is written into `from`, so an operator-sourced `from` is refused over MCP (a human runs `memspec relate` at a terminal); an edge pointing AT an operator record is fine.',
   {
     from: z.string().describe('Memory id the edge originates from (the edge is written into this record; must be a claim, not a question)'),
     to: z.string().describe('Memory id the edge points at'),
@@ -573,7 +577,7 @@ server.tool(
   },
   async ({ from, to, type }) => {
     try {
-      const result = runRelate({ cwd: defaultCwd, from, to, type });
+      const result = runRelate({ cwd: defaultCwd, from, to, type, channel: 'mcp' });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
@@ -652,7 +656,7 @@ server.tool(
 
 server.tool(
   'memspec_question',
-  'Create or edit a question group — a named question with competing answer records, the preferred form when two or more records answer one question (clearer than pairwise conflicts_with). Create: pass a `title` plus `answers` (existing record ids; each must be active or superseded); add `closed: true` for a closed-world question whose answers are the only candidates. Edit an existing question by passing its `id` with exactly one of: `add` (more answer ids), `close`/`open` (toggle closed-world), or `resolve` (settle it — requires exactly one answer still active, the survivor). A closed question with one surviving active answer is reported "resolved by elimination" in memspec_status; resolution is never automatic.',
+  'Create or edit a question group — a named question with competing answer records, the preferred form when two or more records answer one question (clearer than pairwise conflicts_with). Create: pass a `title` plus `answers` (existing record ids; each must be active or superseded); add `closed: true` for a closed-world question whose answers are the only candidates. Edit an existing question by passing its `id` with exactly one of: `add` (more answer ids), `close`/`open` (toggle closed-world), or `resolve` (settle it — requires exactly one answer still active, the survivor). A closed question with one surviving active answer is reported "resolved by elimination" in memspec_status; resolution is never automatic. Over MCP an operator-sourced question is read-only (add/close/open/resolve refused; a human uses `memspec question` at a terminal), and a source naming an operator creates the question at agent tier.',
   {
     title: z.string().optional().describe('The question text (create only). Omit when editing an existing question by id.'),
     id: z.string().optional().describe('Existing question id to edit (with add/close/open/resolve). Omit when creating.'),
@@ -684,10 +688,12 @@ server.tool(
         source: source ?? server.server.getClientVersion()?.name,
         tags: tags?.join(','),
         scope,
+        channel: 'mcp',
       });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {
+          ...(result.source_warning ? { source_warning: result.source_warning } : {}),
           id: result.id,
           action: result.action,
           state: result.state,

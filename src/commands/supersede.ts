@@ -1,11 +1,9 @@
 import { ulid } from 'ulid';
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import { appendOutcome } from '../lib/outcomes.js';
-import { effectiveSourceKind } from '../lib/source.js';
+import { effectiveSourceKind, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
 import { assertKnownScope } from '../lib/scope.js';
-import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, rmSync, statSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { withFileLock } from '../lib/lock.js';
 import { CompositeStore, type StoreLayer } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_DECAY_DAYS, type EvidenceEntry, type MemoryItem, type MemoryType } from '../lib/types.js';
@@ -59,6 +57,8 @@ export interface SupersedeResult {
    * replacement is promoted there (`memspec status` lists what is pending).
    */
   pending_promotion?: { layer: string; target_id: string };
+  /** Set when an operator-pattern source was downgraded to agent tier (MCP channel). */
+  source_warning?: string;
 }
 
 /**
@@ -66,9 +66,10 @@ export interface SupersedeResult {
  * `ext.supersede_kind`. `remember`'s tombstone reads it: a `replace` or
  * `retract` rejected the record's value, a `merge` consolidated it into a
  * survivor that still holds it (the piece is a near-duplicate of the survivor,
- * never a rejected value). The survivor's `supersedes` list cannot tell the
- * two apart on its own: a single record merged into an existing survivor
- * leaves a one-element list, exactly like a replacement.
+ * never a rejected value). `merge` is stamped only by a merge into an existing
+ * survivor (no body): a replacement body is new content, union or correction,
+ * and stamps `replace` on every record it collapses. The survivor's
+ * `supersedes` list cannot tell the kinds apart on its own.
  */
 export type SupersedeKind = 'replace' | 'merge' | 'retract';
 
@@ -195,58 +196,20 @@ function crossLayerTarget(composite: CompositeStore, targetId: string, options: 
   return withSupersedeLock(local.store.root, targetId, () => writeCrossLayerReplacement(composite, owner, local, target, body, options));
 }
 
-/** A lock older than this is a crashed writer's, and is reclaimed. A cross-layer supersede takes milliseconds. */
-const SUPERSEDE_LOCK_STALE_MS = 30_000;
-
 /**
- * Run `fn` holding an exclusive per-target lock file in the writable layer's
- * machine-local subtree (`local/locks/supersede-<target>.lock`, created with
- * the `wx` flag, removed in `finally`). Two processes superseding the same
- * read-only record could otherwise both pass the "already superseded in this
- * view" guard and both write an active replacement: the guard reads the
- * store, the write lands after it, and nothing orders the two. A lock older
- * than `SUPERSEDE_LOCK_STALE_MS` is left by a crashed writer and is reclaimed.
+ * Run `fn` holding the per-target supersede lock in the writable layer's
+ * machine-local subtree (`local/locks/supersede-<target>.lock`, lib/lock.ts).
+ * Two processes superseding the same read-only record could otherwise both
+ * pass the "already superseded in this view" guard and both write an active
+ * replacement: the guard reads the store, the write lands after it, and
+ * nothing orders the two.
  */
 function withSupersedeLock<T>(storeRoot: string, targetId: string, fn: () => T): T {
-  const dir = join(storeRoot, 'local', 'locks');
-  const name = /^[A-Za-z0-9_-]{1,128}$/.test(targetId) ? targetId : createHash('sha1').update(targetId).digest('hex');
-  const path = join(dir, `supersede-${name}.lock`);
-  mkdirSync(dir, { recursive: true });
-  const busy = () => new Error(
-    `another supersede of "${targetId}" is in progress (lock ${path}); retry in a moment, ` +
+  return withFileLock(storeRoot, `supersede-${targetId}`, fn, {
+    busyMessage: (path) =>
+      `another supersede of "${targetId}" is in progress (lock ${path}); retry in a moment, ` +
       'or delete the lock file if no memspec process is running',
-  );
-  const acquire = (): number | null => {
-    try {
-      return openSync(path, 'wx');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
-      throw err;
-    }
-  };
-  let fd = acquire();
-  if (fd === null) {
-    let age = Number.POSITIVE_INFINITY;
-    try {
-      age = Date.now() - statSync(path).mtimeMs;
-    } catch {
-      // Released between our open and stat: reclaim below.
-    }
-    if (age < SUPERSEDE_LOCK_STALE_MS) throw busy();
-    rmSync(path, { force: true });
-    fd = acquire();
-    if (fd === null) throw busy();
-  }
-  try {
-    writeSync(fd, `${process.pid}\n`);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    return fn();
-  } finally {
-    rmSync(path, { force: true });
-  }
+  });
 }
 
 /** The check + write half of `crossLayerTarget`, run under the per-target lock. */
@@ -282,7 +245,8 @@ function writeCrossLayerReplacement(
   const now = new Date().toISOString();
   const expires = new Date();
   expires.setUTCDate(expires.getUTCDate() + decayDaysFor(target.type, local.store.root));
-  const source = options.source ?? 'unknown';
+  // Over MCP an operator-pattern source is stored at agent tier (lib/source.ts).
+  const { source, claimed } = sourceForChannel(options.source ?? 'unknown', options.channel);
 
   const replacement: Parameters<typeof local.store.writeItem>[0] = {
     id: newId,
@@ -303,6 +267,7 @@ function writeCrossLayerReplacement(
   const carried = carryV011Fields([target]);
   if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
   if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
+  if (claimed) replacement.ext = { claimed_source: claimed };
 
   local.store.writeItem(replacement);
   appendOutcome(local.store.root, targetId, 'corrected', { source, note: reason });
@@ -312,11 +277,13 @@ function writeCrossLayerReplacement(
     superseded_ids: [targetId],
     reason,
     pending_promotion: { layer: owner.name, target_id: targetId },
+    ...(claimed ? { source_warning: sourceDowngradeWarning(claimed, source) } : {}),
     message:
       `Superseded ${targetId} → ${newId} in this view (written to layer '${local.name}')\n` +
       `Reason: ${reason}\n` +
       `Pending promotion: ${targetId} lives in read-only layer '${owner.name}' and is unchanged there; ` +
-      `promote ${newId} to '${owner.name}' to supersede it for everyone (memspec status lists pending promotions)`,
+      `promote ${newId} to '${owner.name}' to supersede it for everyone (memspec status lists pending promotions)` +
+      (claimed ? `\n⚠ ${sourceDowngradeWarning(claimed, source)}` : ''),
   };
 }
 
@@ -355,7 +322,12 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     mergeItems.push(item);
   }
 
-  const source = options.source ?? 'unknown';
+  // Over MCP an operator-pattern source is stored at agent tier (lib/source.ts):
+  // the replacement and the outcome log carry the downgraded string.
+  const { source, claimed } = sourceForChannel(options.source ?? 'unknown', options.channel);
+  const sourceWarning = claimed ? sourceDowngradeWarning(claimed, source) : undefined;
+  const downgradeNote = sourceWarning ? `\n⚠ ${sourceWarning}` : '';
+  const warningField = sourceWarning ? { source_warning: sourceWarning } : {};
   const overrideOperator = options.overrideOperator ?? false;
   const baseReason = options.reason;
 
@@ -410,11 +382,16 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     const carried = carryV011Fields([target, ...mergeItems]);
     if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
     if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
+    if (claimed) replacement.ext = { claimed_source: claimed };
     store.writeItem(replacement);
 
-    // With merge_from the replacement is a consolidation of every collapsed
-    // record; without it, the target's value was replaced.
-    const kind: SupersedeKind = mergeItems.length > 0 ? 'merge' : 'replace';
+    // A replacement body is new content the caller wrote, with or without
+    // merge_from: memspec cannot tell a union of the collapsed records from a
+    // correction of them ("collapse the TTL-30 twins into TTL 15"), so every
+    // collapsed record is stamped `replace` and keeps the tombstone. Only a
+    // merge into an existing survivor (no body) is consolidation: the caller
+    // declares the pieces duplicates of a record whose content is unchanged.
+    const kind: SupersedeKind = 'replace';
     target.state = 'superseded';
     target.superseded_by = newId;
     target.supersede_reason = targetReason;
@@ -443,7 +420,8 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       survivor_id: newId,
       superseded_ids: collapsedIds,
       reason: baseReason,
-      message: `Superseded ${collapsedIds.join(', ')} → ${newId}${mergedNote}\nReason: ${baseReason}${carriedLine}`,
+      ...warningField,
+      message: `Superseded ${collapsedIds.join(', ')} → ${newId}${mergedNote}\nReason: ${baseReason}${carriedLine}${downgradeNote}`,
     };
   }
 
@@ -454,10 +432,10 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       throw new Error(`Survivor "${targetId}" is ${target.state}, not active`);
     }
     // The survivor is rewritten too (supersedes, supersede_reason, scope), so
-    // over MCP an operator survivor is as read-only as an operator target.
-    if (options.channel === 'mcp' && effectiveSourceKind(target) === 'operator') {
-      throw operatorOverMcpError(target);
-    }
+    // an operator survivor gets the same guard as an operator target: refused
+    // over MCP, and on the CLI only with --override-operator (logged into the
+    // survivor's persisted reason).
+    const survivorReason = assertSupersedable(target, overrideOperator, baseReason, options.channel);
 
     const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason, options.channel));
 
@@ -489,7 +467,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       // Only reached once that set agreed, or the caller named a scope.
       scope: survivorScope,
       supersedes: merged,
-      supersede_reason: baseReason,
+      supersede_reason: survivorReason,
       distinct_from: distinctFrom.length > 0 ? distinctFrom : undefined,
     });
 
@@ -500,8 +478,9 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     return {
       survivor_id: target.id,
       superseded_ids: collapsedIds,
-      reason: baseReason,
-      message: `Merged ${collapsedIds.join(', ')} → ${target.id} (${collapsedIds.length} record(s) collapsed)\nReason: ${baseReason}`,
+      reason: survivorReason,
+      ...warningField,
+      message: `Merged ${collapsedIds.join(', ')} → ${target.id} (${collapsedIds.length} record(s) collapsed)\nReason: ${survivorReason}${downgradeNote}`,
     };
   }
 
@@ -517,6 +496,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     survivor_id: target.id,
     superseded_ids: [target.id],
     reason: targetReason,
-    message: `Retracted ${targetId}\nReason: ${targetReason}`,
+    ...warningField,
+    message: `Retracted ${targetId}\nReason: ${targetReason}${downgradeNote}`,
   };
 }

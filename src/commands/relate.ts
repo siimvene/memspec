@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { effectiveSourceKind } from '../lib/source.js';
+import { effectiveSourceKind, operatorOverMcpError, sourceForChannel, type WriteChannel } from '../lib/source.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import type { MemoryItem } from '../lib/types.js';
@@ -76,6 +76,12 @@ export interface RelateOptions {
   from: string;
   to: string;
   type: RelationType;
+  /**
+   * Which surface invoked this. The edge is written into `from`, so on `mcp`
+   * an operator-sourced `from` is refused (same channel rule as `unrelate`).
+   * Pointing an edge AT an operator record writes only the agent's record.
+   */
+  channel?: WriteChannel;
 }
 
 export interface RelateResult {
@@ -111,6 +117,9 @@ export function runRelate(options: RelateOptions): RelateResult {
   const from = store.findById(options.from);
   if (!from) throw new Error(`Memory not found: ${options.from}`);
   assertNotQuestion(from, 'relate');
+  if (options.channel === 'mcp' && effectiveSourceKind(from) === 'operator') {
+    throw operatorOverMcpError(from, 'Adding an edge to', `memspec relate --from ${from.id} --to ${options.to} --type ${type}`);
+  }
 
   // The edge is written onto `from` only, so the target may live in ANY layer
   // of the read view (a read-only team record included) — the same rule
@@ -342,7 +351,8 @@ export function runUnrelate(options: UnrelateOptions): UnrelateResult {
     type,
     to: options.to,
     removed_at: new Date().toISOString(),
-    removed_by: options.source ?? 'unknown',
+    // Over MCP an operator-pattern source is recorded at agent tier (lib/source.ts).
+    removed_by: sourceForChannel(options.source ?? 'unknown', options.channel).source,
     reason,
   });
   updated.ext = { ...(updated.ext ?? {}), edge_removals: removalLog };

@@ -43,6 +43,8 @@ export interface CreateQuestionOptions {
   source: string;
   tags?: string[];
   scope?: string;
+  /** Extension fields to stamp on the record (e.g. `claimed_source` for a downgraded MCP source). */
+  ext?: Record<string, unknown>;
 }
 
 /**
@@ -71,6 +73,7 @@ export function createQuestion(store: MemspecStore, options: CreateQuestionOptio
     body: `# ${options.title}`,
   };
   if (options.scope) record.scope = options.scope;
+  if (options.ext && Object.keys(options.ext).length > 0) record.ext = options.ext;
 
   const dir = join(store.root, QUESTIONS_SUBDIR);
   mkdirSync(dir, { recursive: true });
