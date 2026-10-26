@@ -245,13 +245,22 @@ The CLI is unchanged: `--source siim` writes operator tier, and `--override-oper
 
 ### 4.2.2 Rejected Values (Tombstone)
 
-A value a supersede replaced or retracted MUST NOT come back through another write. The rule applies to every write that carries claim text: `remember`, and the replacement body of `supersede` (any target, including the record that replaced the value, and a cross-layer replacement).
+A value a supersede replaced or retracted MUST NOT come back through another write. The rule applies to every write that carries claim text: `remember`, the replacement body of `supersede` (any target, including the record that replaced the value, and a cross-layer replacement), and the survivor's own text on a `supersede` with `merge_from` and no body.
 
-- **Rejections.** Every archived claim in the write's store, of any type and any scope, whose `supersede_kind` is `replace` or `retract`, that carries no marker (archived before the marker existed), or that was merged into a record later replaced or retracted (a chain to the active survivor crossing a non-`merge` hop).
+This refusal is a best-effort guardrail against an agent casually re-asserting a corrected value. It is lexical and has known residuals (below). The security boundary for agent writes is channel authority over operator-tier records (§4.2.1), which does not depend on wording; this check sits on top of it.
+
+- **Rejections.** Every archived claim in any layer of the write's read view (the write-target store plus every existing layer of the `stores:` view the write is made from, read-only layers included; a write into the `global` layer is judged against the project layer's archive too), of any type and any scope, whose `supersede_kind` is `replace` or `retract`, that carries no marker (archived before the marker existed), or that was merged into a record later replaced or retracted (a chain to the active survivor crossing a non-`merge` hop).
 - **Rule.** When the claim's similarity to a rejection R reaches the near-duplicate threshold, the write is refused unless R has an active survivor S, the claim carries no identifier (number or single-capital label) that R had and S lacks, the claim is no closer to R than to S, and it is closer to the record that holds R's place after the write (S, or the claim itself when the write supersedes S) than to R by more than a fixed margin (0.05). A retraction always refuses. Declared edges (`distinct_from`, `refines`, ...) exempt nothing: a third value passes, the old value with filler, in the survivor's wording, or next to the new value does not.
+- **Place transfer.** A merge that archives the active survivor S of a rejection R moves R's place to the record the merge keeps (the survivor of a no-body merge, or the replacement of a body plus `merge_from`). R is then judged against that record whatever their similarity: it is refused when it carries an identifier R had and S lacks, or is closer to R than to S. Merging the current-value record into an older record that still states the old value is refused, so the old value cannot become the chain's active end.
 - **Merged pieces.** Restating a record whose every hop to an active survivor is a `merge` is refused as a near-duplicate of that survivor (update it with `supersede`), never as a rejected value. On the CLI a `remember` with a declared edge to that survivor is exempt; over MCP the refusal is final, and a `supersede` body that restates another survivor's merged piece is refused there too.
 - **Override.** Over MCP a refusal is final. On the CLI `--allow-rejected` (on `remember` and `supersede`) writes anyway and logs each overridden rejection into the new record's `ext.rejected_value_overrides` (`id`, `reason`, `superseded_by`, `similarity`, `removed_values`, `overridden_at`, `overridden_by`).
-- **Limit.** The measure is lexical: a heavy rewording below the threshold, or a value spelled differently ("thirty" for "30"), is not caught.
+- **Residuals (measured).** The measure is weighted token overlap. On a two-sentence claim whose TTL was corrected from 30 to 15 minutes, the review probes measured:
+  - *Short claims.* A claim under the signal floor (token weight < 6, e.g. "Default branch is main", weight 3) scores 0 against everything and has no tombstone: superseded by "... is trunk", or a retracted "Postgres port 5433", it re-remembers over MCP.
+  - *Value respellings.* "thirty minutes" (0.87 to the rejected record, 0.87 to the survivor), "half an hour" (0.79/0.79), "30min" (0.79/0.79) and "1800 seconds" (0.76/0.76) carry no removed identifier and read as a third value: written via `remember` and via `supersede` of the survivor. ("30 min" and "30-minute" tokenize to the removed "30" and are refused.)
+  - *Filler dilution.* The old claim verbatim plus 20 words of unrelated filler scores 0.63, under the threshold, and is written (15 words: 0.67, refused).
+  - *Rewording below the threshold.* The old value in new wording at 0.62 is never judged.
+  - *Narrow margin on long claims.* A genuine current-value rewording scored 0.656 to the rejected record and 0.710 to the survivor (margin 0.053, passing by 0.003). In the other direction, a supersede of the survivor that mentions the history ("previously 30 minutes") is refused because it carries the removed "30".
+  - *Pending promotions.* A read-only record superseded only in this view (a cross-layer replacement awaiting promotion) is active in its own layer and is not treated as archived.
 
 ### 4.3 Implicit Correction (optional, requires index)
 
@@ -477,8 +486,9 @@ Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate
   `body` filled → replacement (new active record). `body` empty → retraction.
   `merge_from` collapses N duplicates into one survivor atomically. Reason is
   persisted on every record involved. No `override_operator` parameter:
-  operator records are refused on every branch (§4.2.1). A replacement body
-  is checked against rejected values (§4.2.2), final over MCP
+  operator records are refused on every branch (§4.2.1). A replacement body,
+  and the survivor of a no-body merge, is checked against rejected values
+  (§4.2.2), final over MCP
 - `memspec_relate` — wire a named link from one memory to another after the
   fact: `refines`, `supports`, `depends_on`, `derived_from` (v0.11),
   `conflicts_with`, or `distinct_from` (v0.13: compared, independent;

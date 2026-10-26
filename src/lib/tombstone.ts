@@ -1,14 +1,49 @@
-import type { ClaimIndexEntry } from './claim-index.js';
+import { resolve } from 'node:path';
+import { loadClaimIndex, type ClaimIndexEntry } from './claim-index.js';
+import type { CompositeStore } from './composite-store.js';
 import { CLAIM_SIMILARITY_THRESHOLD, displayToken, isIdentifierToken, weightedSimilarity } from './similarity.js';
+import type { MemspecStore } from './store.js';
 
 /**
  * Rejected values (the tombstone): a value a supersede replaced or retracted
- * must not come back through another write. One rule, applied to every write
- * that carries claim text (`remember`, a `supersede` replacement body):
+ * must not come back through another write.
+ *
+ * What this is: a best-effort guardrail against an agent casually
+ * re-asserting a value that was corrected. It is lexical (weighted token
+ * overlap, lib/similarity.ts): it catches restatements and near-verbatim
+ * reverts; a writer who rephrases on purpose gets past it. The security
+ * boundary for agent writes is channel authority over operator-tier records
+ * (lib/source.ts, `assertSupersedable`, the per-tool MCP refusals), which
+ * does not depend on wording; this check sits on top of it. Measured residuals (the values
+ * below are from the review probes on a two-sentence TTL claim, 30 -> 15
+ * minutes):
+ *   - Short claims: a claim under the signal floor (token weight < 6, e.g.
+ *     "Default branch is main", weight 3) scores 0 against everything, so it
+ *     has no tombstone: superseded by "... is trunk", or a retracted
+ *     "Postgres port 5433", re-remembers over MCP.
+ *   - Value respellings: "thirty minutes" (0.87 to R, 0.87 to S),
+ *     "half an hour" (0.79/0.79), "30min" (0.79/0.79), "1800 seconds"
+ *     (0.76/0.76) carry no removed identifier and read as a third value:
+ *     written via remember and via supersede of S. ("30 min" and "30-minute"
+ *     tokenize to the removed "30" and are refused.)
+ *   - Filler dilution: the old claim verbatim plus 20 words of unrelated
+ *     filler drops to 0.63, under the threshold, and is written (15 words:
+ *     0.67, refused).
+ *   - Rewording below the threshold: the old value in new wording at 0.62 is
+ *     never judged.
+ *   - Narrow margin on long claims: a genuine current-value rewording sat at
+ *     0.656 to R and 0.710 to S (margin 0.053, passes by 0.003); the other
+ *     side, a supersede of S that mentions the history ("previously 30
+ *     minutes") is refused because it carries the removed "30".
+ *
+ * One rule, applied to every write that carries claim text (`remember`, a
+ * `supersede` replacement body, and the survivor's own text on a `supersede`
+ * merge with no body):
  *
  *   For every archived claim R that is a rejection (see `scanArchive`),
- *   scanned across ALL types and ALL scopes (an archived rejection is a
- *   rejection everywhere): when sim(claim, R) >= CLAIM_SIMILARITY_THRESHOLD
+ *   scanned across ALL types and ALL scopes and across the archives of every
+ *   layer in the write's read view (`readViewClaimIndex`; an archived
+ *   rejection is a rejection everywhere): when sim(claim, R) >= CLAIM_SIMILARITY_THRESHOLD
  *   the write is refused UNLESS
  *     - R has an active survivor S (the record holding R's place now), and
  *     - the claim carries no identifier R had that S lacks (a number or
@@ -31,6 +66,15 @@ import { CLAIM_SIMILARITY_THRESHOLD, displayToken, isIdentifierToken, weightedSi
  * limit: a value spelled differently ("thirty" for "30") reads as a third
  * value, and a non-identifier value written in S's wording ("Redis" in the
  * Memcached record's sentences) is judged by similarity alone.
+ *
+ * Place transfer: a merge that archives R's current survivor S moves R's
+ * place to the record the merge keeps (the survivor of a no-body merge, or
+ * the replacement of a body + merge_from). The chain is explicit, so R is
+ * judged against that record whatever its lexical distance: a survivor that
+ * carries an identifier the correction removed, or sits closer to R than to
+ * S, is refused. Without this, merging the current-value record into an
+ * older record still stating the old value (similarity 0.43, under the
+ * threshold) made the old value the chain's active end.
  *
  * Over MCP a refusal is final. On the CLI `--allow-rejected` writes anyway
  * and the override is logged into the new record.
@@ -96,6 +140,36 @@ export interface PendingSupersede {
   merged: readonly string[];
 }
 
+/**
+ * The claim index the tombstone scans: the write-target store plus every
+ * existing layer of each read view the write is made from (a project's
+ * `stores:` layers, read-only ones included). A write into one writable layer
+ * (`store: "global"`) must not re-assert a value rejected in another layer of
+ * the same view. Ids are global (ULIDs); an id present in several layers
+ * (a promoted record) keeps its archived copy when any layer archived it, so
+ * a rejection anywhere counts (fail closed).
+ *
+ * Not covered: a read-only record superseded only in this view (a pending
+ * promotion, `CompositeStore.pendingPromotions`) is active in its own layer
+ * and is not treated as archived here.
+ */
+export function readViewClaimIndex(primary: MemspecStore, views: readonly CompositeStore[]): ClaimIndexEntry[] {
+  const stores: MemspecStore[] = [primary];
+  for (const view of views) for (const layer of view.layers) if (layer.store.exists) stores.push(layer.store);
+  const seenRoots = new Set<string>();
+  const byId = new Map<string, ClaimIndexEntry>();
+  for (const store of stores) {
+    const root = resolve(store.root);
+    if (seenRoots.has(root)) continue;
+    seenRoots.add(root);
+    for (const entry of loadClaimIndex(store)) {
+      const prev = byId.get(entry.id);
+      if (!prev || (prev.state !== 'superseded' && entry.state === 'superseded')) byId.set(entry.id, entry);
+    }
+  }
+  return [...byId.values()];
+}
+
 /** Follow `superseded_by` from an archived record to the active record that now holds its place, if any. */
 export function activeSurvivor(item: ClaimIndexEntry, byId: ReadonlyMap<string, ClaimIndexEntry>): ClaimIndexEntry | undefined {
   const seen = new Set<string>();
@@ -130,8 +204,9 @@ export function mergeHolder(old: ClaimIndexEntry, byId: ReadonlyMap<string, Clai
 }
 
 /**
- * Judge an incoming claim against every archived claim in `entries` (one
- * store's claim index, all types, all scopes). Returns the rejections it
+ * Judge an incoming claim against every archived claim in `entries` (the
+ * read view's claim index, `readViewClaimIndex`: all layers, all types, all
+ * scopes). Returns the rejections it
  * re-asserts (refuse; see the module rule) and the merged pieces it restates
  * (consolidated, not rejected: the caller refuses those as a near-duplicate
  * of the survivor that holds them). A merged piece whose holder is the
@@ -163,12 +238,19 @@ export function scanArchive(
   const similarityTo = (e: ClaimIndexEntry, floor = 0): number =>
     e.id === pending?.newId ? 1 : weightedSimilarity(incoming.tokens, incoming.weight, e.tokens, e.weight, floor);
 
+  const mergedNow = new Set(pending?.merged ?? []);
   const rejected: RejectedValueMatch[] = [];
   const merged: MergedPieceMatch[] = [];
   for (const r of entries) {
     if (r.kind !== 'claim' || r.state !== 'superseded') continue;
-    const similarity = similarityTo(r, CLAIM_SIMILARITY_THRESHOLD);
-    if (similarity < CLAIM_SIMILARITY_THRESHOLD) continue;
+    // `current` is the value the correction installed (before this write).
+    // When this write merges `current` away, R's place moves to the record
+    // the write keeps: an explicit transfer, judged whatever the lexical
+    // distance (see the module header, "Place transfer").
+    const current = activeSurvivor(r, before);
+    const transfer = current !== undefined && mergedNow.has(current.id);
+    const similarity = similarityTo(r, transfer ? 0 : CLAIM_SIMILARITY_THRESHOLD);
+    if (!transfer && similarity < CLAIM_SIMILARITY_THRESHOLD) continue;
 
     const holder = mergeHolder(r, after);
     if (holder) {
@@ -176,10 +258,8 @@ export function scanArchive(
       continue;
     }
 
-    // `current` is the value the correction installed (before this write);
     // `survivorAfter` is who holds R's place once this write lands (the
     // incoming claim itself when this write supersedes `current`).
-    const current = activeSurvivor(r, before);
     const survivorAfter = activeSurvivor(r, after);
     let removedValues: string[] = [];
     let survivorSimilarity: number | undefined;

@@ -12,7 +12,7 @@ import { withFileLock } from '../lib/lock.js';
 import { assertKnownScope, assertScopeRequired, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
 import { CLAIM_SIMILARITY_THRESHOLD, claimTokens, tokenWeight, weightedSimilarity } from '../lib/similarity.js';
 import { loadClaimIndex } from '../lib/claim-index.js';
-import { CLAIM_WRITE_LOCK, describeRejection, mergedPieceError, rejectedValueError, rejectedValueOverrides, scanArchive, type RejectedValueMatch } from '../lib/tombstone.js';
+import { CLAIM_WRITE_LOCK, describeRejection, mergedPieceError, readViewClaimIndex, rejectedValueError, rejectedValueOverrides, scanArchive, type RejectedValueMatch } from '../lib/tombstone.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
 import { addAnswers, loadQuestion } from '../lib/questions.js';
@@ -324,6 +324,13 @@ function rememberInStore(
   // from inference.ts to decide refusal vs. auto-attach.
   let duplicates: DuplicateMatch[] | undefined;
   let suggestedConflicts: SuggestedConflict[] | undefined;
+  // Read views this write is made from: the store-selection cwd's and, when
+  // `--store global` points elsewhere, the working cwd's. The tombstone scans
+  // their layers; edge targets are looked up in them.
+  const readViews: CompositeStore[] = [CompositeStore.forCwd(storeSelectionCwd)];
+  if (options.cwd && resolve(options.cwd) !== resolve(storeSelectionCwd ?? process.cwd())) {
+    readViews.push(CompositeStore.forCwd(options.cwd));
+  }
   const viaMcp = options.channel === 'mcp';
   // MCP can never override a tombstone; the flag is honoured only on the CLI.
   const allowRejected = !viaMcp && (options.allowRejected ?? false);
@@ -413,8 +420,8 @@ function rememberInStore(
 
     // Tombstone — a value a supersede replaced or retracted must not come
     // back through a fresh remember. One rule, shared with the supersede
-    // replacement path (lib/tombstone.ts): every archived rejection in the
-    // store, all types and all scopes, refuses a claim that near-matches it
+    // replacement path (lib/tombstone.ts): every archived rejection in any
+    // layer of the read view, all types and all scopes, refuses a claim that near-matches it
     // unless the claim is measurably closer to the live survivor and carries
     // none of the identifiers the correction removed. Declared edges exempt
     // nothing; over MCP the refusal is final, on the CLI --allow-rejected
@@ -424,7 +431,10 @@ function rememberInStore(
     // record is a near-duplicate of the live survivor that holds it (refused
     // below, pointing at it). On the CLI a declared edge to that survivor
     // exempts it, as on the active near-duplicate band; over MCP it is final.
-    const scan = scanArchive(all, { tokens: incoming, weight: incomingWeight });
+    // The archive scan reads every layer of the read view this write is made
+    // from, not only the write target: `store: "global"` must not re-assert a
+    // value rejected in the project layer (tombstone.ts `readViewClaimIndex`).
+    const scan = scanArchive(readViewClaimIndex(store, readViews), { tokens: incoming, weight: incomingWeight });
     rejectedValues.push(...scan.rejected);
     if (rejectedValues.length > 0 && !allowRejected) {
       throw rejectedValueError('remember', rejectedValues, viaMcp);
@@ -502,10 +512,7 @@ function rememberInStore(
   // views of the store-selection cwd and the working cwd: a global record may
   // legitimately relate to a project record that only the project's layered
   // view can see.
-  const lookups: Array<{ findById(id: string): MemoryItem | null }> = [store, CompositeStore.forCwd(storeSelectionCwd)];
-  if (options.cwd && resolve(options.cwd) !== resolve(storeSelectionCwd ?? process.cwd())) {
-    lookups.push(CompositeStore.forCwd(options.cwd));
-  }
+  const lookups: Array<{ findById(id: string): MemoryItem | null }> = [store, ...readViews];
   const targetExists = (targetId: string): boolean => lookups.some((l) => l.findById(targetId) !== null);
 
   // Positive edges (refines / supports / depends_on / derived_from) point at
