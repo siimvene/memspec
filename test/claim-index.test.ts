@@ -60,7 +60,7 @@ test('a corrupt cache is rebuilt; an unparseable record is skipped', async () =>
   writeFileSync(join(s.root, 'memory', 'facts', 'broken.md'), '---\nid: nope\n---\n# Broken\n');
   const entries = loadClaimIndex(s);
   assert.deepEqual(entries.map((e) => e.id), [a.id]);
-  assert.equal(JSON.parse(readFileSync(claimIndexPath(s.root), 'utf8')).version, 1);
+  assert.equal(JSON.parse(readFileSync(claimIndexPath(s.root), 'utf8')).version, 2);
   // Cached as invalid: still skipped on a cache hit.
   assert.deepEqual(loadClaimIndex(s).map((e) => e.id), [a.id]);
 });

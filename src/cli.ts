@@ -261,7 +261,7 @@ program
   .option('--check-by <value>', 'ISO timestamp or "never" — set explicitly on this clean verification instead of resetting to the type default')
   .option('--reanchor', 'you checked the claim still holds against the changed code: re-baseline changed anchors to the current file blob (previous shas kept in ext.anchor_history; requires --evidence)')
   .action((id: string, options: { cwd?: string; evidence?: string; evidenceFile?: string; source?: string; checkBy?: string; reanchor?: boolean }) => {
-    const result = runVerify(id, { cwd: options.cwd, evidence: options.evidence, evidenceFile: options.evidenceFile, source: options.source, checkBy: options.checkBy, reanchor: options.reanchor });
+    const result = runVerify(id, { cwd: options.cwd, evidence: options.evidence, evidenceFile: options.evidenceFile, source: options.source, checkBy: options.checkBy, reanchor: options.reanchor, channel: 'cli' });
     console.log(result.message);
     if (result.status === 'needs_review') {
       process.exitCode = 1;

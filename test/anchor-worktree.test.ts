@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { runAnchor } from '../src/commands/anchor.js';
 import { runRemember } from '../src/commands/remember.js';
 import { runVerify } from '../src/commands/verify.js';
-import { repoIdentityRoot } from '../src/lib/anchors.js';
+import { blobSha, repoIdentityRoot } from '../src/lib/anchors.js';
+import { expireGitStateCache } from '../src/lib/git-state.js';
 import { makeTempProject, runCli } from './helpers.js';
 
 /**
@@ -86,4 +87,49 @@ test('anchor and repo-qualified paths through a sibling worktree record the main
   assert.equal(qualified.anchors[0].repo, 'app');
   assert.equal(qualified.anchors[0].file, 'src/a.ts');
   assert.deepEqual(qualified.anchorWarnings, []);
+});
+
+test('an anchor written from a worktree on an unmerged change warns at write time; the recorded sha is the worktree blob', async () => {
+  const { proj, app, worktree } = await fixture();
+  // A remote default branch, as a clone has it.
+  git(app, 'update-ref', 'refs/remotes/origin/main', 'main');
+  const wtFile = join(worktree, 'src', 'a.ts');
+  writeFileSync(wtFile, 'export const a = 2;\n');
+
+  const result = runRemember('fact', 'Module a exports the constant two', {
+    cwd: proj, body: 'a = 2', source: 'agent-a', anchors: [wtFile],
+  });
+  assert.equal(result.anchors[0].repo, 'app');
+  assert.equal(result.anchors[0].sha, blobSha(wtFile), 'recorded sha unchanged: the worktree blob');
+  assert.equal(result.anchorWarnings.length, 1);
+  assert.match(result.anchorWarnings[0], /anchored to an unmerged change/);
+  assert.match(result.anchorWarnings[0], /origin\/main/);
+  assert.match(result.anchorWarnings[0], /re-anchor with verify --reanchor after it lands/);
+  // The premise: without the warning this anchor reads drifted immediately.
+  assert.equal(runVerify(result.id, { cwd: proj }).status, 'needs_review');
+
+  // Once the change lands on the default branch the anchor holds, and a fresh
+  // anchor of the same content no longer warns.
+  git(worktree, 'commit', '-q', '-am', 'a = 2');
+  git(app, 'update-ref', 'refs/remotes/origin/main', 'feat');
+  expireGitStateCache();
+  assert.equal(runVerify(result.id, { cwd: proj }).status, 'verified');
+  const again = runRemember('fact', 'The a module constant equals two', { cwd: proj, body: 'two', source: 'agent-a', anchors: [wtFile] });
+  assert.deepEqual(again.anchorWarnings, []);
+});
+
+test('no unmerged-change warning when the worktree file matches the main checkout, or for the main checkout itself', async () => {
+  const { proj, app, worktree } = await fixture();
+  git(app, 'update-ref', 'refs/remotes/origin/main', 'main');
+  const fromWorktree = runRemember('fact', 'Module a exports the constant one', {
+    cwd: proj, body: 'a = 1', source: 'agent-a', anchors: [join(worktree, 'src', 'a.ts')],
+  });
+  assert.deepEqual(fromWorktree.anchorWarnings, []);
+
+  // A local edit in the main checkout is not a worktree anchor: no warning.
+  writeFileSync(join(app, 'src', 'a.ts'), 'export const a = 3;\n');
+  const fromMain = runRemember('fact', 'Module a exports the constant three', {
+    cwd: proj, body: 'a = 3', source: 'agent-a', anchors: [join(app, 'src', 'a.ts')],
+  });
+  assert.deepEqual(fromMain.anchorWarnings, []);
 });

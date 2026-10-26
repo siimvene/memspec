@@ -26,6 +26,10 @@ export interface ClaimIndexEntry {
   title: string;
   superseded_by?: string;
   supersede_reason?: string;
+  /** Ids this record supersedes (a survivor of a merge lists every collapsed record). */
+  supersedes?: string[];
+  /** `ext.supersede_kind` on an archived record: replace | merge | retract; absent before the marker existed. */
+  supersede_kind?: string;
   tokens: string[];
   weight: number;
 }
@@ -37,7 +41,7 @@ type CachedEntry = (ClaimIndexEntry & { invalid?: undefined } | { invalid: true 
 };
 
 /** Bump when the token rules or the entry shape change: an old cache is then discarded whole. */
-const CLAIM_INDEX_VERSION = 1;
+const CLAIM_INDEX_VERSION = 2;
 
 export function claimIndexPath(storeRoot: string): string {
   return join(storeRoot, 'local', 'cache', 'claim-index.json');
@@ -67,6 +71,9 @@ function entryFor(item: MemoryItem): ClaimIndexEntry {
   if (item.scope) entry.scope = item.scope;
   if (item.superseded_by) entry.superseded_by = item.superseded_by;
   if (item.supersede_reason) entry.supersede_reason = item.supersede_reason;
+  if (item.supersedes && item.supersedes.length > 0) entry.supersedes = [...item.supersedes];
+  const kind = item.ext?.supersede_kind;
+  if (typeof kind === 'string') entry.supersede_kind = kind;
   return entry;
 }
 

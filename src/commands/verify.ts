@@ -30,6 +30,13 @@ export interface VerifyOptions {
    * to baseline to.
    */
   reanchor?: boolean;
+  /**
+   * Which surface invoked this. On `mcp`, re-anchoring an operator-sourced
+   * record is refused: rewriting its anchor witness is a change to operator
+   * memory, which only a human at a terminal authorizes (same channel rule
+   * as `supersede`). A plain verify is unaffected.
+   */
+  channel?: 'cli' | 'mcp';
 }
 
 /** One anchor re-baselined by `verify --reanchor`. */
@@ -112,6 +119,12 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     ? drifted.filter((a) => a.status === 'changed' && a.currentSha !== null)
     : [];
   const blocking = drifted.filter((a) => !reanchorable.includes(a));
+  if (reanchorable.length > 0 && options.channel === 'mcp' && effectiveSourceKind(item) === 'operator') {
+    throw new Error(
+      `"${id}" is operator-sourced (source: ${item.source}). Re-anchoring operator memory is not available over MCP; ` +
+        `a human runs \`memspec verify ${id} --reanchor --evidence "..."\` from a terminal, or the memory is superseded if it is now wrong.`,
+    );
+  }
   if (reanchorable.length > 0 && !options.evidence?.trim() && !options.evidenceFile) {
     throw new Error(
       `verify --reanchor would re-baseline ${reanchorable.length} changed anchor(s) of ${id} (${reanchorable.map((a) => a.file).join(', ')}): ` +
@@ -186,6 +199,13 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   if (options.evidence) lastVerification.evidence = options.evidence;
   ext.last_verification = lastVerification;
 
+  // v0.11 — copy/record the attached evidence now that the drift and
+  // unavailable branches are ruled out, and append it to the record's
+  // committed evidence list. Only a verify that mutates the record copies.
+  const attachedEvidence: EvidenceEntry | undefined = options.evidenceFile
+    ? attachEvidence(store.root, options.evidenceFile)
+    : undefined;
+
   // --reanchor: move each re-baselined anchor to its current blob and keep
   // the old sha in ext.anchor_history (who, when, what was checked), so a
   // re-baseline is an auditable event rather than a silent overwrite.
@@ -207,6 +227,9 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
     const entry: Record<string, unknown> = { at: now, anchors: reanchored };
     if (options.source) entry.source = options.source;
     if (options.evidence) entry.evidence = options.evidence;
+    // An evidence file alone also witnesses the re-baseline: keep the pointer
+    // to the committed copy (or URL) next to the shas it justified.
+    if (attachedEvidence) entry.evidence_file = attachedEvidence;
     const history = Array.isArray(ext.anchor_history) ? [...(ext.anchor_history as unknown[])] : [];
     ext.anchor_history = [...history, entry];
     // v0.3 stores anchors at the top level; ext.code_anchors is dropped on touch (as `anchor` does).
@@ -221,12 +244,6 @@ export function runVerify(id: string, options: VerifyOptions): VerifyResult {
   else if (options.source && effectiveSourceKind({ source: options.source }) === 'operator') verifiedWith = 'operator';
   else verifiedWith = 'evidence';
 
-  // v0.11 — copy/record the attached evidence now that the drift and
-  // unavailable branches are ruled out, and append it to the record's
-  // committed evidence list. Only a verify that mutates the record copies.
-  const attachedEvidence: EvidenceEntry | undefined = options.evidenceFile
-    ? attachEvidence(store.root, options.evidenceFile)
-    : undefined;
   const evidence = attachedEvidence
     ? [...(item.evidence ?? []), attachedEvidence]
     : item.evidence;

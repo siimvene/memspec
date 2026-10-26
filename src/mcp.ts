@@ -435,7 +435,7 @@ server.tool(
 
 server.tool(
   'memspec_verify',
-  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock to the type default — or to check_by if you pass one explicitly (pass "never" to pin an identity/event-shaped fact so it never comes up for review again). Pass reanchor=true when you have checked that the claim still holds against the CHANGED code: each changed anchor is re-baselined to the file\'s current blob (previous shas are kept in ext.anchor_history), evidence text stating what you checked is required, and missing files or unavailable repos still return needs_review.',
+  'Record that a memory is still true as of now. Anchored memories: each anchored file is checked against its recorded blob SHA — drifted anchors return needs_review without touching the memory. Anchorless memories: evidence text required (state what you checked). Clean verification refreshes last_verified, clears the stale flag, and resets the check_by clock to the type default — or to check_by if you pass one explicitly (pass "never" to pin an identity/event-shaped fact so it never comes up for review again). Pass reanchor=true when you have checked that the claim still holds against the CHANGED code: each changed anchor is re-baselined to the file\'s current blob (previous shas are kept in ext.anchor_history), evidence text stating what you checked is required, and missing files or unavailable repos still return needs_review. Re-anchoring an operator-sourced record is refused here: a human runs `memspec verify <id> --reanchor` at a terminal.',
   {
     id: z.string().describe('Memory ID to verify'),
     evidence: z.string().optional().describe('What you checked to confirm this is still true — required when the memory has no code anchors'),
@@ -446,7 +446,7 @@ server.tool(
   },
   async ({ id, evidence, evidence_file, source, check_by, reanchor }) => {
     try {
-      const result = runVerify(id, { cwd: defaultCwd, evidence, evidenceFile: evidence_file, source, checkBy: check_by, reanchor });
+      const result = runVerify(id, { cwd: defaultCwd, evidence, evidenceFile: evidence_file, source, checkBy: check_by, reanchor, channel: 'mcp' });
       return {
         content: [{ type: 'text' as const, text: result.message }],
         structuredContent: {

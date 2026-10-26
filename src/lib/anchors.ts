@@ -439,16 +439,44 @@ function crossRepoAnchor(
   const identityRoot = repoIdentityRoot(repoRoot);
   const repo = basename(identityRoot);
   const anchor: CodeAnchor = { file: toPosix(relToRepo), sha, repo };
+  const unmerged = unmergedWorktreeWarning(repoRoot, identityRoot, abs, anchor.file, sha);
   const resolved = resolveRepoRoot(projectRoot, repo, searchPaths);
-  if (resolved && canonicalize(resolved) === canonicalize(identityRoot)) return { anchor };
+  if (resolved && canonicalize(resolved) === canonicalize(identityRoot)) {
+    return unmerged ? { anchor, warning: unmerged } : { anchor };
+  }
   const tried = repoCandidateBases(projectRoot, searchPaths).map((b) => join(b, repo));
   const hint = resolved
     ? `resolves to a different checkout (${resolved})`
     : `is not found under ${tried.join(', ')}`;
-  return {
-    anchor,
-    warning: `Anchor ${anchor.file} recorded against repo ${repo}, but from this store that repo ${hint}; add ${dirname(identityRoot)} to anchors.repo_search_paths in config.yaml or verify will report repo_unavailable`,
-  };
+  const unresolved = `Anchor ${anchor.file} recorded against repo ${repo}, but from this store that repo ${hint}; add ${dirname(identityRoot)} to anchors.repo_search_paths in config.yaml or verify will report repo_unavailable`;
+  return { anchor, warning: unmerged ? `${unresolved}; ${unmerged}` : unresolved };
+}
+
+/**
+ * The write-time warning for an anchor taken from a LINKED worktree whose
+ * file matches neither the main checkout's working tree nor the remote
+ * default branch. The anchor is recorded under the main checkout's name and
+ * the read side compares against exactly those two blobs, so such an anchor
+ * reads drifted the moment it is written. The recorded sha stays the
+ * worktree's (it is the code the claim describes); the caller is told to
+ * re-baseline once the change lands. Null for a main checkout, or when either
+ * side matches.
+ */
+function unmergedWorktreeWarning(
+  repoRoot: string,
+  identityRoot: string,
+  abs: string,
+  file: string,
+  sha: string,
+): string | null {
+  if (canonicalize(repoRoot) === canonicalize(identityRoot)) return null;
+  const mainSha = anchorWithinBase(identityRoot, file) ? blobSha(resolve(identityRoot, file)) : null;
+  if (mainSha === sha) return null;
+  const onRef = blobOnDefaultBranch(abs);
+  if (onRef && onRef.sha === sha) return null;
+  const against = onRef ? `${onRef.ref} or the main checkout (${identityRoot})` : `the main checkout (${identityRoot})`;
+  return `Anchor ${file} was written from linked worktree ${repoRoot} and matches neither ${against}: ` +
+    'anchored to an unmerged change, so it reads drifted until that change lands; re-anchor with verify --reanchor after it lands';
 }
 
 /**

@@ -182,6 +182,26 @@ function activeSurvivor(item: ClaimIndexEntry, byId: Map<string, ClaimIndexEntry
   return cur && cur.state === 'active' ? cur : undefined;
 }
 
+/**
+ * True when `old` left the active set by a merge (consolidation) rather than
+ * a replacement or retraction. Read from the `ext.supersede_kind` marker
+ * `supersede` stamps; a record archived before the marker existed counts as
+ * merged when its direct successor supersedes more than one record (every
+ * merge with a fresh survivor, and most merges into an existing one).
+ */
+function wasMergedAway(old: ClaimIndexEntry, byId: Map<string, ClaimIndexEntry>): boolean {
+  if (old.supersede_kind !== undefined) return old.supersede_kind === 'merge';
+  const successor = old.superseded_by ? byId.get(old.superseded_by) : undefined;
+  return (successor?.supersedes?.length ?? 0) > 1;
+}
+
+/** A merged-away record the incoming claim restates, and the active survivor that now holds it. */
+interface MergedPieceMatch {
+  piece: ClaimIndexEntry;
+  survivor: ClaimIndexEntry;
+  similarity: number;
+}
+
 function describeRejection(m: RejectedValueMatch): string {
   const fate = m.supersededBy === undefined
     ? 'retracted with no replacement'
@@ -414,13 +434,26 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // above already pointed the caller at that survivor. Declared edges do
     // not exempt an archived record: over MCP this refusal is final, and a
     // distinct_from to the rejected id must not become the way around it.
+    //
+    // A merge is consolidation, not rejection: the survivor of a merge is a
+    // union of its pieces, so a piece scores below the threshold against it
+    // while the value is still held. A claim restating a merged-away record is
+    // a near-duplicate of that live survivor (refused below, pointing at it);
+    // the tombstone only applies when the merge survivor is itself gone.
     const byId = new Map(all.map((item) => [item.id, item]));
+    const mergedPieces: MergedPieceMatch[] = [];
     for (const old of comparable) {
       if (old.state !== 'superseded') continue;
       const similarity = similarityTo(old);
       if (similarity < CLAIM_SIMILARITY_THRESHOLD) continue;
       const survivor = activeSurvivor(old, byId);
       if (survivor && similarityTo(survivor) >= CLAIM_SIMILARITY_THRESHOLD) continue;
+      if (survivor && wasMergedAway(old, byId)) {
+        // Same exemption as the active near-duplicate band: a declared edge to
+        // the survivor (refines, distinct_from, ...) records the judgement.
+        if (!callerDeclared.has(survivor.id)) mergedPieces.push({ piece: old, survivor, similarity });
+        continue;
+      }
       rejectedValues.push({
         id: old.id,
         reason: old.supersede_reason ?? '(no reason recorded)',
@@ -437,6 +470,19 @@ export function runRemember(typeInput: string, title: string, options: RememberO
           (viaMcp
             ? 'This refusal is final over MCP. If new evidence shows the rejection was wrong, supersede the record that replaced it, or have a human run `memspec remember ... --allow-rejected` at a terminal.'
             : 'If new evidence shows the rejection was wrong, supersede the record that replaced it, or pass --allow-rejected to write it anyway (the override is logged into the new record).'),
+      );
+    }
+
+    if (mergedPieces.length > 0) {
+      mergedPieces.sort((a, b) => b.similarity - a.similarity);
+      const survivors = [...new Map(mergedPieces.map((m) => [m.survivor.id, m.survivor])).values()];
+      const pieceList = mergedPieces
+        .map((m) => `${m.piece.id} "${m.piece.title}" (similarity ${m.similarity.toFixed(2)}), merged into the active ${type} ${m.survivor.id} "${m.survivor.title}"`)
+        .join('; ');
+      throw new Error(
+        `remember refuses near-duplicate: this claim restates a record consolidated by a merge (${pieceList}). ` +
+          `The survivor already holds it: update it with ${survivors.map((s) => `\`memspec supersede ${s.id}\``).join(' or ')} instead of writing the piece back as a twin. ` +
+          `If you compared them and this is a different claim, declare it with distinct_from (--distinct-from ${survivors.map((s) => s.id).join(' ')}).`,
       );
     }
 

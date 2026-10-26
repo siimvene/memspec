@@ -127,3 +127,84 @@ test('CLI and MCP wiring: --reanchor / reanchor: true', async () => {
   }
   assert.equal((record(cwd, id).ext?.anchor_history as unknown[]).length, 2);
 });
+
+async function operatorAnchoredClaim(): Promise<{ cwd: string; id: string; file: string; oldSha: string }> {
+  const cwd = await makeTempProject();
+  await runCli(['init', '--cwd', cwd]);
+  mkdirSync(join(cwd, 'src'));
+  const file = join(cwd, 'src', 'limits.ts');
+  writeFileSync(file, 'export const MAX_UPLOAD_MB = 5;\n');
+  const rec = runRemember('fact', 'Uploads are capped at 5 MB', { cwd, body: 'MAX_UPLOAD_MB', source: 'human:op', anchors: ['src/limits.ts'] });
+  return { cwd, id: rec.id, file, oldSha: rec.anchors[0].sha };
+}
+
+test('MCP channel: reanchor of an operator-sourced record is refused, naming the CLI command; nothing written', async () => {
+  const { cwd, id, file, oldSha } = await operatorAnchoredClaim();
+  writeFileSync(file, '// refactor\nexport const MAX_UPLOAD_MB = 5;\n');
+  assert.throws(
+    () => runVerify(id, { cwd, reanchor: true, evidence: 'checked', channel: 'mcp' }),
+    (err: Error) =>
+      err.message.includes(`"${id}" is operator-sourced`) &&
+      err.message.includes('not available over MCP') &&
+      err.message.includes(`memspec verify ${id} --reanchor --evidence`),
+  );
+  const after = record(cwd, id);
+  assert.equal(after.anchors![0].sha, oldSha);
+  assert.equal(after.ext?.anchor_history, undefined);
+
+  // A plain verify of the same operator record over MCP is unaffected (clean anchors).
+  writeFileSync(file, 'export const MAX_UPLOAD_MB = 5;\n');
+  assert.equal(runVerify(id, { cwd, reanchor: true, channel: 'mcp' }).status, 'verified');
+});
+
+test('CLI channel: reanchor of an operator-sourced record is allowed', async () => {
+  const { cwd, id, file } = await operatorAnchoredClaim();
+  writeFileSync(file, '// refactor\nexport const MAX_UPLOAD_MB = 5;\n');
+  const { stdout } = await runCli(['verify', id, '--cwd', cwd, '--reanchor', '--evidence', 'checked the constant']);
+  assert.match(stdout, /re-anchored on the caller's word/);
+  assert.equal(record(cwd, id).anchors![0].sha, blobSha(file));
+});
+
+test('memspec_verify MCP tool refuses reanchor of an operator-sourced record', async () => {
+  const { cwd, id, file, oldSha } = await operatorAnchoredClaim();
+  writeFileSync(file, '// refactor\nexport const MAX_UPLOAD_MB = 5;\n');
+  const session = new McpSession([join(REPO_ROOT, 'src/mcp.ts'), '--cwd', cwd]);
+  try {
+    await session.request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'memspec-test', version: '0.0.0' },
+    });
+    session.notify('notifications/initialized', {});
+    const call = await session.request('tools/call', {
+      name: 'memspec_verify',
+      arguments: { id, reanchor: true, evidence: 'checked' },
+    });
+    const result = call.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, new RegExp(`operator-sourced.*memspec verify ${id} --reanchor`));
+  } finally {
+    await session.close();
+  }
+  assert.equal(record(cwd, id).anchors![0].sha, oldSha);
+});
+
+test('an evidence_file-only reanchor records the evidence file reference in the history entry', async () => {
+  const { cwd, id, file, oldSha } = await anchoredClaim();
+  writeFileSync(file, '// refactor\nexport const MAX_UPLOAD_MB = 5;\n');
+  const proof = join(cwd, 'review-notes.txt');
+  writeFileSync(proof, 'diffed the refactor: cap unchanged\n');
+
+  const result = runVerify(id, { cwd, reanchor: true, evidenceFile: proof, source: 'agent-b' });
+  assert.equal(result.status, 'verified');
+  const after = record(cwd, id);
+  const history = after.ext?.anchor_history as Array<Record<string, unknown>>;
+  assert.equal(history.length, 1);
+  assert.equal(history[0].evidence, undefined, 'no evidence text was given');
+  const ref = history[0].evidence_file as { sha256?: string; name?: string; path?: string };
+  assert.equal(ref.name, 'review-notes.txt');
+  assert.match(ref.sha256 ?? '', /^[0-9a-f]{64}$/);
+  // The same committed copy the record's evidence list carries.
+  assert.deepEqual(after.evidence?.at(-1), history[0].evidence_file);
+  assert.equal((history[0].anchors as Array<{ previous_sha: string }>)[0].previous_sha, oldSha);
+});

@@ -61,6 +61,21 @@ export interface SupersedeResult {
   pending_promotion?: { layer: string; target_id: string };
 }
 
+/**
+ * How a record left the active set, stamped on the archived record as
+ * `ext.supersede_kind`. `remember`'s tombstone reads it: a `replace` or
+ * `retract` rejected the record's value, a `merge` consolidated it into a
+ * survivor that still holds it (the piece is a near-duplicate of the survivor,
+ * never a rejected value). The survivor's `supersedes` list cannot tell the
+ * two apart on its own: a single record merged into an existing survivor
+ * leaves a one-element list, exactly like a replacement.
+ */
+export type SupersedeKind = 'replace' | 'merge' | 'retract';
+
+function markSuperseded(item: MemoryItem, kind: SupersedeKind): void {
+  item.ext = { ...(item.ext ?? {}), supersede_kind: kind };
+}
+
 function decayDaysFor(type: MemoryType | undefined, root: string): number {
   if (!type) return DEFAULT_DECAY_DAYS.fact;
   return getDecayDays(loadConfig(root), type);
@@ -397,9 +412,13 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
     store.writeItem(replacement);
 
+    // With merge_from the replacement is a consolidation of every collapsed
+    // record; without it, the target's value was replaced.
+    const kind: SupersedeKind = mergeItems.length > 0 ? 'merge' : 'replace';
     target.state = 'superseded';
     target.superseded_by = newId;
     target.supersede_reason = targetReason;
+    markSuperseded(target, kind);
     store.moveToArchive(target, 'superseded');
 
     for (let i = 0; i < mergeItems.length; i++) {
@@ -407,6 +426,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       item.state = 'superseded';
       item.superseded_by = newId;
       item.supersede_reason = mergeReasons[i];
+      markSuperseded(item, kind);
       store.moveToArchive(item, 'superseded');
     }
 
@@ -447,6 +467,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       item.state = 'superseded';
       item.superseded_by = target.id;
       item.supersede_reason = mergeReasons[i];
+      markSuperseded(item, 'merge');
       store.moveToArchive(item, 'superseded');
       collapsedIds.push(item.id);
     }
@@ -488,6 +509,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   const targetReason = assertSupersedable(target, overrideOperator, baseReason, options.channel);
   target.state = 'superseded';
   target.supersede_reason = targetReason;
+  markSuperseded(target, 'retract');
   store.moveToArchive(target, 'superseded');
   appendOutcome(store.root, target.id, 'corrected', { source, note: targetReason });
 
