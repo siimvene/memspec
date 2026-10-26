@@ -3,6 +3,7 @@ import type { MemspecStore } from '../lib/store.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { loadConfig } from '../lib/config.js';
 import { assertKnownScope } from '../lib/scope.js';
+import { effectiveSourceKind, operatorOverMcpError, sourceDowngradeWarning, sourceForChannel, type WriteChannel } from '../lib/source.js';
 import {
   addAnswers,
   createQuestion,
@@ -30,6 +31,12 @@ export interface QuestionOptions {
   /** Comma-separated tags (create only). */
   tags?: string;
   scope?: string;
+  /**
+   * Which surface invoked this. On `mcp` an operator-pattern source creates
+   * the question at agent tier (lib/source.ts), and editing an
+   * operator-sourced question (add / close / open / resolve) is refused.
+   */
+  channel?: WriteChannel;
 }
 
 export interface QuestionResult {
@@ -40,6 +47,8 @@ export interface QuestionResult {
   answers: string[];
   survivor?: string;
   message: string;
+  /** Set when an operator-pattern source was downgraded to agent tier (MCP channel). */
+  source_warning?: string;
 }
 
 function parseTags(raw?: string): string[] {
@@ -92,10 +101,12 @@ export function runQuestion(titleOrId: string, options: QuestionOptions): Questi
   }
 
   if (!isMutate) {
-    const source = options.source?.trim();
-    if (!source || source.toLowerCase() === 'unknown') {
+    const rawSource = options.source?.trim();
+    if (!rawSource || rawSource.toLowerCase() === 'unknown') {
       throw new Error('question create requires --source <who-is-asking> ("unknown" is rejected)');
     }
+    const { source, claimed } = sourceForChannel(rawSource, options.channel);
+    const sourceWarning = claimed ? sourceDowngradeWarning(claimed, source) : undefined;
     if (!options.answers || options.answers.length === 0) {
       throw new Error('question create requires --answers <ids...> (or pass a mutate flag to edit an existing question)');
     }
@@ -110,6 +121,7 @@ export function runQuestion(titleOrId: string, options: QuestionOptions): Questi
       source,
       tags: parseTags(options.tags),
       scope,
+      ...(claimed ? { ext: { claimed_source: claimed } } : {}),
     });
     const created = loadQuestion(store, id);
     return {
@@ -118,7 +130,9 @@ export function runQuestion(titleOrId: string, options: QuestionOptions): Questi
       state: 'open',
       closed: created.closed === true,
       answers: created.answers ?? [],
-      message: `Created question ${id} (${created.closed ? 'closed' : 'open'}-world, ${created.answers?.length ?? 0} answer(s))`,
+      message: `Created question ${id} (${created.closed ? 'closed' : 'open'}-world, ${created.answers?.length ?? 0} answer(s))` +
+        (sourceWarning ? `\n⚠ ${sourceWarning}` : ''),
+      ...(sourceWarning ? { source_warning: sourceWarning } : {}),
     };
   }
 
@@ -126,6 +140,12 @@ export function runQuestion(titleOrId: string, options: QuestionOptions): Questi
   const flags = [options.add?.length ? 'add' : null, options.close ? 'close' : null, options.open ? 'open' : null, options.resolve ? 'resolve' : null].filter(Boolean);
   if (flags.length > 1) {
     throw new Error(`question edit takes one operation at a time; got ${flags.join(', ')}`);
+  }
+  if (options.channel === 'mcp') {
+    const existing = loadQuestion(store, titleOrId);
+    if (effectiveSourceKind(existing) === 'operator') {
+      throw operatorOverMcpError(existing, 'Editing', `memspec question ${existing.id} --${flags[0]}${flags[0] === 'add' ? ' <ids...>' : ''}`);
+    }
   }
 
   if (options.add?.length) {

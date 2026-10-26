@@ -7,8 +7,12 @@ import {
   normaliseTitle,
   rankByLexicalCloseness,
 } from '../lib/inference.js';
-import { effectiveSourceKind, inferSourceKind } from '../lib/source.js';
-import { assertKnownScope, assertScopeRequired, resolveScopeForCwd } from '../lib/scope.js';
+import { effectiveSourceKind, inferSourceKind, operatorOverMcpError, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
+import { withFileLock } from '../lib/lock.js';
+import { assertKnownScope, assertScopeRequired, isVisibleFromScope, resolveScopeForCwd } from '../lib/scope.js';
+import { CLAIM_SIMILARITY_THRESHOLD, claimTokens, tokenWeight, weightedSimilarity } from '../lib/similarity.js';
+import { loadClaimIndex } from '../lib/claim-index.js';
+import { CLAIM_WRITE_LOCK, describeRejection, mergedPieceError, readViewClaimIndex, rejectedValueError, rejectedValueOverrides, scanArchive, type RejectedValueMatch } from '../lib/tombstone.js';
 import { CompositeStore } from '../lib/composite-store.js';
 import { attachEvidence, validateEvidenceSource } from '../lib/evidence.js';
 import { addAnswers, loadQuestion } from '../lib/questions.js';
@@ -74,6 +78,18 @@ export interface RememberOptions {
    * record as visible everywhere; omit both and no `scope` field is written.
    */
   scope?: string;
+  /**
+   * Write even though the claim near-matches a value that was superseded or
+   * retracted (the tombstone refusal). Honoured only on the CLI channel; the
+   * override is logged into the new record's `ext.rejected_value_overrides`.
+   */
+  allowRejected?: boolean;
+  /**
+   * Which surface invoked this. On `mcp` a tombstone refusal is final:
+   * `allowRejected` is ignored, so an agent cannot re-assert a value a
+   * supersede rejected by flipping a flag. Same rule as `unrelate`.
+   */
+  channel?: 'cli' | 'mcp';
 }
 
 export interface DuplicateMatch {
@@ -119,6 +135,10 @@ export interface RememberResult {
   answeredQuestion?: string;
   /** v0.11 — true when adding this record reopened a previously resolved question. */
   reopenedQuestion?: boolean;
+  /** The stored source string (differs from the caller's when an operator-pattern source was downgraded over MCP). */
+  source: string;
+  /** Set when an operator-pattern source was downgraded to agent tier (MCP channel). */
+  sourceWarning?: string;
 }
 
 /**
@@ -216,12 +236,16 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     throw new Error(`--requires-human is only valid on a procedure (got ${type})`);
   }
 
-  const source = options.source?.trim();
-  if (!source || source.toLowerCase() === 'unknown') {
+  const rawSource = options.source?.trim();
+  if (!rawSource || rawSource.toLowerCase() === 'unknown') {
     throw new Error(
       'source is required and may not be "unknown" — pass --source <who-is-writing> (e.g. --source human:siim, --source claude-code)',
     );
   }
+  // Operator tier derives from the channel: over MCP an operator-pattern
+  // source is stored at agent tier, the claimed string kept in
+  // ext.claimed_source (lib/source.ts).
+  const { source, claimed: claimedSource } = sourceForChannel(rawSource, options.channel);
 
   // Pointer-file repos (no local .memspec) declare their layers explicitly.
   // Writes must name a target when more than one writable layer is in scope —
@@ -249,6 +273,28 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const store = resolvedWrite.layer.store;
   store.init();
 
+  // The duplicate / tombstone checks read the store and the write lands after
+  // them: two concurrent remembers of one claim would both pass. One
+  // store-wide lock (lib/lock.ts, exclusive create), also held by `supersede`,
+  // serializes check + write against every other claim write.
+  return withFileLock(
+    store.root,
+    CLAIM_WRITE_LOCK,
+    () => rememberInStore(type, title, options, source, claimedSource, store, storeSelectionCwd),
+    { waitMs: 10_000 },
+  );
+}
+
+/** The check + write half of `runRemember`, run under the store's remember lock. */
+function rememberInStore(
+  type: MemoryType,
+  title: string,
+  options: RememberOptions,
+  source: string,
+  claimedSource: string | undefined,
+  store: ReturnType<typeof CompositeStore.resolveWritableWithDefaults>['layer']['store'],
+  storeSelectionCwd: string | undefined,
+): RememberResult {
   const config = loadConfig(store.root);
   const decayDays = getDecayDays(config, type);
 
@@ -278,7 +324,18 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   // from inference.ts to decide refusal vs. auto-attach.
   let duplicates: DuplicateMatch[] | undefined;
   let suggestedConflicts: SuggestedConflict[] | undefined;
-  try {
+  // Read views this write is made from: the store-selection cwd's and, when
+  // `--store global` points elsewhere, the working cwd's. The tombstone scans
+  // their layers; edge targets are looked up in them.
+  const readViews: CompositeStore[] = [CompositeStore.forCwd(storeSelectionCwd)];
+  if (options.cwd && resolve(options.cwd) !== resolve(storeSelectionCwd ?? process.cwd())) {
+    readViews.push(CompositeStore.forCwd(options.cwd));
+  }
+  const viaMcp = options.channel === 'mcp';
+  // MCP can never override a tombstone; the flag is honoured only on the CLI.
+  const allowRejected = !viaMcp && (options.allowRejected ?? false);
+  const rejectedValues: RejectedValueMatch[] = [];
+  {
     // Scoped so a same-titled record in another project isn't treated as a
     // duplicate of this one. Unscoped and universal records stay visible.
     // Widen the window by the caller's declared targets: they are excluded
@@ -288,7 +345,16 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // are excluded from suggestions below, so widen the window by their count
     // as well or a genuine different conflict could be pushed out of it.
     const declaredCount = (options.refines?.length ?? 0) + (options.supports?.length ?? 0) + (options.dependsOn?.length ?? 0) + (options.derivedFrom?.length ?? 0) + (options.conflictsWith?.length ?? 0) + (options.distinctFrom?.length ?? 0);
-    const candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
+    // A search index hiccup (missing or corrupt fts.db) costs the exact-title
+    // refusal and the conflict suggestions, never the write; the
+    // near-duplicate and tombstone checks below read the claim index and fail
+    // closed (an error there refuses the write).
+    let candidates: MemoryItem[] = [];
+    try {
+      candidates = store.search(title, { types: [type], limit: NEIGHBOUR_CANDIDATE_LIMIT + declaredCount, scope });
+    } catch {
+      candidates = [];
+    }
 
     // High band — exact-title refusal. The v0.3 dedup-refusal promise lives
     // here. Surfaces every same-type record that normalises to the same title.
@@ -310,6 +376,9 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     // Drop caller-declared targets before choosing the closest neighbour, so
     // the inference is skipped for them but can still fire on a genuinely
     // unrelated one. See fact ms_01KZJXHBZT6YXY9P500JFCE4SX.
+    // The same set is exempt from the near-duplicate refusal below: a refines
+    // child restates its parent by design, and distinct_from is how a caller
+    // records that a lexically close record is a different claim.
     const callerDeclared = new Set<string>([
       ...(options.refines ?? []),
       ...(options.supports ?? []),
@@ -321,6 +390,60 @@ export function runRemember(typeInput: string, title: string, options: RememberO
       // v0.13 — "compared, independent" is a classification too.
       ...(options.distinctFrom ?? []),
     ]);
+
+    // Near-duplicate band — the same claim under a different title. Title +
+    // body similarity (lib/similarity.ts) against EVERY same-type record
+    // visible from this scope, not just the BM25 window above: a paraphrase
+    // ranks poorly on a title query by construction. Records come from the
+    // mtime-keyed claim index (lib/claim-index.ts), not a second full parse.
+    const all = loadClaimIndex(store);
+    const incoming = claimTokens(title, options.body ?? '');
+    const incomingWeight = tokenWeight(incoming);
+    const comparable = all.filter((item) =>
+      item.kind === 'claim' && item.type === type && isVisibleFromScope(item.scope, scope),
+    );
+    const nearMatches = comparable
+      .filter((item) => item.state === 'active' && !callerDeclared.has(item.id))
+      .map((item) => ({ item, similarity: weightedSimilarity(incoming, incomingWeight, item.tokens, item.weight, CLAIM_SIMILARITY_THRESHOLD) }))
+      .filter((m) => m.similarity >= CLAIM_SIMILARITY_THRESHOLD)
+      .sort((a, b) => b.similarity - a.similarity);
+    if (nearMatches.length > 0) {
+      const survivorList = nearMatches
+        .map((m) => `${m.item.id} "${m.item.title}" (similarity ${m.similarity.toFixed(2)})`)
+        .join(', ');
+      throw new Error(
+        `remember refuses near-duplicate: an active ${type} making the same claim already exists (${survivorList}). ` +
+          `Use \`memspec supersede\` to replace, merge, or retract it instead of writing a twin. ` +
+          `If you compared them and this is a different claim, declare it with distinct_from (--distinct-from <id>).`,
+      );
+    }
+
+    // Tombstone — a value a supersede replaced or retracted must not come
+    // back through a fresh remember. One rule, shared with the supersede
+    // replacement path (lib/tombstone.ts): every archived rejection in any
+    // layer of the read view, all types and all scopes, refuses a claim that near-matches it
+    // unless the claim is measurably closer to the live survivor and carries
+    // none of the identifiers the correction removed. Declared edges exempt
+    // nothing; over MCP the refusal is final, on the CLI --allow-rejected
+    // writes anyway and logs the override.
+    //
+    // A merge is consolidation, not rejection: a claim restating a merged-away
+    // record is a near-duplicate of the live survivor that holds it (refused
+    // below, pointing at it). On the CLI a declared edge to that survivor
+    // exempts it, as on the active near-duplicate band; over MCP it is final.
+    // The archive scan reads every layer of the read view this write is made
+    // from, not only the write target: `store: "global"` must not re-assert a
+    // value rejected in the project layer (tombstone.ts `readViewClaimIndex`).
+    const scan = scanArchive(readViewClaimIndex(store, readViews), { tokens: incoming, weight: incomingWeight });
+    rejectedValues.push(...scan.rejected);
+    if (rejectedValues.length > 0 && !allowRejected) {
+      throw rejectedValueError('remember', rejectedValues, viaMcp);
+    }
+
+    const mergedPieces = scan.merged.filter((m) => viaMcp || !callerDeclared.has(m.survivor.id));
+    if (mergedPieces.length > 0) {
+      throw mergedPieceError('remember', mergedPieces, viaMcp);
+    }
 
     // Mid band — apply the lexical conflict-inference rule, but only SUGGEST
     // the matches. The rule is purely lexical (same type, one shared tag, two
@@ -365,12 +488,6 @@ export function runRemember(typeInput: string, title: string, options: RememberO
         score: 1,
       }));
     }
-  } catch (err) {
-    // Refusal is the one error we want to propagate — everything else
-    // (search index hiccup, missing fts.db, etc.) must not block the write.
-    if (err instanceof Error && err.message.startsWith('remember refuses')) {
-      throw err;
-    }
   }
 
   const anchorFiles = options.anchors ?? [];
@@ -395,10 +512,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   // views of the store-selection cwd and the working cwd: a global record may
   // legitimately relate to a project record that only the project's layered
   // view can see.
-  const lookups: Array<{ findById(id: string): MemoryItem | null }> = [store, CompositeStore.forCwd(storeSelectionCwd)];
-  if (options.cwd && resolve(options.cwd) !== resolve(storeSelectionCwd ?? process.cwd())) {
-    lookups.push(CompositeStore.forCwd(options.cwd));
-  }
+  const lookups: Array<{ findById(id: string): MemoryItem | null }> = [store, ...readViews];
   const targetExists = (targetId: string): boolean => lookups.some((l) => l.findById(targetId) !== null);
 
   // Positive edges (refines / supports / depends_on / derived_from) point at
@@ -427,6 +541,11 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   const answeredQuestionBefore = options.answersQuestion
     ? loadQuestion(store, options.answersQuestion)
     : undefined;
+  // Adding an answer rewrites the question record: over MCP an operator
+  // question is read-only, like every other operator record.
+  if (answeredQuestionBefore && options.channel === 'mcp' && effectiveSourceKind(answeredQuestionBefore) === 'operator') {
+    throw operatorOverMcpError(answeredQuestionBefore, 'Adding an answer to', `memspec question ${answeredQuestionBefore.id} --add <id>`);
+  }
 
   // Witness (descending strength anchor > operator > evidence > assertion):
   // anchors resolved → anchor; operator source → operator; file-backed evidence
@@ -461,6 +580,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
 
   if (scope) {
     itemData.scope = scope;
+  }
+
+  if (claimedSource) {
+    itemData.ext = { ...(itemData.ext ?? {}), claimed_source: claimedSource };
   }
 
   if (anchorResolution.anchors.length > 0) {
@@ -568,6 +691,15 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     itemData.ext = { ...(itemData.ext ?? {}), edge_sources: edgeSources };
   }
 
+  // Tombstone override (CLI --allow-rejected): the record carries which
+  // rejected values it re-asserts, who overrode, and when.
+  if (rejectedValues.length > 0) {
+    itemData.ext = {
+      ...(itemData.ext ?? {}),
+      rejected_value_overrides: rejectedValueOverrides(rejectedValues, created, source),
+    };
+  }
+
   // v0.13 — the relate rule for distinct_from, applied to every declared
   // target with the target's own edge lists in view (either record carrying
   // distinct_from next to another edge between the two is refused). For a
@@ -609,6 +741,8 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   }
 
   const lines = [`Created ${type} memory ${id} at ${filePath}`];
+  const sourceWarning = claimedSource ? sourceDowngradeWarning(claimedSource, source) : undefined;
+  if (sourceWarning) lines.push(`⚠ ${sourceWarning}`);
   if (scope) {
     lines.push(`Scope: ${scope}`);
   }
@@ -646,6 +780,10 @@ export function runRemember(typeInput: string, title: string, options: RememberO
   if (assertedConflicts) {
     lines.push(`Asserted conflicts_with: ${assertedConflicts.join(', ')}`);
   }
+  if (rejectedValues.length > 0) {
+    lines.push(`⚠ --allow-rejected: written over ${rejectedValues.length} rejected value(s), logged in ext.rejected_value_overrides:`);
+    for (const m of rejectedValues) lines.push(`  ${describeRejection(m)}`);
+  }
   if (suggestedConflicts && suggestedConflicts.length > 0) {
     lines.push(
       `Suggested conflicts (not written — wire with \`memspec relate --type conflicts_with\` if they genuinely contradict this):`,
@@ -670,5 +808,7 @@ export function runRemember(typeInput: string, title: string, options: RememberO
     requiresHuman: requiresHuman ?? undefined,
     answeredQuestion,
     reopenedQuestion: reopenedQuestion || undefined,
+    source,
+    ...(sourceWarning ? { sourceWarning } : {}),
   };
 }

@@ -1,11 +1,19 @@
 import { ulid } from 'ulid';
 import { getDecayDays, loadConfig } from '../lib/config.js';
 import { appendOutcome } from '../lib/outcomes.js';
-import { effectiveSourceKind } from '../lib/source.js';
+import { effectiveSourceKind, sourceDowngradeWarning, sourceForChannel } from '../lib/source.js';
 import { assertKnownScope } from '../lib/scope.js';
-import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, rmSync, statSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { withFileLock } from '../lib/lock.js';
+import { claimTokens, tokenWeight } from '../lib/similarity.js';
+import {
+  CLAIM_WRITE_LOCK,
+  mergedPieceError,
+  readViewClaimIndex,
+  rejectedValueError,
+  rejectedValueOverrides,
+  scanArchive,
+  type RejectedValueMatch,
+} from '../lib/tombstone.js';
 import { CompositeStore, type StoreLayer } from '../lib/composite-store.js';
 import { MemspecStore } from '../lib/store.js';
 import { DEFAULT_DECAY_DAYS, type EvidenceEntry, type MemoryItem, type MemoryType } from '../lib/types.js';
@@ -24,7 +32,17 @@ export interface SupersedeOptions {
    * replacement.
    */
   mergeFrom?: string[];
+  /** Required to supersede an operator-sourced record. Honoured only on the CLI channel. */
   overrideOperator?: boolean;
+  /**
+   * Which surface invoked this. Write authority over operator memory derives
+   * from the channel, never from a caller flag: on `mcp` every branch
+   * (replace, retract, merge_from, and a merge INTO an operator survivor)
+   * refuses operator-sourced records whatever `overrideOperator` says, so an
+   * agent cannot self-authorize. The MCP tool does not expose the override.
+   * Same rule as `unrelate`.
+   */
+  channel?: 'cli' | 'mcp';
   source?: string;
   /**
    * Scope for the survivor. Overrides inheritance entirely, and is the answer
@@ -34,6 +52,13 @@ export interface SupersedeOptions {
    * caller who has been asked to classify is past that.
    */
   scope?: string;
+  /**
+   * Write the replacement even though its body near-matches a value an
+   * earlier supersede rejected (the tombstone, lib/tombstone.ts). Honoured
+   * only on the CLI channel; logged into the replacement's
+   * `ext.rejected_value_overrides`. Over MCP the refusal is final.
+   */
+  allowRejected?: boolean;
 }
 
 export interface SupersedeResult {
@@ -49,6 +74,26 @@ export interface SupersedeResult {
    * replacement is promoted there (`memspec status` lists what is pending).
    */
   pending_promotion?: { layer: string; target_id: string };
+  /** Set when an operator-pattern source was downgraded to agent tier (MCP channel). */
+  source_warning?: string;
+}
+
+/**
+ * How a record left the active set, stamped on the archived record as
+ * `ext.supersede_kind`. The tombstone (lib/tombstone.ts) reads it: a
+ * `replace` or `retract` rejected the record's value, a `merge` consolidated
+ * it into a survivor that still holds it (restating the piece is a
+ * near-duplicate of the survivor, never a rejected value). Per record: in a
+ * supersede with a replacement body, the target is `replace` (its value is
+ * what the body corrects) and every `merge_from` id is `merge` (consolidated
+ * into the new record, dream-style); a merge into an existing survivor (no
+ * body) stamps `merge` on each piece. The survivor's `supersedes` list cannot
+ * tell the kinds apart on its own.
+ */
+export type SupersedeKind = 'replace' | 'merge' | 'retract';
+
+function markSuperseded(item: MemoryItem, kind: SupersedeKind): void {
+  item.ext = { ...(item.ext ?? {}), supersede_kind: kind };
 }
 
 function decayDaysFor(type: MemoryType | undefined, root: string): number {
@@ -56,9 +101,21 @@ function decayDaysFor(type: MemoryType | undefined, root: string): number {
   return getDecayDays(loadConfig(root), type);
 }
 
-function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason: string): string {
+/** The refusal for operator memory reached over MCP: names the terminal command a human runs instead. */
+function operatorOverMcpError(item: MemoryItem): Error {
+  return new Error(
+    `"${item.id}" is operator-sourced (source: ${item.source}). ` +
+      'Superseding operator memory is not available over MCP; a human runs ' +
+      `\`memspec supersede ${item.id} --override-operator --reason "..."\` from a terminal (add --body for a replacement, --merge-from for a merge).`,
+  );
+}
+
+function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason: string, channel?: 'cli' | 'mcp'): string {
   if (item.state !== 'active') {
     throw new Error(`Item "${item.id}" is ${item.state}, not active`);
+  }
+  if (effectiveSourceKind(item) === 'operator' && channel === 'mcp') {
+    throw operatorOverMcpError(item);
   }
   if (effectiveSourceKind(item) === 'operator' && !overrideOperator) {
     throw new Error(
@@ -70,6 +127,40 @@ function assertSupersedable(item: MemoryItem, overrideOperator: boolean, reason:
     return `${reason} [override_operator used on operator-sourced record]`;
   }
   return reason;
+}
+
+/**
+ * The tombstone (lib/tombstone.ts) for the claim text a supersede leaves
+ * active (a replacement body, or the survivor of a no-body merge), judged
+ * against the state the supersede produces: `replaced` / `merged` are the ids
+ * this write archives, `newId` the record that holds the claim afterwards.
+ * The archive scanned is every layer of `view` plus `store` (tombstone.ts
+ * `readViewClaimIndex`). Throws the refusal; on the CLI with `allowRejected`
+ * returns the matches to log on the record. A restated merged piece refuses
+ * over MCP only: the CLI supersede is the operator's consolidation path and
+ * never ran a near-duplicate check.
+ */
+function assertNoRejectedValue(
+  store: MemspecStore,
+  view: CompositeStore,
+  claim: { title: string; body: string },
+  pending: { newId: string; replaced: string[]; merged: string[] },
+  options: SupersedeOptions,
+): RejectedValueMatch[] {
+  const viaMcp = options.channel === 'mcp';
+  const tokens = claimTokens(claim.title, claim.body);
+  const scan = scanArchive(readViewClaimIndex(store, [view]), { tokens, weight: tokenWeight(tokens) }, pending);
+  if (scan.rejected.length > 0 && (viaMcp || !options.allowRejected)) {
+    throw rejectedValueError('supersede', scan.rejected, viaMcp);
+  }
+  if (viaMcp && scan.merged.length > 0) throw mergedPieceError('supersede', scan.merged, true);
+  return scan.rejected;
+}
+
+function overrideNote(matches: RejectedValueMatch[], id: string): string {
+  return matches.length > 0
+    ? `\n⚠ --allow-rejected: ${id} written over ${matches.length} rejected value(s), logged in ext.rejected_value_overrides`
+    : '';
 }
 
 /**
@@ -155,61 +246,25 @@ function crossLayerTarget(composite: CompositeStore, targetId: string, options: 
   const target = owner.store.findById(targetId);
   if (!target) return null;
   local.store.init();
-  return withSupersedeLock(local.store.root, targetId, () => writeCrossLayerReplacement(composite, owner, local, target, body, options));
+  return withSupersedeLock(local.store.root, targetId, () =>
+    withFileLock(local.store.root, CLAIM_WRITE_LOCK, () => writeCrossLayerReplacement(composite, owner, local, target, body, options), { waitMs: 10_000 }),
+  );
 }
 
-/** A lock older than this is a crashed writer's, and is reclaimed. A cross-layer supersede takes milliseconds. */
-const SUPERSEDE_LOCK_STALE_MS = 30_000;
-
 /**
- * Run `fn` holding an exclusive per-target lock file in the writable layer's
- * machine-local subtree (`local/locks/supersede-<target>.lock`, created with
- * the `wx` flag, removed in `finally`). Two processes superseding the same
- * read-only record could otherwise both pass the "already superseded in this
- * view" guard and both write an active replacement: the guard reads the
- * store, the write lands after it, and nothing orders the two. A lock older
- * than `SUPERSEDE_LOCK_STALE_MS` is left by a crashed writer and is reclaimed.
+ * Run `fn` holding the per-target supersede lock in the writable layer's
+ * machine-local subtree (`local/locks/supersede-<target>.lock`, lib/lock.ts).
+ * Two processes superseding the same read-only record could otherwise both
+ * pass the "already superseded in this view" guard and both write an active
+ * replacement: the guard reads the store, the write lands after it, and
+ * nothing orders the two.
  */
 function withSupersedeLock<T>(storeRoot: string, targetId: string, fn: () => T): T {
-  const dir = join(storeRoot, 'local', 'locks');
-  const name = /^[A-Za-z0-9_-]{1,128}$/.test(targetId) ? targetId : createHash('sha1').update(targetId).digest('hex');
-  const path = join(dir, `supersede-${name}.lock`);
-  mkdirSync(dir, { recursive: true });
-  const busy = () => new Error(
-    `another supersede of "${targetId}" is in progress (lock ${path}); retry in a moment, ` +
+  return withFileLock(storeRoot, `supersede-${targetId}`, fn, {
+    busyMessage: (path) =>
+      `another supersede of "${targetId}" is in progress (lock ${path}); retry in a moment, ` +
       'or delete the lock file if no memspec process is running',
-  );
-  const acquire = (): number | null => {
-    try {
-      return openSync(path, 'wx');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
-      throw err;
-    }
-  };
-  let fd = acquire();
-  if (fd === null) {
-    let age = Number.POSITIVE_INFINITY;
-    try {
-      age = Date.now() - statSync(path).mtimeMs;
-    } catch {
-      // Released between our open and stat: reclaim below.
-    }
-    if (age < SUPERSEDE_LOCK_STALE_MS) throw busy();
-    rmSync(path, { force: true });
-    fd = acquire();
-    if (fd === null) throw busy();
-  }
-  try {
-    writeSync(fd, `${process.pid}\n`);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    return fn();
-  } finally {
-    rmSync(path, { force: true });
-  }
+  });
 }
 
 /** The check + write half of `crossLayerTarget`, run under the per-target lock. */
@@ -233,7 +288,7 @@ function writeCrossLayerReplacement(
         `supersede ${existing.id} instead`,
     );
   }
-  const reason = assertSupersedable(target, options.overrideOperator ?? false, options.reason);
+  const reason = assertSupersedable(target, options.overrideOperator ?? false, options.reason, options.channel);
 
   // Scope is validated against the store the record is written to.
   const explicitScope = options.scope !== undefined
@@ -242,10 +297,14 @@ function writeCrossLayerReplacement(
   const scope = explicitScope ?? target.scope;
 
   const newId = `ms_${ulid()}`;
+  // The scan covers every layer of the view (the read-only owner included),
+  // the same archive `remember` scans.
+  const overrides = assertNoRejectedValue(local.store, composite, { title: options.title ?? target.title, body }, { newId, replaced: [targetId], merged: [] }, options);
   const now = new Date().toISOString();
   const expires = new Date();
   expires.setUTCDate(expires.getUTCDate() + decayDaysFor(target.type, local.store.root));
-  const source = options.source ?? 'unknown';
+  // Over MCP an operator-pattern source is stored at agent tier (lib/source.ts).
+  const { source, claimed } = sourceForChannel(options.source ?? 'unknown', options.channel);
 
   const replacement: Parameters<typeof local.store.writeItem>[0] = {
     id: newId,
@@ -266,6 +325,10 @@ function writeCrossLayerReplacement(
   const carried = carryV011Fields([target]);
   if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
   if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
+  if (claimed) replacement.ext = { claimed_source: claimed };
+  if (overrides.length > 0) {
+    replacement.ext = { ...(replacement.ext ?? {}), rejected_value_overrides: rejectedValueOverrides(overrides, now, source) };
+  }
 
   local.store.writeItem(replacement);
   appendOutcome(local.store.root, targetId, 'corrected', { source, note: reason });
@@ -275,11 +338,14 @@ function writeCrossLayerReplacement(
     superseded_ids: [targetId],
     reason,
     pending_promotion: { layer: owner.name, target_id: targetId },
+    ...(claimed ? { source_warning: sourceDowngradeWarning(claimed, source) } : {}),
     message:
       `Superseded ${targetId} → ${newId} in this view (written to layer '${local.name}')\n` +
       `Reason: ${reason}\n` +
       `Pending promotion: ${targetId} lives in read-only layer '${owner.name}' and is unchanged there; ` +
-      `promote ${newId} to '${owner.name}' to supersede it for everyone (memspec status lists pending promotions)`,
+      `promote ${newId} to '${owner.name}' to supersede it for everyone (memspec status lists pending promotions)` +
+      (claimed ? `\n⚠ ${sourceDowngradeWarning(claimed, source)}` : '') +
+      overrideNote(overrides, newId),
   };
 }
 
@@ -302,7 +368,19 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   if (crossLayer) return crossLayer;
   const owner = composite.assertWritableLayerForId(targetId);
   const store = owner ? owner.store : new MemspecStore(options.cwd);
+  // Not found: refuse before the lock, which would create the store's
+  // local/locks directory under a cwd that holds no store.
+  if (!store.findById(targetId)) {
+    throw new Error(`Memory item "${targetId}" not found`);
+  }
+  // Every branch changes what the tombstone reads (a new claim, an archived
+  // record): the store-wide claim-write lock `remember` holds serializes the
+  // two, so a remember's check cannot interleave with a supersede's write.
+  return withFileLock(store.root, CLAIM_WRITE_LOCK, () => supersedeInStore(store, composite, targetId, options), { waitMs: 10_000 });
+}
 
+/** The check + write half of `runSupersede`, run under the store's claim-write lock. */
+function supersedeInStore(store: MemspecStore, view: CompositeStore, targetId: string, options: SupersedeOptions): SupersedeResult {
   const target = store.findById(targetId);
   if (!target) {
     throw new Error(`Memory item "${targetId}" not found`);
@@ -318,7 +396,12 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     mergeItems.push(item);
   }
 
-  const source = options.source ?? 'unknown';
+  // Over MCP an operator-pattern source is stored at agent tier (lib/source.ts):
+  // the replacement and the outcome log carry the downgraded string.
+  const { source, claimed } = sourceForChannel(options.source ?? 'unknown', options.channel);
+  const sourceWarning = claimed ? sourceDowngradeWarning(claimed, source) : undefined;
+  const downgradeNote = sourceWarning ? `\n⚠ ${sourceWarning}` : '';
+  const warningField = sourceWarning ? { source_warning: sourceWarning } : {};
   const overrideOperator = options.overrideOperator ?? false;
   const baseReason = options.reason;
 
@@ -333,15 +416,22 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
   // Replacement branch: mint a fresh record. Everything in mergeFrom plus the
   // target collapse into the new survivor.
   if (options.body !== undefined && options.body !== null) {
-    const targetReason = assertSupersedable(target, overrideOperator, baseReason);
-    const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason));
+    const targetReason = assertSupersedable(target, overrideOperator, baseReason, options.channel);
+    const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason, options.channel));
 
     const newId = `ms_${ulid()}`;
+    const collapsedIds = [target.id, ...mergeItems.map((i) => i.id)];
+    const replacementTitle = options.title ?? target.title;
+    const overrides = assertNoRejectedValue(
+      store,
+      view,
+      { title: replacementTitle, body: options.body },
+      { newId, replaced: [target.id], merged: mergeItems.map((i) => i.id) },
+      options,
+    );
     const now = new Date().toISOString();
     const expires = new Date();
     expires.setUTCDate(expires.getUTCDate() + decayDaysFor(target.type, store.root));
-
-    const collapsedIds = [target.id, ...mergeItems.map((i) => i.id)];
 
     const replacement: Parameters<typeof store.writeItem>[0] = {
       id: newId,
@@ -355,7 +445,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       last_verified: now,
       supersedes: collapsedIds,
       supersede_reason: baseReason,
-      title: options.title ?? target.title,
+      title: replacementTitle,
       body: options.body,
     };
     // A correction to a scoped claim is still that scope's knowledge. Omitted
@@ -373,11 +463,20 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     const carried = carryV011Fields([target, ...mergeItems]);
     if (carried.requiresHuman.length > 0) replacement.requires_human = carried.requiresHuman;
     if (carried.evidence.length > 0) replacement.evidence = carried.evidence;
+    if (claimed) replacement.ext = { claimed_source: claimed };
+    if (overrides.length > 0) {
+      replacement.ext = { ...(replacement.ext ?? {}), rejected_value_overrides: rejectedValueOverrides(overrides, now, source) };
+    }
     store.writeItem(replacement);
 
+    // Per record: the target's value is what the body corrects (`replace`,
+    // tombstoned); each merge_from id is consolidated into the new record
+    // (`merge`: restating it is a near-duplicate of the survivor). A caller
+    // correcting twins names the wrong one as the target, or supersedes each.
     target.state = 'superseded';
     target.superseded_by = newId;
     target.supersede_reason = targetReason;
+    markSuperseded(target, 'replace');
     store.moveToArchive(target, 'superseded');
 
     for (let i = 0; i < mergeItems.length; i++) {
@@ -385,6 +484,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       item.state = 'superseded';
       item.superseded_by = newId;
       item.supersede_reason = mergeReasons[i];
+      markSuperseded(item, 'merge');
       store.moveToArchive(item, 'superseded');
     }
 
@@ -401,7 +501,8 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       survivor_id: newId,
       superseded_ids: collapsedIds,
       reason: baseReason,
-      message: `Superseded ${collapsedIds.join(', ')} → ${newId}${mergedNote}\nReason: ${baseReason}${carriedLine}`,
+      ...warningField,
+      message: `Superseded ${collapsedIds.join(', ')} → ${newId}${mergedNote}\nReason: ${baseReason}${carriedLine}${downgradeNote}${overrideNote(overrides, newId)}`,
     };
   }
 
@@ -411,8 +512,26 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     if (target.state !== 'active') {
       throw new Error(`Survivor "${targetId}" is ${target.state}, not active`);
     }
+    // The survivor is rewritten too (supersedes, supersede_reason, scope), so
+    // an operator survivor gets the same guard as an operator target: refused
+    // over MCP, and on the CLI only with --override-operator (logged into the
+    // survivor's persisted reason).
+    const survivorReason = assertSupersedable(target, overrideOperator, baseReason, options.channel);
 
-    const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason));
+    const mergeReasons = mergeItems.map((item) => assertSupersedable(item, overrideOperator, baseReason, options.channel));
+
+    // The survivor's own text is the claim this merge leaves active: when a
+    // merged record is the current survivor of a correction, the correction's
+    // place moves to `target` (tombstone.ts "Place transfer"). Merging the
+    // current-value record into a record still stating the rejected value
+    // would otherwise make the old value the chain's active end.
+    const overrides = assertNoRejectedValue(
+      store,
+      view,
+      { title: target.title, body: target.body ?? '' },
+      { newId: target.id, replaced: [], merged: mergeItems.map((i) => i.id) },
+      options,
+    );
 
     const collapsedIds: string[] = [];
     for (let i = 0; i < mergeItems.length; i++) {
@@ -420,6 +539,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       item.state = 'superseded';
       item.superseded_by = target.id;
       item.supersede_reason = mergeReasons[i];
+      markSuperseded(item, 'merge');
       store.moveToArchive(item, 'superseded');
       collapsedIds.push(item.id);
     }
@@ -441,8 +561,19 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
       // Only reached once that set agreed, or the caller named a scope.
       scope: survivorScope,
       supersedes: merged,
-      supersede_reason: baseReason,
+      supersede_reason: survivorReason,
       distinct_from: distinctFrom.length > 0 ? distinctFrom : undefined,
+      ...(overrides.length > 0
+        ? {
+            ext: {
+              ...(target.ext ?? {}),
+              rejected_value_overrides: [
+                ...(Array.isArray(target.ext?.rejected_value_overrides) ? target.ext.rejected_value_overrides as Array<Record<string, unknown>> : []),
+                ...rejectedValueOverrides(overrides, new Date().toISOString(), source),
+              ],
+            },
+          }
+        : {}),
     });
 
     for (const collapsedId of collapsedIds) {
@@ -452,15 +583,17 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     return {
       survivor_id: target.id,
       superseded_ids: collapsedIds,
-      reason: baseReason,
-      message: `Merged ${collapsedIds.join(', ')} → ${target.id} (${collapsedIds.length} record(s) collapsed)\nReason: ${baseReason}`,
+      reason: survivorReason,
+      ...warningField,
+      message: `Merged ${collapsedIds.join(', ')} → ${target.id} (${collapsedIds.length} record(s) collapsed)\nReason: ${survivorReason}${downgradeNote}${overrideNote(overrides, target.id)}`,
     };
   }
 
   // Retraction branch: no body, no merge. Target moves to superseded with reason.
-  const targetReason = assertSupersedable(target, overrideOperator, baseReason);
+  const targetReason = assertSupersedable(target, overrideOperator, baseReason, options.channel);
   target.state = 'superseded';
   target.supersede_reason = targetReason;
+  markSuperseded(target, 'retract');
   store.moveToArchive(target, 'superseded');
   appendOutcome(store.root, target.id, 'corrected', { source, note: targetReason });
 
@@ -468,6 +601,7 @@ export function runSupersede(targetId: string, options: SupersedeOptions): Super
     survivor_id: target.id,
     superseded_ids: [target.id],
     reason: targetReason,
-    message: `Retracted ${targetId}\nReason: ${targetReason}`,
+    ...warningField,
+    message: `Retracted ${targetId}\nReason: ${targetReason}${downgradeNote}`,
   };
 }

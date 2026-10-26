@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { blobSha, checkAnchors, getCodeAnchors, projectRootForStore, resolveAnchorRepo } from '../lib/anchors.js';
 import { loadConfig } from '../lib/config.js';
+import { effectiveSourceKind, type WriteChannel } from '../lib/source.js';
 import { MemspecStore } from '../lib/store.js';
 import type { CodeAnchor, MemoryItem } from '../lib/types.js';
 
@@ -14,6 +15,12 @@ export interface ReconcileOptions {
   repairRenames?: boolean;
   /** v0.10: with `repairRenames`, actually write the re-points instead of listing them. */
   apply?: boolean;
+  /**
+   * Which surface invoked this. On `mcp`, `apply` never rewrites an
+   * operator-sourced record's anchors (even a byte-identical move): the
+   * repair is listed with `applied: false` and the CLI command to run.
+   */
+  channel?: WriteChannel;
 }
 
 export interface ReconciledFile {
@@ -35,6 +42,8 @@ export interface RenameRepair {
   from: string;
   to: string;
   applied: boolean;
+  /** Why an `apply` left this repair unwritten (an operator record over MCP). */
+  skipped?: string;
 }
 
 export interface ReconcileResult {
@@ -167,8 +176,18 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
         // Match on the exact (repo, file) entry, not file alone (S7).
         const isTopLevel = (item.anchors ?? []).some((x) => x.file === a.file && x.repo === a.repo);
         if (options.repairRenames && isTopLevel && blobSha(newAbs) === a.sha) {
-          repairs.push({ memory_id: item.id, from: a.file, to: displayNew, applied: options.apply === true });
-          if (options.apply) {
+          // Over MCP an operator record is read-only: list the re-point, never write it.
+          const operatorOverMcp = options.channel === 'mcp' && effectiveSourceKind(item) === 'operator';
+          repairs.push({
+            memory_id: item.id,
+            from: a.file,
+            to: displayNew,
+            applied: options.apply === true && !operatorOverMcp,
+            ...(options.apply && operatorOverMcp
+              ? { skipped: `operator-sourced; re-pointing operator memory is not available over MCP (a human runs \`memspec reconcile --repair-renames --apply\` from a terminal)` }
+              : {}),
+          });
+          if (options.apply && !operatorOverMcp) {
             const bucket = repointsByItem.get(item.id) ?? { item, moves: [] };
             bucket.moves.push({ fromFile: a.file, fromRepo: a.repo, to: displayNew });
             repointsByItem.set(item.id, bucket);
@@ -240,7 +259,7 @@ export function runReconcile(options: ReconcileOptions): ReconcileResult {
       lines.push('', 'Rename repair: no identical-content moves to re-point.');
     } else {
       lines.push('', `Rename repair (${options.apply ? 'APPLIED' : 'DRY-RUN'}) — ${repairs.length} anchor(s) re-pointed:`);
-      for (const r of repairs) lines.push(`  ${r.memory_id}: ${r.from} → ${r.to}`);
+      for (const r of repairs) lines.push(`  ${r.memory_id}: ${r.from} → ${r.to}${r.skipped ? ` (NOT APPLIED: ${r.skipped})` : ''}`);
       if (!options.apply) lines.push('  Re-run with --repair-renames --apply to write these re-points.');
     }
   }

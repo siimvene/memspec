@@ -117,6 +117,21 @@ export interface MemoryFrontmatter {
    *   than one the removed lexical auto-attach inferred; the drain script keeps asserted, drops the rest.
    * - ext.edge_removals: Array<{ type, to, removed_at, removed_by, reason }> — v0.10 audit log of edges
    *   dropped via `unrelate`, so a retraction is itself traceable.
+   * - ext.anchor_history: Array<{ at, source?, claimed_source?, evidence?, evidence_file?, anchors: Array<{ file, repo?, previous_sha, sha }> }> —
+   *   one entry per `verify --reanchor` that re-baselined changed anchors; the old shas are kept, never overwritten.
+   * - ext.rejected_value_overrides: Array<{ id, reason, superseded_by?, similarity, removed_values?, overridden_at, overridden_by }> —
+   *   written by `remember --allow-rejected` / `supersede --allow-rejected` (CLI only): the archived records whose rejected
+   *   value this record re-asserts (`removed_values`: the identifiers it carries that the correction removed).
+   * - ext.anchor_history: also appended by `anchor` when it moves an existing anchor to a new sha or drops it (`replace`),
+   *   with `via: "anchor"`; `sha` is null for a dropped anchor.
+   * - ext.supersede_kind: 'replace' | 'merge' | 'retract' — stamped by `supersede` on each record it archives, per record:
+   *   the target of a replacement body is `replace`, each merge_from id `merge` (with or without a body), a retraction
+   *   `retract`. The tombstone (lib/tombstone.ts) refuses a replaced or retracted value, an unstamped (pre-marker) one,
+   *   and a merged one whose chain to the active survivor crosses a replace/retract; a record whose every hop to an active
+   *   survivor is a merge is consolidation, refused as a near-duplicate of that survivor.
+   * - ext.claimed_source: string — the operator-pattern source an MCP caller passed; the record is stored at agent tier
+   *   with source "mcp:<claimed>" (operator authority derives from the channel). Also on ext.last_verification and
+   *   ext.anchor_history entries for a verify whose source was downgraded.
    */
   ext?: Record<string, unknown>;
 }

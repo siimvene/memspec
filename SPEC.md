@@ -228,12 +228,39 @@ When a supersede signal is received:
 4. If no replacement is provided, the target is superseded without replacement (the knowledge is simply invalidated).
 5. Both memories are retained — the supersede and the original.
 6. The **reason is persisted durably** as `supersede_reason` frontmatter on every record involved: the archived original and (when minted) the replacement.
+7. Each archived record is stamped `ext.supersede_kind`, per record: the target of a replacement is `replace` (its value is what the replacement corrects), a retracted target `retract`, and every `merge_from` id `merge` (consolidated into the survivor, with or without a replacement body). A caller correcting duplicates names the wrong one as the target, or supersedes each.
 
 Historical correction reasons whose values the v0.2 bug dropped come back from migration as `supersede_reason: "(predates reason tracking)"`.
 
 ### 4.2.1 Operator Record Protection
 
-Records whose effective `source_kind` is `operator` (the stored field, or inferred from the source string for records that predate it) MUST NOT be superseded without an explicit override flag (`--override-operator` / `override_operator`). When the override is used, that fact is appended to the persisted reason — overriding operator knowledge leaves a trace.
+Records whose effective `source_kind` is `operator` (the stored field, or inferred from the source string for records that predate it) MUST NOT be superseded without an explicit override flag (CLI `--override-operator`). This covers every supersede branch: replacement, retraction, `merge_from` naming an operator record, and a merge INTO an operator survivor (the survivor is rewritten). When the override is used, that fact is appended to the persisted reason — overriding operator knowledge leaves a trace.
+
+**Authority derives from the channel.** A caller-supplied flag or source string is never operator authority; only a human at the CLI is. Over MCP:
+
+- No tool creates, modifies, re-anchors, re-witnesses, merges into or retracts an operator-sourced record, and none takes an override parameter. `memspec_supersede` (every branch), `memspec_unrelate` and `memspec_relate` (edges are written into `from`), `memspec_verify` (a plain re-witness and `reanchor` alike; a needs_review result writes nothing and is still returned), `memspec_anchor`, `memspec_question` edits (`add` / `close` / `open` / `resolve`) and `memspec_remember` with `answers_question` refuse an operator record, naming the CLI command a human runs instead. `memspec_reconcile` with `repair_renames` + `apply` lists an operator record's re-point with `applied: false` and a `skipped` reason, never writes it.
+- No write produces operator tier. A source matching the operator pattern (`siim|user|human:*`) on `memspec_remember`, a `memspec_supersede` replacement, `memspec_question` create or `memspec_verify` is stored as `mcp:<source>` (which infers `agent`), the caller's string kept in `ext.claimed_source` (on `ext.last_verification` / `ext.anchor_history` entries for a verify), and the response carries `source_warning`. A verify over MCP never yields `verified_with: operator`.
+
+The CLI is unchanged: `--source siim` writes operator tier, and `--override-operator` is honoured.
+
+### 4.2.2 Rejected Values (Tombstone)
+
+A value a supersede replaced or retracted MUST NOT come back through another write. The rule applies to every write that carries claim text: `remember`, the replacement body of `supersede` (any target, including the record that replaced the value, and a cross-layer replacement), and the survivor's own text on a `supersede` with `merge_from` and no body.
+
+This refusal is a best-effort guardrail against an agent casually re-asserting a corrected value. It is lexical and has known residuals (below). The security boundary for agent writes is channel authority over operator-tier records (§4.2.1), which does not depend on wording; this check sits on top of it.
+
+- **Rejections.** Every archived claim in any layer of the write's read view (the write-target store plus every existing layer of the `stores:` view the write is made from, read-only layers included; a write into the `global` layer is judged against the project layer's archive too), of any type and any scope, whose `supersede_kind` is `replace` or `retract`, that carries no marker (archived before the marker existed), or that was merged into a record later replaced or retracted (a chain to the active survivor crossing a non-`merge` hop).
+- **Rule.** When the claim's similarity to a rejection R reaches the near-duplicate threshold, the write is refused unless R has an active survivor S, the claim carries no identifier (number or single-capital label) that R had and S lacks, the claim is no closer to R than to S, and it is closer to the record that holds R's place after the write (S, or the claim itself when the write supersedes S) than to R by more than a fixed margin (0.05). A retraction always refuses. Declared edges (`distinct_from`, `refines`, ...) exempt nothing: a third value passes, the old value with filler, in the survivor's wording, or next to the new value does not.
+- **Place transfer.** A merge that archives the active survivor S of a rejection R moves R's place to the record the merge keeps (the survivor of a no-body merge, or the replacement of a body plus `merge_from`). R is then judged against that record whatever their similarity: it is refused when it carries an identifier R had and S lacks, or is closer to R than to S. Below the similarity threshold the kept record is judged only when it is closer to R than to S, so a consolidation summary that mentions the removed number for an unrelated reason (equally far from both) stays writable. Merging the current-value record into an older record that still states the old value is refused, so the old value cannot become the chain's active end.
+- **Merged pieces.** Restating a record whose every hop to an active survivor is a `merge` is refused as a near-duplicate of that survivor (update it with `supersede`), never as a rejected value. On the CLI a `remember` with a declared edge to that survivor is exempt; over MCP the refusal is final, and a `supersede` body that restates another survivor's merged piece is refused there too.
+- **Override.** Over MCP a refusal is final. On the CLI `--allow-rejected` (on `remember` and `supersede`) writes anyway and logs each overridden rejection into the new record's `ext.rejected_value_overrides` (`id`, `reason`, `superseded_by`, `similarity`, `removed_values`, `overridden_at`, `overridden_by`).
+- **Residuals (measured).** The measure is weighted token overlap. On a two-sentence claim whose TTL was corrected from 30 to 15 minutes, the review probes measured:
+  - *Short claims.* A claim under the signal floor (token weight < 6, e.g. "Default branch is main", weight 3) scores 0 against everything and has no tombstone: superseded by "... is trunk", or a retracted "Postgres port 5433", it re-remembers over MCP.
+  - *Value respellings.* "thirty minutes" (0.87 to the rejected record, 0.87 to the survivor), "half an hour" (0.79/0.79), "30min" (0.79/0.79) and "1800 seconds" (0.76/0.76) carry no removed identifier and read as a third value: written via `remember` and via `supersede` of the survivor. ("30 min" and "30-minute" tokenize to the removed "30" and are refused.)
+  - *Filler dilution.* The old claim verbatim plus 20 words of unrelated filler scores 0.63, under the threshold, and is written (15 words: 0.67, refused).
+  - *Rewording below the threshold.* The old value in new wording at 0.62 is never judged.
+  - *Narrow margin on long claims.* A genuine current-value rewording scored 0.656 to the rejected record and 0.710 to the survivor (margin 0.053, passing by 0.003). In the other direction, a supersede of the survivor that mentions the history ("previously 30 minutes") is refused because it carries the removed "30".
+  - *Pending promotions.* A read-only record superseded only in this view (a cross-layer replacement awaiting promotion) is active in its own layer and is not treated as archived.
 
 ### 4.3 Implicit Correction (optional, requires index)
 
@@ -391,7 +418,7 @@ expires: {ISO 8601}                       # observations only — hard expiry
 - `type`: One of `fact`, `decision`, `procedure`.
 - `state`: One of the defined lifecycle states.
 - `created`: ISO 8601 timestamp.
-- `source`: Who wrote the record. Required at write time; `'unknown'` is rejected. MCP implementations SHOULD default it to the connected client name. `source_kind` is inferred at write time: source matching `siim|human:*|user` → `operator`; known import names → `import`; otherwise `agent`.
+- `source`: Who wrote the record. Required at write time; `'unknown'` is rejected. MCP implementations SHOULD default it to the connected client name. `source_kind` is inferred at write time: source matching `siim|human:*|user` → `operator`; known import names → `import`; otherwise `agent`. Over MCP an operator-pattern source is stored as `mcp:<source>` at agent tier (§4.2.1).
 
 ### 6.4 ID Format
 
@@ -458,7 +485,10 @@ Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate
 - `memspec_supersede` — replace, retract, or merge a memory.
   `body` filled → replacement (new active record). `body` empty → retraction.
   `merge_from` collapses N duplicates into one survivor atomically. Reason is
-  persisted on every record involved.
+  persisted on every record involved. No `override_operator` parameter:
+  operator records are refused on every branch (§4.2.1). A replacement body,
+  and the survivor of a no-body merge, is checked against rejected values
+  (§4.2.2), final over MCP
 - `memspec_relate` — wire a named link from one memory to another after the
   fact: `refines`, `supports`, `depends_on`, `derived_from` (v0.11),
   `conflicts_with`, or `distinct_from` (v0.13: compared, independent;
@@ -467,7 +497,11 @@ Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate
 - `memspec_verify` — re-witness a claim; anchorless verification requires
   evidence. `check_by` (v0.11) optionally pins the next review date explicitly
   instead of resetting to the type default — `"never"` pins an
-  identity/event-shaped fact permanently
+  identity/event-shaped fact permanently. `reanchor: true` re-baselines changed
+  anchors on the caller's word (requires evidence; previous shas kept in
+  `ext.anchor_history`), only to a blob in the working tree: a file missing
+  from this checkout stays needs_review even when the default branch has it.
+  Refused for an operator-sourced record (§4.2.1)
 - `memspec_unrelate` — remove a named edge from a memory (v0.10); the inverse
   of `memspec_relate`, logged durably into the record
 - `memspec_outcome` (v0.11) — record what happened after a retrieved memory
@@ -479,7 +513,10 @@ Optional MCP server. Fourteen tools (eleven stable since v0.4; `memspec_unrelate
   (the listed answers are the only candidates) or open; `add` / `close` /
   `open` / `resolve` edit an existing group. Retrieval is via
   `memspec_search` with `type: "question"`
-- `memspec_anchor` — link a claim to source files (records git blob SHAs)
+- `memspec_anchor` — link a claim to source files (records git blob SHAs);
+  an existing anchor moved to a new sha, or dropped by `replace`, is appended
+  to `ext.anchor_history` (`via: "anchor"`). Refused for an operator-sourced
+  record (§4.2.1)
 - `memspec_reconcile` — list anchored claims whose files have drifted
 - `memspec_status` — store health: counts by type/state/witness, stale,
   drifted anchors, declared and inferred conflicts, schema violations,
@@ -500,9 +537,9 @@ The v0.3 CLI deprecation shims (`add`, `correct`, `promote`, `consolidate`,
 ### 8.3 CLI
 
 Optional command-line interface (primary commands):
-- `memspec remember {type} "{title}" --source {who} [--anchor {files...}] [--pin] [--check-by {ts|never}]`
+- `memspec remember {type} "{title}" --source {who} [--anchor {files...}] [--pin] [--check-by {ts|never}] [--allow-rejected]`
 - `memspec observe "{text}" [--ttl {dur}]` — point-in-time observation with hard expiry
-- `memspec supersede {id} --reason "{reason}" [--body "{new content}"] [--title] [--merge-from {ids}] [--override-operator]`
+- `memspec supersede {id} --reason "{reason}" [--body "{new content}"] [--title] [--merge-from {ids}] [--override-operator] [--allow-rejected]`
 - `memspec verify {id} [--evidence "{what you checked}"] [--check-by {iso|never}]` (v0.11: `--check-by`)
 - `memspec outcome {id} {useful|dead_end|corrected} [--note "{text}"] [--source {who}]` (v0.11)
 - `memspec anchor {id} {files...}` / `memspec reconcile [--since {ref}]`

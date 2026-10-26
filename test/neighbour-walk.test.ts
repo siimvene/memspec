@@ -198,8 +198,10 @@ test('remember ranks mid-band suggestions by lexical closeness', async () => {
     cwd: target, body: 'closer', source: 'agent-a', tags: 'telemetry',
   });
 
+  // A body of its own keeps the child a different claim, below remember's
+  // title + body near-duplicate band; the ranking under test is title-only.
   const child = runRemember('fact', 'Telemetry pipeline buffers replicated events offline nightly', {
-    cwd: target, body: 'child', source: 'agent-b', tags: 'telemetry',
+    cwd: target, body: 'Child record: the overnight replay window and its retention policy.', source: 'agent-b', tags: 'telemetry',
   });
 
   assert.ok(child.suggestedConflicts && child.suggestedConflicts.length >= 1);

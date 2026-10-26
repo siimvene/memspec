@@ -84,9 +84,11 @@ program
   .option('--answers-question <qid>', 'register this new record as a competing answer to the given question id in the same call')
   .option('--valid-from <iso>', 'ISO 8601 timestamp — world-state truth window starts at this point (v0.5 temporal validity; orthogonal to --check-by)')
   .option('--valid-to <iso>', 'ISO 8601 timestamp — world-state truth window ends at this point (v0.5 temporal validity; orthogonal to --check-by)')
+  .option('--allow-rejected', 'write even though the claim near-matches a value a supersede or retraction rejected; the override is logged into the new record (CLI only)')
   .action((type: string, title: string, options: {
     cwd?: string; body?: string; source?: string; tags?: string; checkBy?: string; anchor?: string[]; anchorRoot?: string; store?: string; pin?: boolean;
     refines?: string[]; supports?: string[]; dependsOn?: string[]; conflictsWith?: string[]; derivedFrom?: string[]; distinctFrom?: string[]; requiresHuman?: string[]; evidence?: string[]; answersQuestion?: string; validFrom?: string; validTo?: string; scope?: string;
+    allowRejected?: boolean;
   }) => {
     const result = runRemember(type, title, {
       cwd: options.cwd,
@@ -114,6 +116,8 @@ program
       validFrom: options.validFrom,
       validTo: options.validTo,
       scope: options.scope,
+      allowRejected: options.allowRejected,
+      channel: 'cli',
     });
     console.log(result.message);
     if (result.duplicates && result.duplicates.length > 0) {
@@ -137,8 +141,9 @@ program
   .option('--override-operator', 'required to supersede operator-sourced records; logged into the reason')
   .option('--source <source>', 'corrector identifier')
   .option('--scope <name>', 'scope for the survivor; overrides the scope inherited from the records being collapsed ("universal" = visible everywhere)')
+  .option('--allow-rejected', 'write the replacement even though its body near-matches a value an earlier supersede or retraction rejected; the override is logged into the replacement (CLI only)')
   .action((id: string, options: {
-    cwd?: string; reason: string; body?: string; title?: string; mergeFrom?: string; overrideOperator?: boolean; source?: string; scope?: string;
+    cwd?: string; reason: string; body?: string; title?: string; mergeFrom?: string; overrideOperator?: boolean; source?: string; scope?: string; allowRejected?: boolean;
   }) => {
     const mergeFrom = options.mergeFrom?.split(',').map((s) => s.trim()).filter(Boolean);
     const result = runSupersede(id, {
@@ -150,6 +155,8 @@ program
       overrideOperator: options.overrideOperator,
       source: options.source,
       scope: options.scope,
+      allowRejected: options.allowRejected,
+      channel: 'cli',
     });
     console.log(result.message);
   });
@@ -254,8 +261,9 @@ program
   .option('--evidence-file <path-or-url>', 'attach committed evidence of the check: a local file (copied into evidence/) or an http(s) URL (recorded, not fetched); satisfies the anchorless-witness requirement')
   .option('--source <source>', 'who is verifying')
   .option('--check-by <value>', 'ISO timestamp or "never" — set explicitly on this clean verification instead of resetting to the type default')
-  .action((id: string, options: { cwd?: string; evidence?: string; evidenceFile?: string; source?: string; checkBy?: string }) => {
-    const result = runVerify(id, { cwd: options.cwd, evidence: options.evidence, evidenceFile: options.evidenceFile, source: options.source, checkBy: options.checkBy });
+  .option('--reanchor', 'you checked the claim still holds against the changed code: re-baseline changed anchors to the current file blob (previous shas kept in ext.anchor_history; requires --evidence)')
+  .action((id: string, options: { cwd?: string; evidence?: string; evidenceFile?: string; source?: string; checkBy?: string; reanchor?: boolean }) => {
+    const result = runVerify(id, { cwd: options.cwd, evidence: options.evidence, evidenceFile: options.evidenceFile, source: options.source, checkBy: options.checkBy, reanchor: options.reanchor, channel: 'cli' });
     console.log(result.message);
     if (result.status === 'needs_review') {
       process.exitCode = 1;
