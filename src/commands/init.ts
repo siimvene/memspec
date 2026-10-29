@@ -6,6 +6,7 @@ import { MemspecStore } from '../lib/store.js';
 import { findStoreDirUpward } from '../lib/registry.js';
 import { detectBrownfieldSources, importBrownfield } from '../lib/brownfield.js';
 import { patchAgentInstructions } from '../lib/agent-addon.js';
+import { harnessContext, installHarnesses } from '../lib/harness.js';
 import { canonical, claudeConfigDir, claudeConfigDirProblem, isDefaultClaudeConfigDir, shellQuote } from '../lib/claude-config.js';
 
 export interface InitOptions {
@@ -20,6 +21,12 @@ export interface InitOptions {
   skipImport?: boolean;
   skipPatch?: boolean;
   installHooks?: boolean;
+  /**
+   * Which agent harnesses to wire memspec into: `auto` (detect, the default),
+   * `none`, or a comma-separated list of harness ids. Naming an id forces it
+   * even when detection would miss it.
+   */
+  harness?: string;
   /**
    * C1: create a store here even though a parent directory already has one.
    * Without it, `init` in a subdirectory of a repo that already owns a store
@@ -402,14 +409,16 @@ export async function runInit(options: InitOptions): Promise<string> {
     lines.push(`Created ${mcpJsonPath} with memspec MCP server`);
   }
 
-  if (options.installHooks !== false) {
-    try {
-      const { messages } = installClaudeCodeHooks();
-      lines.push(...messages);
-    } catch (err) {
-      lines.push(`Warning: hook install failed (${err instanceof Error ? err.message : String(err)})`);
-    }
-  }
+  // Wire every selected agent harness, not just Claude Code. `auto` (default)
+  // detects what is installed; `--harness <id[,id]>` forces a specific set.
+  // installHarnesses contains per-adapter failures so init always finishes.
+  lines.push(
+    ...installHarnesses(
+      harnessContext(projectRoot, { installHooks: options.installHooks, skipPatch: options.skipPatch }),
+      options.harness,
+      installClaudeCodeHooks,
+    ),
+  );
 
   return lines.join('\n');
 }

@@ -38,6 +38,11 @@ export async function runCli(
         // developer's real config (hook install is skipped); a test that wants
         // the install passes its own CLAUDE_CONFIG_DIR and HOME.
         CLAUDE_CONFIG_DIR: NO_CLAUDE_CONFIG_DIR,
+        // init wires every detected agent harness. Pin the default to Claude
+        // (redirected above) so a test running `init` on the developer's real
+        // HOME never auto-detects ~/.codex, ~/.cursor, ... and wires them; a
+        // harness test passes --harness or its own MEMSPEC_HARNESS.
+        MEMSPEC_HARNESS: 'claude',
         // Overrides land last so a test can redirect HOME — and with it the
         // `--store global` target — away from the operator's real store.
         ...env,

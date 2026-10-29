@@ -443,14 +443,54 @@ Frontmatter fields per record: `id`, `kind` (`claim | observation | question`), 
 | `memspec import --format okf <dir> [--trusted]` | Import an OKF bundle. Trust is re-derived by default (no operator tier, no pins, witness recomputed from what can be re-checked here); `--trusted` keeps the bundle's trust fields for your own backups |
 | `memspec migrate` | v0.2/v0.3 → v0.4+ store migration (idempotent, dry-run by default) |
 
-## Hooks for Claude Code
+## Agent harnesses
 
-`memspec init` installs two hooks into the Claude Code config directory: `$CLAUDE_CONFIG_DIR/hooks/` when that variable is set, `~/.claude/hooks/` otherwise, and registers them in that directory's `settings.json`. Run it with the same `CLAUDE_CONFIG_DIR` your sessions use (an absolute path, as Claude Code requires; a relative or `~` value is refused); for several config directories, run it once per directory. A plain `node <~/.claude copy>` registration there is repointed to the directory's own copy; a wrapper, chained command or any other path is left alone:
+Memspec is not tied to one agent. `memspec init` wires it into **every harness it knows about and can detect**, and `--harness` overrides that choice:
+
+```bash
+memspec init                          # auto-detect what is installed
+memspec init --harness cursor,gemini  # force a specific set
+memspec init --harness none           # store only, wire nothing
+memspec init --harness generic        # unknown harness: get the contract written out
+```
+
+| Harness | What init wires |
+| --- | --- |
+| `claude` | Two hooks in `$CLAUDE_CONFIG_DIR` or `~/.claude`, registered in that directory's `settings.json` |
+| `cursor` | `.cursor/mcp.json` server entry + `.cursor/rules/memspec.mdc` (`alwaysApply: true`) |
+| `gemini` | `.gemini/settings.json` server entry + `GEMINI.md` instruction block |
+| `codex` | Marked block in the project's `.codex/config.toml` (Codex loads it for trusted projects; the user-level `~/.codex/config.toml` is never touched) + `AGENTS.md` |
+| `hermes` | `AGENTS.md` instruction block (skipped with `--skip-patch`) + an MCP block written to `.memspec/harnesses/hermes.yaml` to paste into `~/.hermes/config.yaml` |
+| `generic` | `.memspec/harnesses/generic.md`, the three-surface integration contract |
+
+An unknown harness id is an error, not a silent skip — a typo that quietly installs nothing is the failure worth refusing.
+
+Two rules keep this safe on a real machine:
+
+- **JSON is merged, never regenerated.** Cursor and Gemini configs are read, one key is added, and every other key and server is preserved.
+- **TOML and YAML are never round-tripped.** `.codex/config.toml` gets a marked block appended only when neither the block nor a hand-written `[mcp_servers.memspec]` table is present, and `~/.hermes/config.yaml` is never written at all: a hand-maintained file carries comments and ordering that a programmatic re-serialisation destroys, so memspec writes the block out for you to paste instead.
+
+### Context injection for any harness
+
+Hooks are a Claude Code concept. Any other harness gets the same effect with one command at session start:
+
+```bash
+memspec context --format markdown   # ranked, budgeted memory for this project
+memspec context --format json       # structured, for programmatic use
+```
+
+Point your harness's session-start mechanism at it and put stdout in the system prompt. It exits 0 with empty output on an empty store, so it is safe to call unconditionally. `.mcp.json` in the project root already carries the MCP server entry, so a harness that reads the MCP discovery file needs no further wiring.
+
+Everything above is configurable in `.memspec/config.yaml`. Pass `--no-install-hooks` to skip harness wiring entirely.
+
+### Hooks for Claude Code
+
+For `claude`, init installs two hooks into the Claude Code config directory: `$CLAUDE_CONFIG_DIR/hooks/` when that variable is set, `~/.claude/hooks/` otherwise, and registers them in that directory's `settings.json`. Run it with the same `CLAUDE_CONFIG_DIR` your sessions use (an absolute path, as Claude Code requires; a relative or `~` value is refused); for several config directories, run it once per directory. A plain `node <~/.claude copy>` registration there is repointed to the directory's own copy; a wrapper, chained command or any other path is left alone:
 
 - `memspec-session-start.js` — runs `memspec context` and injects memory into the session prompt so the agent doesn't have to remember to search; also surfaces unreviewed dream passes (counts + open questions) until a `_Reviewed:` marker lands (v0.8+)
 - `memspec-consolidate.js` — on commit, prompts the agent to write memories about what just shipped
 
-Configurable in `.memspec/config.yaml`. Pass `--no-install-hooks` to skip. See [`hooks/`](hooks/) for the scripts.
+See [`hooks/`](hooks/) for the scripts.
 
 ## Dream pass
 
