@@ -38,6 +38,8 @@ export interface HarnessContext {
   home: string;
   /** False when the caller passed `--no-install-hooks`. */
   installHooks: boolean;
+  /** True when the caller passed `--skip-patch`: adapters leave AGENTS.md/CLAUDE.md alone. */
+  skipPatch: boolean;
 }
 
 export interface HarnessAdapter {
@@ -101,11 +103,19 @@ function snippetPath(ctx: HarnessContext, id: HarnessId, ext: string): string {
  * is not already there. Existing content, comments and ordering are preserved
  * because nothing is ever parsed or re-serialised.
  */
+const MEMSPEC_TOML_TABLE = /^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:memspec|"memspec"|'memspec')[ \t]*\]/m;
+
 function appendMarkedToml(configPath: string, block: string, label: string): string {
-  const current = readFileSync(configPath, 'utf8');
+  const current = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
   if (current.includes(MCP_SNIPPET_MARKER_START)) {
     return `MCP config already registered at ${configPath} (${label})`;
   }
+  // A hand-written [mcp_servers.memspec] table without our markers: appending a
+  // second one would make the whole file invalid TOML (duplicate table).
+  if (MEMSPEC_TOML_TABLE.test(current)) {
+    return `MCP config already has an [mcp_servers.memspec] table at ${configPath}; left it unchanged (${label})`;
+  }
+  mkdirSync(join(configPath, '..'), { recursive: true });
   const next = current.trimEnd().length > 0 ? `${current.trimEnd()}\n\n${block}\n` : `${block}\n`;
   writeFileSync(configPath, next);
   return `Added memspec server to ${configPath} (${label})`;
@@ -141,16 +151,23 @@ const cursor: HarnessAdapter = {
 
     // Cursor rules: an .mdc with frontmatter, always applied. Cursor has no
     // session-start hook, so the rule file is where the doctrine lands.
+    // The frontmatter sits outside the marked block and is written only when the
+    // file is created; a rerun replaces the marked block alone, so it never
+    // stacks a second frontmatter into the middle of the file.
     const rulePath = join(ctx.projectRoot, '.cursor', 'rules', 'memspec.mdc');
-    const rule = [
+    const frontmatter = [
       '---',
       'description: Memspec project memory — search before assuming, anchor code claims',
       'alwaysApply: true',
       '---',
       '',
-      AGENT_ADDON_BLOCK,
     ].join('\n');
-    const { changed, created } = upsertMarkedBlock(rulePath, rule);
+    const created = !existsSync(rulePath);
+    if (created) {
+      mkdirSync(join(rulePath, '..'), { recursive: true });
+      writeFileSync(rulePath, frontmatter);
+    }
+    const { changed } = upsertMarkedBlock(rulePath, AGENT_ADDON_BLOCK);
     messages.push(
       changed
         ? `${created ? 'Created' : 'Updated'} ${rulePath}`
@@ -182,35 +199,48 @@ const gemini: HarnessAdapter = {
   },
 };
 
+/** Patch AGENTS.md/CLAUDE.md for a harness that reads it, unless --skip-patch. */
+function patchInstructionsFor(ctx: HarnessContext, label: string): string[] {
+  if (ctx.skipPatch) return [];
+  const patch = patchAgentInstructions(ctx.projectRoot);
+  return [
+    patch.changed
+      ? `${patch.created ? 'Created' : 'Patched'} ${patch.path} with memspec instructions (${label})`
+      : `Agent instructions already configured at ${patch.path} (${label})`,
+  ];
+}
+
+/**
+ * A TOML basic string. JSON's string escapes (`\\`, `\"`, `\n`, `\uXXXX`, ...)
+ * are all valid TOML basic-string escapes, so a Windows path or a quote in a
+ * directory name cannot corrupt the operator's config.
+ */
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function codexHome(ctx: HarnessContext): string {
+  const configured = ctx.env.CODEX_HOME?.trim();
+  return configured ? resolve(configured) : join(ctx.home, '.codex');
+}
+
 const codex: HarnessAdapter = {
   id: 'codex',
   label: 'Codex CLI',
   detect(ctx) {
-    return existsSync(join(ctx.home, '.codex'));
+    return existsSync(codexHome(ctx)) || existsSync(join(ctx.projectRoot, '.codex'));
   },
   install(ctx) {
-    const messages: string[] = [];
+    // Codex reads AGENTS.md from the project root.
+    const messages = patchInstructionsFor(ctx, 'Codex CLI');
 
-    // Codex reads AGENTS.md from the project root; init already patches it.
-    const patch = patchAgentInstructions(ctx.projectRoot);
-    messages.push(
-      patch.changed
-        ? `${patch.created ? 'Created' : 'Patched'} ${patch.path} with memspec instructions (Codex CLI)`
-        : `Agent instructions already configured at ${patch.path} (Codex CLI)`,
-    );
-
-    const configPath = join(ctx.home, '.codex', 'config.toml');
-    if (!existsSync(configPath)) {
-      // Do not invent a config file for a harness the operator may configure
-      // elsewhere; leave the snippet for them instead.
-      const snippet = snippetPath(ctx, 'codex', '.toml');
-      const block = codexTomlBlock(ctx);
-      writeFileSync(snippet, `${block}\n`);
-      messages.push(`Codex CLI config not found; wrote the block to paste at ${snippet}`);
-      return messages;
-    }
-
+    // The server entry pins `--cwd` to THIS project, so it belongs in the
+    // project's own `.codex/config.toml` (Codex loads it for trusted projects).
+    // Writing it into the user-level ~/.codex/config.toml would bind every
+    // Codex session, in every project, to the first project's store.
+    const configPath = join(ctx.projectRoot, '.codex', 'config.toml');
     messages.push(appendMarkedToml(configPath, codexTomlBlock(ctx), 'Codex CLI'));
+    messages.push('Codex CLI loads .codex/config.toml only for trusted projects; trust this project in Codex if memspec does not appear');
     return messages;
   },
 };
@@ -220,8 +250,8 @@ function codexTomlBlock(ctx: HarnessContext): string {
   return [
     MCP_SNIPPET_MARKER_START,
     '[mcp_servers.memspec]',
-    `command = "${entry.command}"`,
-    `args = [${entry.args.map((a) => `"${a}"`).join(', ')}]`,
+    `command = ${tomlString(entry.command)}`,
+    `args = [${entry.args.map(tomlString).join(', ')}]`,
     MCP_SNIPPET_MARKER_END,
   ].join('\n');
 }
@@ -233,29 +263,28 @@ const hermes: HarnessAdapter = {
     return existsSync(join(ctx.home, '.hermes'));
   },
   install(ctx) {
-    const messages: string[] = [];
-
     // Hermes reads AGENTS.md per project, so the doctrine lands there.
-    const patch = patchAgentInstructions(ctx.projectRoot);
-    messages.push(
-      patch.changed
-        ? `${patch.created ? 'Created' : 'Patched'} ${patch.path} with memspec instructions (Hermes Agent)`
-        : `Agent instructions already configured at ${patch.path} (Hermes Agent)`,
-    );
+    const messages = patchInstructionsFor(ctx, 'Hermes Agent');
 
     // ~/.hermes/config.yaml is hand-maintained YAML with comments; rewriting it
     // without a YAML round-trip would destroy them. Write the exact block out
-    // instead and leave the operator's config alone.
+    // instead and leave the operator's config alone. Values are JSON strings,
+    // which are valid YAML double-quoted scalars.
     const snippet = snippetPath(ctx, 'hermes', '.yaml');
     const entry = mcpServerEntry(ctx.projectRoot);
     const block = [
       'mcp_servers:',
       '  memspec:',
-      '    command: ' + entry.command,
+      `    command: ${JSON.stringify(entry.command)}`,
       '    args:',
-      ...entry.args.map((a) => `      - ${a}`),
+      ...entry.args.map((a) => `      - ${JSON.stringify(a)}`),
     ].join('\n');
-    writeFileSync(snippet, `# Paste under mcp_servers: in ~/.hermes/config.yaml\n${block}\n`);
+    writeFileSync(
+      snippet,
+      '# Merge into ~/.hermes/config.yaml. If it already has an mcp_servers: key,\n'
+        + '# add only the memspec: entry (and its indented lines) under that key.\n'
+        + `${block}\n`,
+    );
     messages.push(`Wrote the Hermes MCP block to ${snippet}`);
     return messages;
   },
@@ -413,7 +442,7 @@ export function installHarnesses(
 /** The context `init` builds for the adapters. */
 export function harnessContext(
   projectRoot: string,
-  options: { env?: NodeJS.ProcessEnv; home?: string; installHooks?: boolean } = {},
+  options: { env?: NodeJS.ProcessEnv; home?: string; installHooks?: boolean; skipPatch?: boolean } = {},
 ): HarnessContext {
   const env = options.env ?? process.env;
   return {
@@ -421,5 +450,6 @@ export function harnessContext(
     env,
     home: options.home ?? homedir(),
     installHooks: options.installHooks !== false,
+    skipPatch: options.skipPatch === true,
   };
 }

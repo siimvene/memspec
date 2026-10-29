@@ -414,7 +414,7 @@ export async function runInit(options: InitOptions): Promise<string> {
   // installHarnesses contains per-adapter failures so init always finishes.
   lines.push(
     ...installHarnesses(
-      harnessContext(projectRoot, { installHooks: options.installHooks }),
+      harnessContext(projectRoot, { installHooks: options.installHooks, skipPatch: options.skipPatch }),
       options.harness,
       installClaudeCodeHooks,
     ),

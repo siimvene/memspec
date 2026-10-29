@@ -641,11 +641,12 @@ The hook is implementation-specific (Claude Code PostToolUse) but the consolidat
 
 `init` MUST NOT assume one agent runtime. An implementation that installs hooks or writes harness configuration SHOULD route it through a per-harness adapter — one adapter per harness, each declaring how to detect its harness and how to wire itself — so that adding a harness is one adapter and no core change. The reference implementation's registry is `src/lib/harness.ts`, selected at install time by `--harness <auto|none|id[,id]>` where `auto` (the default) detects what is present.
 
-Three constraints are normative, because each one protects an operator's real machine:
+Four constraints are normative, because each one protects an operator's real machine:
 
 1. **A JSON config is merged, never regenerated.** Read the file, add the memspec key, preserve every other key and server.
 2. **A TOML or YAML config is never re-serialised.** A hand-maintained file carries comments and ordering that a programmatic round-trip destroys. Append a marked block when the marker is absent, or write the block out for the operator to paste.
-3. **No configuration is written into a directory that does not exist.** Detection requires the directory to already be present, so an install cannot sprout a config directory for an agent that is not installed on the machine.
+3. **A server entry pinned to one project is never written into a user-level config.** It would bind every session of that harness, in every project, to that project's store; use the harness's project-level config instead.
+4. **No configuration is written into a directory that does not exist.** Detection requires the directory to already be present, so an install cannot sprout a config directory for an agent that is not installed on the machine.
 
 An unknown harness id MUST be an error rather than a silent skip: an install that quietly wires nothing is worse than one that fails.
 

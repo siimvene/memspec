@@ -459,8 +459,8 @@ memspec init --harness generic        # unknown harness: get the contract writte
 | `claude` | Two hooks in `$CLAUDE_CONFIG_DIR` or `~/.claude`, registered in that directory's `settings.json` |
 | `cursor` | `.cursor/mcp.json` server entry + `.cursor/rules/memspec.mdc` (`alwaysApply: true`) |
 | `gemini` | `.gemini/settings.json` server entry + `GEMINI.md` instruction block |
-| `codex` | Marked block appended to `~/.codex/config.toml` (or a snippet to paste when that file does not exist) + `AGENTS.md` |
-| `hermes` | `AGENTS.md` instruction block + an MCP block written to `.memspec/harnesses/hermes.yaml` to paste into `~/.hermes/config.yaml` |
+| `codex` | Marked block in the project's `.codex/config.toml` (Codex loads it for trusted projects; the user-level `~/.codex/config.toml` is never touched) + `AGENTS.md` |
+| `hermes` | `AGENTS.md` instruction block (skipped with `--skip-patch`) + an MCP block written to `.memspec/harnesses/hermes.yaml` to paste into `~/.hermes/config.yaml` |
 | `generic` | `.memspec/harnesses/generic.md`, the three-surface integration contract |
 
 An unknown harness id is an error, not a silent skip — a typo that quietly installs nothing is the failure worth refusing.
@@ -468,7 +468,7 @@ An unknown harness id is an error, not a silent skip — a typo that quietly ins
 Two rules keep this safe on a real machine:
 
 - **JSON is merged, never regenerated.** Cursor and Gemini configs are read, one key is added, and every other key and server is preserved.
-- **TOML and YAML are never round-tripped.** `~/.codex/config.toml` gets a marked block appended only when the block is absent, and `~/.hermes/config.yaml` is never written at all: a hand-maintained file carries comments and ordering that a programmatic re-serialisation destroys, so memspec writes the block out for you to paste instead.
+- **TOML and YAML are never round-tripped.** `.codex/config.toml` gets a marked block appended only when neither the block nor a hand-written `[mcp_servers.memspec]` table is present, and `~/.hermes/config.yaml` is never written at all: a hand-maintained file carries comments and ordering that a programmatic re-serialisation destroys, so memspec writes the block out for you to paste instead.
 
 ### Context injection for any harness
 
