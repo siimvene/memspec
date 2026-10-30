@@ -53,7 +53,7 @@ const bodyText = (field = 'body') => z.string().max(MAX_BODY_CHARS, `${field} is
 
 const server = new McpServer({
   name: 'memspec',
-  version: '0.13.0',
+  version: '0.14.0',
 });
 
 function renderSearchText(payload: SearchPayload): string {

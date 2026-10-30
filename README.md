@@ -155,7 +155,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install -g memspec@0.13.0
+      - run: npm install -g memspec@0.14.0
       - name: memspec check
         env:
           EVENT: ${{ github.event_name }}

@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 — 2026-10-30
+
+**Faster, calibrated search; channel-derived write authority; OKF export/import; `init` wires every agent harness.** Behaviour change: MCP can no longer write or modify operator-tier records, and `override_operator` is gone from the MCP schema (see Security). Upgrade note: an agent relaying "the user says X" now writes an agent-tier record; operator records come from the CLI.
 
 Measured against a 2,366-record real store and a new wrongness benchmark; numbers in BENCHMARK.md.
 
